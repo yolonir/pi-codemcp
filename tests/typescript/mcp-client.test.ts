@@ -1,0 +1,115 @@
+import { expect, test } from "bun:test";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { SidecarClient } from "../../src/mcp-client.js";
+
+const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+
+async function waitForExit(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (isErrno(error) && error.code === "ESRCH") return;
+      throw error;
+    }
+    await Bun.sleep(20);
+  }
+  throw new Error(`process ${pid} did not exit`);
+}
+
+test("stdio client runs search/schema/chains, forwards cancellation, and cleans up", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "pi-mcp-codemode-ts-"));
+  const configPath = join(temporary, "mcp.json");
+  const alphaPidPath = join(temporary, "alpha.pid");
+  const betaPidPath = join(temporary, "beta.pid");
+  const fixture = join(root, "tests", "fixtures", "upstream_server.py");
+  const sidecarProject = join(root, "sidecar");
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      mcpServers: {
+        alpha: {
+          command: "uv",
+          args: ["run", "--project", sidecarProject, "--frozen", fixture, "alpha"],
+          env: { TEST_PID_FILE: alphaPidPath },
+        },
+        beta: {
+          command: "uv",
+          args: ["run", "--project", sidecarProject, "--frozen", fixture, "beta"],
+          env: { TEST_PID_FILE: betaPidPath },
+        },
+      },
+    }),
+    "utf8",
+  );
+
+  const client = new SidecarClient({
+    packageRoot: root,
+    environment: {
+      PI_MCP_CODEMODE_CONFIG: configPath,
+      PI_MCP_CODEMODE_OAUTH_DIR: join(temporary, "oauth"),
+      PI_MCP_CODEMODE_CATALOG_DIR: join(temporary, "catalog"),
+    },
+  });
+  let sidecarPid: number | null = null;
+  let upstreamPids: number[] = [];
+  try {
+    const [search, initialStatus] = await Promise.all([
+      client.call("search", { query: "save number", limit: 5 }),
+      client.call("status", {}),
+    ]);
+    expect((search.results as Array<{ name: string }>)[0]?.name).toBe("beta_save_number");
+    expect(initialStatus).toMatchObject({ connected: true, tool_count: 0 });
+
+    const schema = await client.call("get_schema", {
+      tools: ["alpha_get_number", "beta_save_number"],
+    });
+    expect(schema.tools).toHaveLength(2);
+
+    const execution = await client.call("execute", {
+      code: `
+          number = await alpha.get_number({"seed": 9})
+          saved = await beta.save_number({"value": number["value"]})
+          return {"identifier": saved["identifier"]}
+        `,
+    });
+    expect(execution).toMatchObject({
+      ok: true,
+      result: { identifier: "N-10" },
+      calls_made: 2,
+    });
+    expect(execution).not.toHaveProperty("stage");
+
+    const controller = new AbortController();
+    const cancelled = client.call(
+      "execute",
+      {
+        code: `return await alpha.slow_number({"delay_seconds": 5.0})`,
+      },
+      controller.signal,
+    );
+    setTimeout(() => controller.abort(), 150);
+    await expect(cancelled).rejects.toThrow();
+
+    const status = await client.call("status", {});
+    expect(status).toMatchObject({ connected: true, tool_count: 3 });
+    sidecarPid = client.pid;
+    expect(sidecarPid).not.toBeNull();
+    upstreamPids = [
+      Number(await readFile(alphaPidPath, "utf8")),
+      Number(await readFile(betaPidPath, "utf8")),
+    ];
+  } finally {
+    await client.close();
+    if (sidecarPid !== null) await waitForExit(sidecarPid);
+    for (const pid of upstreamPids) await waitForExit(pid);
+    await rm(temporary, { recursive: true, force: true });
+  }
+}, 30_000);
+
+function isErrno(value: unknown): value is NodeJS.ErrnoException {
+  return value instanceof Error && "code" in value;
+}

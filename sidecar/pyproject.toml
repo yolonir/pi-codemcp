@@ -1,0 +1,26 @@
+[project]
+name = "pi-mcp-codemode-sidecar"
+version = "0.1.0"
+description = "Python sidecar for pi-mcp-codemode"
+requires-python = ">=3.12"
+dependencies = [
+  "fastmcp==3.4.4",
+  "httpx>=0.28.1,<1",
+  "pydantic>=2.11.7,<3",
+  "pydantic-monty==0.0.18",
+  "py-key-value-aio[filetree,pydantic]==0.4.5",
+  "rapidfuzz>=3.14.3,<4",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4.1,<9",
+  "pytest-asyncio>=1.2.0,<2",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = [".."]
+
+[tool.uv]
+package = false

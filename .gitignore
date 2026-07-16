@@ -1,0 +1,12 @@
+node_modules/
+dist/
+docs/
+.pi/
+sidecar/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.tgz
+.DS_Store
+.pi-init.md
