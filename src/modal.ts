@@ -709,7 +709,9 @@ function wrapPlainText(text: string, width: number): string[] {
 }
 
 function modalBodyRows(): number {
-  const overlayRows = Math.floor((process.stdout.rows ?? 24) * 0.85);
+  const reportedRows = process.stdout.rows;
+  const terminalRows = typeof reportedRows === "number" && reportedRows > 0 ? reportedRows : 24;
+  const overlayRows = Math.floor(terminalRows * 0.85);
   // Frame, Box padding, header, and footer consume six rows; keep one row as
   // safety because Pi clips overlays at maxHeight before the final border.
   return Math.max(1, overlayRows - 7);

@@ -20,6 +20,17 @@ const theme = {
   bold: (text: string) => text,
 } as unknown as Theme;
 
+function renderWithRows(component: Component | undefined, width: number, rows: number): string[] {
+  const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+  Object.defineProperty(process.stdout, "rows", { value: rows, configurable: true });
+  try {
+    return component?.render(width) ?? [];
+  } finally {
+    if (descriptor) Object.defineProperty(process.stdout, "rows", descriptor);
+    else Reflect.deleteProperty(process.stdout, "rows");
+  }
+}
+
 test("server status parser preserves server and tool policy state", () => {
   expect(
     serverStatesFromStatus({
@@ -157,7 +168,7 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
     overlayOptions: { width: "90%", minWidth: 72, maxHeight: "85%" },
   });
   expect(component).toBeDefined();
-  const lines = component?.render(90) ?? [];
+  const lines = renderWithRows(component, 90, 0);
   expect(lines[0]).toBe(`╭${"─".repeat(88)}╮`);
   expect(lines.at(-1)).toBe(`╰${"─".repeat(88)}╯`);
   expect(lines.length).toBeLessThanOrEqual(Math.floor(24 * 0.85));
@@ -170,24 +181,15 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   await Bun.sleep(0);
   expect(discoveries).toEqual(["grafana"]);
   expect(servers[0]?.tools[0]).toMatchObject({ name: "query", enabled: true });
-  const originalRows = process.stdout.rows;
-  Object.defineProperty(process.stdout, "rows", { value: 60, configurable: true });
-  try {
-    const wideLines = component?.render(140) ?? [];
-    const cardTop = wideLines.findIndex((line) => line.includes("╭─ query"));
-    const toolsHeading = wideLines.findIndex((line) => line.includes("TOOLS"));
-    expect(cardTop).toBe(toolsHeading + 1);
-    expect(wideLines.join("\n")).toContain("Run a query and return");
-    expect(wideLines[cardTop]?.match(/│/g)).toHaveLength(3);
-    const narrowLines = component?.render(90) ?? [];
-    const narrowFooter = narrowLines.findIndex((line) => line.includes("tab settings"));
-    expect(narrowLines[narrowFooter - 1]).toContain("╰──");
-  } finally {
-    Object.defineProperty(process.stdout, "rows", {
-      value: originalRows,
-      configurable: true,
-    });
-  }
+  const wideLines = renderWithRows(component, 140, 60);
+  const cardTop = wideLines.findIndex((line) => line.includes("╭─ query"));
+  const toolsHeading = wideLines.findIndex((line) => line.includes("TOOLS"));
+  expect(cardTop).toBe(toolsHeading + 1);
+  expect(wideLines.join("\n")).toContain("Run a query and return");
+  expect(wideLines[cardTop]?.match(/│/g)).toHaveLength(3);
+  const narrowLines = renderWithRows(component, 90, 60);
+  const narrowFooter = narrowLines.findIndex((line) => line.includes("tab settings"));
+  expect(narrowLines[narrowFooter - 1]).toContain("╰──");
 
   component?.handleInput?.("\u001b[C");
   component?.handleInput?.("\r");
