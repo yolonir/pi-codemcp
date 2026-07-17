@@ -4,13 +4,13 @@ import ast
 import asyncio
 import os
 import textwrap
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterable
+from typing import TYPE_CHECKING
 
 from fastmcp import Client, FastMCP
-from mcp import types as mcp_types
+from fastmcp.mcp_config import RemoteMCPServer, StdioMCPServer
 
 from .catalog_cache import CatalogCache
 from .executor import ExecutionResponse, ExecutionSettings, MontyExecutor
@@ -27,26 +27,37 @@ from .schemas import (
     normalize_mcp_config,
 )
 
-DEFAULT_CONFIG_PATH = Path.home() / ".pi" / "agent" / "mcp.json"
-DEFAULT_STATE_DIR = Path.home() / ".pi" / "agent" / "pi-mcp-codemode"
-DEFAULT_OAUTH_DIR = DEFAULT_STATE_DIR / "oauth"
-DEFAULT_CATALOG_DIR = DEFAULT_STATE_DIR / "catalog"
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterable
+
+    from fastmcp.client.transports import ClientTransport
+    from mcp import types as mcp_types
+
+    from .json_types import JsonObject, JsonValue
+
+DEFAULT_AGENT_DIR = Path.home() / ".pi" / "agent"
+CODEMCP_AGENT_DIR_ENV = "PI_CODEMCP_AGENT_DIR"
+PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR"
+MAX_SCHEMAS_PER_REQUEST = 20
+
+type ServerConfig = StdioMCPServer | RemoteMCPServer
 
 
 @dataclass(slots=True)
 class ServerHandle:
     info: NormalizedServerInfo
-    server_config: Any
+    server_config: ServerConfig
     cache: CatalogCache
     tools: list[mcp_types.Tool] | None = None
-    client: Client[Any] | None = None
+    client: Client[ClientTransport] | None = None
+    _exit_stack: AsyncExitStack | None = None
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @classmethod
     def create(
         cls,
         info: NormalizedServerInfo,
-        server_config: Any,
+        server_config: ServerConfig,
         cache: CatalogCache,
     ) -> ServerHandle:
         return cls(
@@ -65,7 +76,8 @@ class ServerHandle:
             try:
                 tools = await client.list_tools()
                 self.tools = tools
-                self.cache.save(
+                await asyncio.to_thread(
+                    self.cache.save,
                     self.info.name,
                     self.info.config_fingerprint,
                     tools,
@@ -78,33 +90,41 @@ class ServerHandle:
     async def call_tool(
         self,
         name: str,
-        arguments: dict[str, Any],
+        arguments: JsonObject,
         *,
-        timeout: float,
+        timeout_seconds: float,
     ) -> mcp_types.CallToolResult:
         async with self._lock:
             client = await self._connect_locked()
-        return await client.call_tool_mcp(name, arguments, timeout=timeout)
+        return await client.call_tool_mcp(name, arguments, timeout=timeout_seconds)
 
     async def close(self) -> None:
         async with self._lock:
             await self._disconnect_locked()
 
-    async def _connect_locked(self) -> Client[Any]:
+    async def _connect_locked(self) -> Client[ClientTransport]:
         if self.client is not None:
             return self.client
-        client: Client[Any] = Client(
-            self.server_config.to_transport(),
-            name=f"pi-mcp-codemode-{self.info.name}",
-        )
-        await client.__aenter__()
+        exit_stack = AsyncExitStack()
+        try:
+            client = await exit_stack.enter_async_context(
+                Client(
+                    self.server_config.to_transport(),
+                    name=f"pi-codemcp-{self.info.name}",
+                )
+            )
+        except BaseException:
+            await exit_stack.aclose()
+            raise
+        self._exit_stack = exit_stack
         self.client = client
         return client
 
     async def _disconnect_locked(self) -> None:
-        client, self.client = self.client, None
-        if client is not None:
-            await client.__aexit__(None, None, None)
+        exit_stack, self._exit_stack = self._exit_stack, None
+        self.client = None
+        if exit_stack is not None:
+            await exit_stack.aclose()
 
 
 @dataclass(slots=True)
@@ -137,10 +157,7 @@ class GatewayRuntime:
             for name, server_config in normalized.config.mcpServers.items()
         }
         catalog = ToolCatalog.from_server_tools(
-            {
-                name: handle.tools or []
-                for name, handle in handles.items()
-            },
+            {name: handle.tools or [] for name, handle in handles.items()},
             handles.keys(),
         )
         return cls(
@@ -185,8 +202,10 @@ class GatewayRuntime:
     ) -> SchemaResponse:
         if not tools:
             raise ValueError("tools must contain at least one tool name")
-        if len(tools) > 20:
-            raise ValueError("at most 20 tool schemas can be requested at once")
+        if len(tools) > MAX_SCHEMAS_PER_REQUEST:
+            raise ValueError(
+                f"at most {MAX_SCHEMAS_PER_REQUEST} tool schemas can be requested at once"
+            )
         requested_servers: set[str] = set()
         for tool_name in tools:
             for server in sorted(self.handles, key=len, reverse=True):
@@ -200,13 +219,13 @@ class GatewayRuntime:
         await self._ensure_servers_discovered(self._referenced_servers(code))
         self.executor.update_catalog(self.catalog)
 
-        async def dispatch(public_name: str, arguments: dict[str, Any]) -> Any:
+        async def dispatch(public_name: str, arguments: JsonObject) -> JsonValue:
             spec = self.catalog.tools[public_name]
             handle = self.handles[spec.server]
             result = await handle.call_tool(
                 spec.backend_name,
                 arguments,
-                timeout=self.executor.settings.tool_timeout_seconds,
+                timeout_seconds=self.executor.settings.tool_timeout_seconds,
             )
             return self.catalog.normalize_result(public_name, result)
 
@@ -245,20 +264,14 @@ class GatewayRuntime:
             return
         async with self._catalog_lock:
             self.catalog = ToolCatalog.from_server_tools(
-                {
-                    name: handle.tools or []
-                    for name, handle in self.handles.items()
-                },
+                {name: handle.tools or [] for name, handle in self.handles.items()},
                 self.handles.keys(),
             )
             self.executor.update_catalog(self.catalog)
 
     def _referenced_servers(self, code: str) -> set[str]:
         normalized = textwrap.dedent(code).strip("\n")
-        wrapped = (
-            "async def __codemode_main():\n"
-            f"{textwrap.indent(normalized, '    ')}\n"
-        )
+        wrapped = f"async def __codemcp_main():\n{textwrap.indent(normalized, '    ')}\n"
         try:
             tree = ast.parse(wrapped, mode="exec")
         except SyntaxError:
@@ -273,34 +286,41 @@ class GatewayRuntime:
         }
 
 
-_runtime: GatewayRuntime | None = None
+@dataclass(slots=True)
+class RuntimeState:
+    runtime: GatewayRuntime | None = None
+
+
+_runtime_state = RuntimeState()
 
 
 def _require_runtime() -> GatewayRuntime:
-    if _runtime is None:
+    if _runtime_state.runtime is None:
         raise RuntimeError("Code Mode sidecar is not initialized")
-    return _runtime
+    return _runtime_state.runtime
+
+
+def _runtime_paths() -> tuple[Path, Path, Path]:
+    raw_agent_dir = os.environ.get(CODEMCP_AGENT_DIR_ENV) or os.environ.get(PI_AGENT_DIR_ENV)
+    agent_dir = Path(raw_agent_dir).expanduser() if raw_agent_dir else DEFAULT_AGENT_DIR
+    state_dir = agent_dir / "pi-codemcp"
+    return agent_dir / "mcp.json", state_dir / "oauth", state_dir / "catalog"
 
 
 @asynccontextmanager
-async def lifespan(_: FastMCP[Any]) -> AsyncIterator[None]:
-    global _runtime
-    config_path = Path(os.environ.get("PI_MCP_CODEMODE_CONFIG", DEFAULT_CONFIG_PATH)).expanduser()
-    oauth_dir = Path(os.environ.get("PI_MCP_CODEMODE_OAUTH_DIR", DEFAULT_OAUTH_DIR)).expanduser()
-    catalog_dir = Path(
-        os.environ.get("PI_MCP_CODEMODE_CATALOG_DIR", DEFAULT_CATALOG_DIR)
-    ).expanduser()
-    _runtime = GatewayRuntime.create(config_path, oauth_dir, catalog_dir)
+async def lifespan(_: FastMCP[None]) -> AsyncIterator[None]:
+    config_path, oauth_dir, catalog_dir = _runtime_paths()
+    _runtime_state.runtime = GatewayRuntime.create(config_path, oauth_dir, catalog_dir)
     try:
         yield
     finally:
-        runtime, _runtime = _runtime, None
+        runtime, _runtime_state.runtime = _runtime_state.runtime, None
         if runtime is not None:
             await runtime.close()
 
 
 mcp = FastMCP(
-    "pi-mcp-codemode-sidecar",
+    "pi-codemcp-sidecar",
     instructions=(
         "Search for MCP tools, inspect their compact typed SDK signatures, then execute "
         "a sandboxed Python chain."

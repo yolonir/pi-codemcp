@@ -61,14 +61,27 @@ def write_config(
     )
 
 
+def test_runtime_paths_honor_pi_agent_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PI_CODEMCP_AGENT_DIR", raising=False)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path))
+
+    config, oauth, catalog = gateway._runtime_paths()
+
+    assert config == tmp_path / "mcp.json"
+    assert oauth == tmp_path / "pi-codemcp" / "oauth"
+    assert catalog == tmp_path / "pi-codemcp" / "catalog"
+
+
 def configure_environment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     config_path: Path,
 ) -> None:
-    monkeypatch.setenv("PI_MCP_CODEMODE_CONFIG", str(config_path))
-    monkeypatch.setenv("PI_MCP_CODEMODE_OAUTH_DIR", str(tmp_path / "oauth"))
-    monkeypatch.setenv("PI_MCP_CODEMODE_CATALOG_DIR", str(tmp_path / "catalog"))
+    assert config_path == tmp_path / "mcp.json"
+    monkeypatch.setenv("PI_CODEMCP_AGENT_DIR", str(tmp_path))
 
 
 @pytest.mark.asyncio
@@ -160,7 +173,7 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
         assert beta_pid.exists()
         connected_pids = [int(alpha_pid.read_text()), int(beta_pid.read_text())]
 
-    assert gateway._runtime is None
+    assert gateway._runtime_state.runtime is None
     for pid in connected_pids:
         await wait_for_process_exit(pid)
 
@@ -241,7 +254,9 @@ async def test_catalog_cache_invalidates_only_changed_server(
     )
     second = Client(gateway.mcp)
     async with second:
-        status = structured_data((await second.call_tool("status", {})).structured_content)
+        status = structured_data(
+            (await second.call_tool("status", {})).structured_content
+        )
         counts = {item["name"]: item["tool_count"] for item in status["upstreams"]}
         assert counts == {"alpha": 0, "beta": 1}
         await second.call_tool("search", {"query": "number"})

@@ -1,30 +1,41 @@
 {
-  "name": "pi-mcp-codemode",
+  "name": "pi-codemcp",
   "version": "0.1.0",
   "description": "Typed, sandboxed Code Mode access to configured MCP servers for Pi",
   "type": "module",
-  "private": true,
+  "packageManager": "bun@1.3.10",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "pi-package",
     "mcp",
     "code-mode"
   ],
   "files": [
-    "extensions",
-    "src",
-    "sidecar",
+    "extensions/index.ts",
+    "src/*.ts",
+    "sidecar/*.py",
+    "sidecar/pyproject.toml",
+    "sidecar/uv.lock",
+    ".python-version",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "bun run test:ts && bun run test:python",
-    "test:ts": "bun test tests/typescript",
-    "test:python": "uv run --project sidecar --frozen pytest tests/python -q",
-    "typecheck": "tsc --noEmit",
+    "check": "just check",
+    "check:ts": "bun run typecheck && bun run lint && bun run test:ts",
+    "format": "biome check --write .",
     "lint": "biome check .",
-    "lint:fix": "biome check --write .",
-    "check": "bun run typecheck && bun run lint && bun run test"
+    "prepublishOnly": "just check && just release-check",
+    "test": "bun run test:ts && bun run test:python",
+    "test:python": "uv run --project sidecar pytest tests/python -q",
+    "test:ts": "bun test tests/typescript",
+    "typecheck": "tsc --noEmit"
   },
   "pi": {
     "extensions": [
@@ -34,16 +45,38 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0"
   },
+  "optionalDependencies": {
+    "@manzt/uv-darwin-arm64": "0.8.13",
+    "@manzt/uv-darwin-x64": "0.8.13",
+    "@manzt/uv-linux-arm64": "0.8.13",
+    "@manzt/uv-linux-x64": "0.8.13",
+    "@manzt/uv-win32-arm64": "0.8.13",
+    "@manzt/uv-win32-ia32": "0.8.13",
+    "@manzt/uv-win32-x64": "0.8.13"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@biomejs/biome": "2.5.3",
-    "@earendil-works/pi-coding-agent": "0.80.6",
-    "@earendil-works/pi-tui": "0.80.6",
-    "@types/bun": "latest",
+    "@earendil-works/pi-agent-core": "0.80.7",
+    "@earendil-works/pi-ai": "0.80.7",
+    "@earendil-works/pi-coding-agent": "0.80.7",
+    "@earendil-works/pi-tui": "0.80.7",
+    "@types/bun": "1.3.14",
     "typebox": "1.3.6",
     "typescript": "5.9.3"
   }

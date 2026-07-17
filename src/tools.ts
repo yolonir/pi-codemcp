@@ -7,22 +7,22 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import type { CodeModeLifecycle } from "./lifecycle.js";
-import { type CodeModeOutputDetails, formatCodeModeOutput } from "./output.js";
+import type { CodeMcpLifecycle } from "./lifecycle.js";
+import { type CodeMcpOutputDetails, formatCodeMcpOutput } from "./output.js";
 
-interface SearchRenderDetails extends CodeModeOutputDetails {
+interface SearchRenderDetails extends CodeMcpOutputDetails {
   matchCount: number;
   totalToolCount: number;
   serverCount: number;
   preview: string[];
 }
 
-interface SchemaRenderDetails extends CodeModeOutputDetails {
+interface SchemaRenderDetails extends CodeMcpOutputDetails {
   toolCount: number;
   preview: string[];
 }
 
-interface ExecuteRenderDetails extends CodeModeOutputDetails {
+interface ExecuteRenderDetails extends CodeMcpOutputDetails {
   ok: boolean;
   failureStage?: string;
   callsMade: number;
@@ -55,7 +55,7 @@ const SchemaParameters = Type.Object({
     minItems: 1,
     maxItems: 20,
     uniqueItems: true,
-    description: "Exact names returned by codemode_search",
+    description: "Exact names returned by codemcp_search",
   }),
 });
 
@@ -67,14 +67,14 @@ const ExecuteParameters = Type.Object({
   }),
 });
 
-export function registerCodeModeTools(pi: ExtensionAPI, lifecycle: CodeModeLifecycle): void {
+export function registerCodeMcpTools(pi: ExtensionAPI, lifecycle: CodeMcpLifecycle): void {
   pi.registerTool({
-    name: "codemode_search",
+    name: "codemcp_search",
     label: "MCP Search",
     description: "Search configured upstream MCP tools by capability.",
     promptSnippet: "Search configured upstream MCP tools by capability",
     promptGuidelines: [
-      "Use codemode_search before codemode_get_schema when the exact upstream MCP tool names are unknown.",
+      "Use codemcp_search before codemcp_get_schema when the exact upstream MCP tool names are unknown.",
     ],
     parameters: SearchParameters,
     async execute(_toolCallId, params, signal, onUpdate) {
@@ -91,7 +91,7 @@ export function registerCodeModeTools(pi: ExtensionAPI, lifecycle: CodeModeLifec
         },
         signal,
       );
-      const output = formatCodeModeOutput(result);
+      const output = formatCodeMcpOutput(result);
       const results = Array.isArray(result.results) ? result.results : [];
       const preview = results
         .slice(0, 3)
@@ -137,12 +137,12 @@ export function registerCodeModeTools(pi: ExtensionAPI, lifecycle: CodeModeLifec
   });
 
   pi.registerTool({
-    name: "codemode_get_schema",
+    name: "codemcp_get_schema",
     label: "MCP Schema",
     description: "Return compact typed Python SDK signatures for selected MCP tools.",
     promptSnippet: "Inspect compact typed signatures for selected MCP tools",
     promptGuidelines: [
-      "Use codemode_get_schema for the exact tools selected by codemode_search before writing a codemode_execute chain.",
+      "Use codemcp_get_schema for the exact tools selected by codemcp_search before writing a codemcp_execute chain.",
     ],
     parameters: SchemaParameters,
     async execute(_toolCallId, params, signal, onUpdate) {
@@ -151,7 +151,7 @@ export function registerCodeModeTools(pi: ExtensionAPI, lifecycle: CodeModeLifec
         details: undefined,
       });
       const result = await lifecycle.request("get_schema", { tools: params.tools }, signal);
-      const output = formatCodeModeOutput(result);
+      const output = formatCodeMcpOutput(result);
       const tools = Array.isArray(result.tools) ? result.tools : [];
       return {
         content: [{ type: "text", text: output.text }],
@@ -185,14 +185,15 @@ export function registerCodeModeTools(pi: ExtensionAPI, lifecycle: CodeModeLifec
   });
 
   pi.registerTool({
-    name: "codemode_execute",
+    name: "codemcp_execute",
     label: "MCP Execute",
     description:
       "Type-check and execute one sandboxed Python MCP chain. Supports sequential and dependent calls, loops, conditions, cross-server calls, and all upstream tools. The code has no host filesystem, environment, network, or subprocess access. Return a compact final value smaller than 16 KiB; oversized values fail with a shape summary.",
     promptSnippet: "Run a typed, sandboxed multi-call chain across configured MCP servers",
     promptGuidelines: [
-      "Use codemode_execute only after inspecting the needed typed SDK signatures with codemode_get_schema; call the returned server.method facade and use top-level return for the compact final value.",
-      "A failed codemode_execute preflight performs zero MCP calls; correct the reported type error and retry.",
+      "Use codemcp_execute if you know tool schemas; call the returned server.method facade and use top-level return for the compact final value.",
+      "It is always better to execute multiple MCP calls in one codemcp_execute call rather than multiple single-call invocations.",
+      "You can chain multiple MCP results, call in parallel or sequentially, you have full control over the execution flow as long as it is efficient",
     ],
     parameters: ExecuteParameters,
     async execute(_toolCallId, params, signal, onUpdate) {
@@ -201,7 +202,7 @@ export function registerCodeModeTools(pi: ExtensionAPI, lifecycle: CodeModeLifec
         details: undefined,
       });
       const result = await lifecycle.request("execute", { code: params.code }, signal);
-      const output = formatCodeModeOutput(result);
+      const output = formatCodeMcpOutput(result);
       const ok = result.ok === true;
       return {
         content: [{ type: "text", text: output.text }],

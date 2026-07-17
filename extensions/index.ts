@@ -1,15 +1,15 @@
 import { DynamicBorder, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Container, matchesKey, Text } from "@earendil-works/pi-tui";
-import { CodeModeLifecycle } from "../src/lifecycle.js";
+import { CodeMcpLifecycle } from "../src/lifecycle.js";
 import type { SidecarClientOptions } from "../src/mcp-client.js";
-import { registerCodeModeTools } from "../src/tools.js";
+import { registerCodeMcpTools } from "../src/tools.js";
 
-export function createCodeModeExtension(options: SidecarClientOptions = {}) {
-  return function codeModeExtension(pi: ExtensionAPI): void {
-    const lifecycle = new CodeModeLifecycle(options);
-    registerCodeModeTools(pi, lifecycle);
+export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
+  return function codeMcpExtension(pi: ExtensionAPI): void {
+    const lifecycle = new CodeMcpLifecycle(options);
+    registerCodeMcpTools(pi, lifecycle);
 
-    pi.registerCommand("codemode", {
+    pi.registerCommand("codemcp", {
       description: "Open Code Mode status",
       handler: async (_args, ctx) => {
         try {
@@ -17,8 +17,8 @@ export function createCodeModeExtension(options: SidecarClientOptions = {}) {
           const upstreams = Array.isArray(status.upstreams)
             ? status.upstreams.filter(isRecord)
             : [];
-          if (!ctx.hasUI) {
-            ctx.ui.notify(formatStatusSummary(status, upstreams), "info");
+          if (ctx.mode !== "tui") {
+            if (ctx.hasUI) ctx.ui.notify(formatStatusSummary(status, upstreams), "info");
             return;
           }
 
@@ -82,7 +82,7 @@ export function createCodeModeExtension(options: SidecarClientOptions = {}) {
   };
 }
 
-export default createCodeModeExtension();
+export default createCodeMcpExtension();
 
 function formatStatusSummary(
   status: Record<string, unknown>,

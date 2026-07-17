@@ -1,1 +1,1 @@
-"""FastMCP/Pydantic-Monty sidecar for pi-mcp-codemode."""
+"""FastMCP/Pydantic-Monty sidecar for pi-codemcp."""

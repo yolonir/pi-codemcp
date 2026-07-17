@@ -21,7 +21,7 @@ async function waitForExit(pid: number): Promise<void> {
 }
 
 test("stdio client runs search/schema/chains, forwards cancellation, and cleans up", async () => {
-  const temporary = await mkdtemp(join(tmpdir(), "pi-mcp-codemode-ts-"));
+  const temporary = await mkdtemp(join(tmpdir(), "pi-codemcp-ts-"));
   const configPath = join(temporary, "mcp.json");
   const alphaPidPath = join(temporary, "alpha.pid");
   const betaPidPath = join(temporary, "beta.pid");
@@ -48,11 +48,7 @@ test("stdio client runs search/schema/chains, forwards cancellation, and cleans 
 
   const client = new SidecarClient({
     packageRoot: root,
-    environment: {
-      PI_MCP_CODEMODE_CONFIG: configPath,
-      PI_MCP_CODEMODE_OAUTH_DIR: join(temporary, "oauth"),
-      PI_MCP_CODEMODE_CATALOG_DIR: join(temporary, "catalog"),
-    },
+    agentDir: temporary,
   });
   let sidecarPid: number | null = null;
   let upstreamPids: number[] = [];
@@ -63,6 +59,9 @@ test("stdio client runs search/schema/chains, forwards cancellation, and cleans 
     ]);
     expect((search.results as Array<{ name: string }>)[0]?.name).toBe("beta_save_number");
     expect(initialStatus).toMatchObject({ connected: true, tool_count: 0 });
+    expect(
+      await readFile(join(temporary, "pi-codemcp", "runtime", "venv", "pyvenv.cfg"), "utf8"),
+    ).toContain("version");
 
     const schema = await client.call("get_schema", {
       tools: ["alpha_get_number", "beta_save_number"],
@@ -108,7 +107,7 @@ test("stdio client runs search/schema/chains, forwards cancellation, and cleans 
     for (const pid of upstreamPids) await waitForExit(pid);
     await rm(temporary, { recursive: true, force: true });
   }
-}, 30_000);
+}, 60_000);
 
 function isErrno(value: unknown): value is NodeJS.ErrnoException {
   return value instanceof Error && "code" in value;

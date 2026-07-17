@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createCodeModeExtension } from "../../extensions/index.js";
+import { createCodeMcpExtension } from "../../extensions/index.js";
 
 describe("Pi extension registration", () => {
   test("registers exactly the three Code Mode tools and one status command", () => {
@@ -19,14 +19,14 @@ describe("Pi extension registration", () => {
       },
     } as unknown as ExtensionAPI;
 
-    createCodeModeExtension()(fakePi);
+    createCodeMcpExtension()(fakePi);
 
     expect(tools.map((tool) => tool.name)).toEqual([
-      "codemode_search",
-      "codemode_get_schema",
-      "codemode_execute",
+      "codemcp_search",
+      "codemcp_get_schema",
+      "codemcp_execute",
     ]);
-    expect(commands).toEqual(["codemode"]);
+    expect(commands).toEqual(["codemcp"]);
     expect(events).toEqual(["session_shutdown"]);
 
     const search = tools[0];

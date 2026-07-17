@@ -1,6 +1,6 @@
 import { SidecarClient, type SidecarClientOptions } from "./mcp-client.js";
 
-export class CodeModeLifecycle {
+export class CodeMcpLifecycle {
   readonly sidecar: SidecarClient;
 
   constructor(options: SidecarClientOptions = {}) {

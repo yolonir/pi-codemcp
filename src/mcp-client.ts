@@ -1,4 +1,16 @@
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+} from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
@@ -6,11 +18,14 @@ type JsonObject = Record<string, unknown>;
 
 export interface SidecarClientOptions {
   packageRoot?: string;
+  agentDir?: string;
   environment?: Record<string, string>;
 }
 
 export class SidecarClient {
   private readonly packageRoot: string;
+  private readonly packageVersion: string;
+  private readonly agentDir: string;
   private readonly environment: Record<string, string>;
   private client: Client | undefined;
   private transport: StdioClientTransport | undefined;
@@ -19,10 +34,16 @@ export class SidecarClient {
   private stderrTail = "";
 
   constructor(options: SidecarClientOptions = {}) {
-    this.packageRoot = options.packageRoot ?? fileURLToPath(new URL("..", import.meta.url));
+    this.packageRoot = resolve(
+      options.packageRoot ?? fileURLToPath(new URL("..", import.meta.url)),
+    );
+    this.packageVersion = readPackageVersion(this.packageRoot);
+    this.agentDir = resolve(options.agentDir ?? getAgentDir());
     this.environment = {
-      ...codeModeEnvironment(),
+      ...definedProcessEnvironment(),
       ...(options.environment ?? {}),
+      PI_CODEMCP_AGENT_DIR: this.agentDir,
+      UV_PROJECT_ENVIRONMENT: join(this.agentDir, "pi-codemcp", "runtime", "venv"),
     };
   }
 
@@ -43,7 +64,10 @@ export class SidecarClient {
     const client = this.client;
     if (!client) throw new Error("Sidecar client failed to initialize");
     const timeout = name === "execute" ? 35_000 : 30_000;
-    const result = await client.callTool({ name, arguments: args }, undefined, { signal, timeout });
+    const result = await client.callTool({ name, arguments: args }, undefined, {
+      timeout,
+      ...(signal === undefined ? {} : { signal }),
+    });
 
     if (result.isError) {
       throw new Error(textContent(result.content) || `Sidecar tool ${name} failed`);
@@ -95,8 +119,17 @@ export class SidecarClient {
   private async start(signal?: AbortSignal): Promise<void> {
     this.stderrTail = "";
     const transport = new StdioClientTransport({
-      command: "uv",
-      args: ["run", "--project", "sidecar", "--frozen", "-m", "sidecar.gateway"],
+      command: prepareBundledUv(this.packageRoot, this.agentDir),
+      args: [
+        "run",
+        ...(isTruthy(process.env.PI_OFFLINE) ? ["--offline"] : []),
+        "--project",
+        "sidecar",
+        "--frozen",
+        "--no-dev",
+        "-m",
+        "sidecar.gateway",
+      ],
       cwd: this.packageRoot,
       env: this.environment,
       stderr: "pipe",
@@ -106,14 +139,14 @@ export class SidecarClient {
     });
 
     const client = new Client({
-      name: "pi-mcp-codemode",
-      version: "0.1.0",
+      name: "pi-codemcp",
+      version: this.packageVersion,
     });
     this.transport = transport;
     this.client = client;
     await client.connect(transport, {
-      signal,
       timeout: 310_000,
+      ...(signal === undefined ? {} : { signal }),
     });
   }
 
@@ -136,17 +169,65 @@ export class SidecarClient {
   }
 }
 
-function codeModeEnvironment(): Record<string, string> {
-  const environment: Record<string, string> = {};
-  for (const name of [
-    "PI_MCP_CODEMODE_CONFIG",
-    "PI_MCP_CODEMODE_OAUTH_DIR",
-    "PI_MCP_CODEMODE_CATALOG_DIR",
-  ]) {
-    const value = process.env[name];
-    if (value !== undefined) environment[name] = value;
+function readPackageVersion(packageRoot: string): string {
+  const packageJson = join(packageRoot, "package.json");
+  const metadata: unknown = JSON.parse(readFileSync(packageJson, "utf8"));
+  if (!isJsonObject(metadata) || typeof metadata.version !== "string") {
+    throw new Error(`pi-codemcp package has invalid metadata: ${packageJson}`);
   }
-  return environment;
+  return metadata.version;
+}
+
+function prepareBundledUv(packageRoot: string, agentDir: string): string {
+  const packageRequire = createRequire(join(packageRoot, "package.json"));
+  const platformPackage = `@manzt/uv-${process.platform}-${process.arch}`;
+  let packageJson: string;
+  try {
+    packageJson = packageRequire.resolve(`${platformPackage}/package.json`);
+  } catch (error) {
+    throw new Error(
+      `Bundled uv is unavailable for ${process.platform}/${process.arch}; reinstall pi-codemcp with optional dependencies enabled`,
+      { cause: error },
+    );
+  }
+  const metadata: unknown = JSON.parse(readFileSync(packageJson, "utf8"));
+  if (!isJsonObject(metadata) || typeof metadata.version !== "string") {
+    throw new Error(`Bundled uv package has invalid metadata: ${packageJson}`);
+  }
+
+  const binaryName = process.platform === "win32" ? "uv.exe" : "uv";
+  const source = join(dirname(packageJson), "bin", binaryName);
+  if (!existsSync(source)) {
+    throw new Error(`Bundled uv executable is missing: ${source}`);
+  }
+
+  const runtimeDirectory = join(agentDir, "pi-codemcp", "runtime", "uv", metadata.version);
+  const executable = join(runtimeDirectory, binaryName);
+  if (existsSync(executable)) return executable;
+
+  mkdirSync(runtimeDirectory, { recursive: true });
+  const temporary = `${executable}.${process.pid}.tmp`;
+  copyFileSync(source, temporary);
+  if (process.platform !== "win32") chmodSync(temporary, 0o755);
+  try {
+    renameSync(temporary, executable);
+  } catch (error) {
+    if (!existsSync(executable)) throw error;
+    unlinkSync(temporary);
+  }
+  return executable;
+}
+
+function definedProcessEnvironment(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    ),
+  );
+}
+
+function isTruthy(value: string | undefined): boolean {
+  return value !== undefined && ["1", "true", "yes"].includes(value.toLowerCase());
 }
 
 function isJsonObject(value: unknown): value is JsonObject {

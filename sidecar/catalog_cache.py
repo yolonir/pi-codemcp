@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import time
-from pathlib import Path
-from typing import Any, Literal
+from contextlib import suppress
+from typing import TYPE_CHECKING, Literal
 
 from mcp import types as mcp_types
 from pydantic import BaseModel, ValidationError
 
-CACHE_VERSION = 1
+from .json_types import JSON_OBJECT_ADAPTER, JsonObject
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+CACHE_VERSION: Literal[1] = 1
 DEFAULT_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
@@ -18,7 +22,7 @@ class CachedServerCatalog(BaseModel):
     server_name: str
     config_fingerprint: str
     updated_at: float
-    tools: list[dict[str, Any]]
+    tools: list[JsonObject]
 
 
 class CatalogCache:
@@ -59,10 +63,8 @@ class CatalogCache:
         tools: list[mcp_types.Tool],
     ) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(self.directory, 0o700)
-        except OSError:
-            pass
+        with suppress(OSError):
+            self.directory.chmod(0o700)
         path = self._path(server_name)
         temporary = path.with_suffix(".tmp")
         entry = CachedServerCatalog(
@@ -70,12 +72,14 @@ class CatalogCache:
             config_fingerprint=config_fingerprint,
             updated_at=time.time(),
             tools=[
-                tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+                JSON_OBJECT_ADAPTER.validate_python(
+                    tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+                )
                 for tool in tools
             ],
         )
         temporary.write_text(entry.model_dump_json(), encoding="utf-8")
-        os.chmod(temporary, 0o600)
+        temporary.chmod(0o600)
         temporary.replace(path)
 
     def _path(self, server_name: str) -> Path:

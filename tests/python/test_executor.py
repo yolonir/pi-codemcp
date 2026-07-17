@@ -114,8 +114,8 @@ async def test_valid_three_call_cross_server_chain_and_mutation() -> None:
 @pytest.mark.parametrize(
     "code",
     [
-        'return await unknown.tool({})',
-        'return await alpha.get({})',
+        "return await unknown.tool({})",
+        "return await alpha.get({})",
         'return await alpha.get({"id": 1})',
         """
         result = await alpha.get({"id": "x"})
@@ -141,14 +141,13 @@ async def test_preflight_errors_make_zero_calls(code: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_validation_rejects_dynamic_bad_arguments_before_dispatch() -> None:
-    seen: list[str] = []
+async def test_untyped_output_must_be_narrowed_before_typed_use() -> None:
+    calls = 0
 
-    async def call(name: str, _: dict[str, Any]) -> Any:
-        seen.append(name)
-        if name == "alpha_dynamic":
-            return {"value": "not-an-integer"}
-        return {"ok": True}
+    async def call(_: str, __: dict[str, Any]) -> Any:
+        nonlocal calls
+        calls += 1
+        return {"value": "not-an-integer"}
 
     response = await MontyExecutor(catalog()).execute(
         """
@@ -159,9 +158,9 @@ async def test_runtime_validation_rejects_dynamic_bad_arguments_before_dispatch(
     )
 
     assert response.ok is False
-    assert response.failure_stage == "runtime"
-    assert response.calls_made == 1
-    assert seen == ["alpha_dynamic"]
+    assert response.failure_stage == "preflight"
+    assert response.calls_made == 0
+    assert calls == 0
 
 
 @pytest.mark.asyncio
@@ -289,7 +288,7 @@ async def test_loops_conditions_and_per_session_serialization() -> None:
         "import os\nreturn os.environ",
         'return open("/etc/passwd").read()',
         'return __import__("subprocess")',
-        'import socket\nreturn socket.socket()',
+        "import socket\nreturn socket.socket()",
     ],
 )
 async def test_sandbox_denies_host_capabilities(code: str) -> None:
@@ -363,9 +362,7 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
     )
     wrapped = mcp_types.CallToolResult(
         content=[],
-        structuredContent={
-            "result": '{"columns":["1"],"rows":[[1]]}'
-        },
+        structuredContent={"result": '{"columns":["1"],"rows":[[1]]}'},
         isError=False,
     )
     assert clickhouse_catalog.normalize_result("clickhouse_run_query", wrapped) == {
@@ -378,7 +375,10 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
         structuredContent={"result": "null"},
         isError=False,
     )
-    assert clickhouse_catalog.normalize_result("clickhouse_run_query", wrapped_null) is None
+    assert (
+        clickhouse_catalog.normalize_result("clickhouse_run_query", wrapped_null)
+        is None
+    )
 
     declared = mcp_types.CallToolResult(
         content=[],
@@ -401,7 +401,9 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
             ]
         }
     )
-    assert declared_catalog.normalize_result("example_read", declared) == {"value": None}
+    assert declared_catalog.normalize_result("example_read", declared) == {
+        "value": None
+    }
 
 
 @pytest.mark.asyncio
@@ -428,8 +430,18 @@ async def test_normalized_json_string_output_is_usable_through_sdk_facade() -> N
         return {"columns": ["1"], "rows": [[1]]}
 
     response = await MontyExecutor(sdk_catalog).execute(
-        'result = await clickhouse.run_query({"query": "SELECT 1"})\n'
-        'return result["rows"][0][0]',
+        """
+        result = await clickhouse.run_query({"query": "SELECT 1"})
+        if not isinstance(result, dict):
+            return None
+        rows = result.get("rows")
+        if not isinstance(rows, list) or not rows:
+            return None
+        first_row = rows[0]
+        if not isinstance(first_row, list) or not first_row:
+            return None
+        return first_row[0]
+        """,
         call,
     )
     assert response.ok is True

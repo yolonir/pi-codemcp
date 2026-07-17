@@ -5,7 +5,7 @@ import {
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
 
-export interface CodeModeOutputDetails {
+export interface CodeMcpOutputDetails {
   truncated: boolean;
   outputBytes: number;
   totalBytes: number;
@@ -13,9 +13,9 @@ export interface CodeModeOutputDetails {
   totalLines: number;
 }
 
-export function formatCodeModeOutput(value: unknown): {
+export function formatCodeMcpOutput(value: unknown): {
   text: string;
-  details: CodeModeOutputDetails;
+  details: CodeMcpOutputDetails;
 } {
   const serialized = JSON.stringify(value, null, 2);
   const truncation = truncateHead(serialized, {

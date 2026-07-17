@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
-import { createCodeModeExtension } from "../../extensions/index.js";
+import { createCodeMcpExtension } from "../../extensions/index.js";
 
 interface CapturedTool {
   name: string;
@@ -27,10 +27,10 @@ function captureExecuteTool(): CapturedTool {
     registerCommand() {},
     on() {},
   } as unknown as ExtensionAPI;
-  createCodeModeExtension()(fakePi);
-  const execute = tools.find((tool) => tool.name === "codemode_execute");
+  createCodeMcpExtension()(fakePi);
+  const execute = tools.find((tool) => tool.name === "codemcp_execute");
   if (!execute?.renderCall || !execute.renderResult) {
-    throw new Error("codemode_execute renderers were not registered");
+    throw new Error("codemcp_execute renderers were not registered");
   }
   return execute;
 }
@@ -39,7 +39,7 @@ function render(component: Component): string {
   return component.render(160).join("\n");
 }
 
-describe("codemode_execute rendering", () => {
+describe("codemcp_execute rendering", () => {
   test("separates expanded agent code from successful output", () => {
     const tool = captureExecuteTool();
     const call = render(

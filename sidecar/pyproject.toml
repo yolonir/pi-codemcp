@@ -1,26 +1,140 @@
 [project]
-name = "pi-mcp-codemode-sidecar"
+name = "pi-codemcp-sidecar"
 version = "0.1.0"
-description = "Python sidecar for pi-mcp-codemode"
+description = "Python sidecar for pi-codemcp"
 requires-python = ">=3.12"
 dependencies = [
   "fastmcp==3.4.4",
-  "httpx>=0.28.1,<1",
-  "pydantic>=2.11.7,<3",
+  "httpx==0.28.1",
+  "pydantic==2.13.4",
   "pydantic-monty==0.0.18",
   "py-key-value-aio[filetree,pydantic]==0.4.5",
-  "rapidfuzz>=3.14.3,<4",
+  "rapidfuzz==3.14.5",
 ]
 
 [dependency-groups]
 dev = [
-  "pytest>=8.4.1,<9",
-  "pytest-asyncio>=1.2.0,<2",
+  "mypy==2.2.0",
+  "prek==0.4.8",
+  "pytest==8.4.2",
+  "pytest-asyncio==1.4.0",
+  "ruff==0.15.21",
+  "ty==0.0.58",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = [".."]
+
+[tool.ruff]
+required-version = "==0.15.21"
+target-version = "py312"
+line-length = 100
+src = ["sidecar"]
+preview = true
+force-exclude = true
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "COM812", # Conflicts with the formatter.
+  "CPY001", # Legal copyright text is not configured.
+  "D100",   # Internal modules do not need module docstrings.
+  "D101",   # Pydantic catalog models are self-describing.
+  "D102",   # Internal methods are covered by types and focused class documentation.
+  "D103",   # Internal functions are covered by types and focused module documentation.
+  "D104",   # Internal packages do not need package docstrings beyond sidecar/__init__.py.
+  "D105",   # Magic methods do not need docstrings.
+  "D107",   # Constructor contracts are expressed by typed fields.
+  "D203",   # Incompatible with D211.
+  "D213",   # Incompatible with D212.
+  "DOC201", # Return types are explicit and checked.
+  "DOC501", # Repeating raised exception types in docstrings reduces readability.
+  "EM101",  # Inline exception messages are clearer at the failure site.
+  "EM102",  # Inline contextual exception messages are clearer at the failure site.
+  "FBT001", # JSON Schema itself may be boolean; these are not boolean control arguments.
+  "TRY003", # Custom exception wrappers would obscure concise boundary failures.
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["sidecar"]
+
+[tool.ruff.lint.mccabe]
+# JSON Schema compilation and execution-state handling are branch-heavy by nature.
+max-complexity = 20
+
+[tool.ruff.lint.pylint]
+max-args = 8
+max-bool-expr = 5
+max-branches = 20
+max-locals = 25
+max-nested-blocks = 4
+max-positional-args = 6
+max-public-methods = 10
+max-returns = 16
+max-statements = 50
+max-statements-in-try = 4
+
+[tool.ruff.format]
+docstring-code-format = true
+docstring-code-line-length = 100
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+  "ANN",
+  "D",
+  "PLR2004",
+  "S101",
+  "S105",
+  "S106",
+  "SLF001",
+]
+"tests/fixtures/**/*.py" = ["T201"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+strict = true
+files = ["sidecar"]
+pretty = true
+show_error_codes = true
+show_error_code_links = true
+show_error_context = true
+show_error_end = true
+strict_bytes = true
+strict_equality_for_none = true
+warn_unreachable = true
+warn_unused_configs = true
+enable_error_code = [
+  "deprecated",
+  "exhaustive-match",
+  "explicit-override",
+  "ignore-without-code",
+  "mutable-override",
+  "possibly-undefined",
+  "redundant-expr",
+  "truthy-bool",
+  "truthy-iterable",
+  "unimported-reveal",
+]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+warn_untyped_fields = true
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.rules]
+all = "error"
+
+[tool.ty.analysis]
+respect-type-ignore-comments = false
+
+[tool.ty.terminal]
+error-on-warning = true
 
 [tool.uv]
 package = false

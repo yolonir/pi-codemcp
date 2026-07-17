@@ -1,25 +1,36 @@
-# pi-mcp-codemode
+# pi-codemcp
 
 A Pi package that turns every enabled server in `~/.pi/agent/mcp.json` into three model-facing tools:
 
-- `codemode_search`
-- `codemode_get_schema`
-- `codemode_execute`
+- `codemcp_search`
+- `codemcp_get_schema`
+- `codemcp_execute`
 
 FastMCP owns upstream MCP transports, validation, and OAuth. Pydantic Monty type-checks and runs model-authored Python in a sandbox. Intermediate MCP results remain inside the sandbox instead of entering the model context.
 
-## Requirements
+## Install
 
-- [Bun](https://bun.sh/)
-- [uv](https://docs.astral.sh/uv/)
-- Pi
-
-## Install locally
+End users only need Pi:
 
 ```bash
-cd pi-mcp-codemode
-bun install
-uv sync --project sidecar --frozen
+pi install npm:pi-codemcp@0.1.0
+```
+
+A platform-specific uv 0.8.13 binary ships through the pinned `@manzt/uv-*` npm mirrors of
+Astral's release for macOS, Linux, and Windows on x64/arm64 (plus Windows ia32). On the first Code
+Mode call, uv installs Python
+3.13 and the locked runtime-only Python environment under Pi's writable agent directory. Python,
+uv, Bun, and just do not need to be installed separately by package users.
+
+The first call requires network access unless the uv/Python caches are already populated. When
+`PI_OFFLINE` is enabled, pi-codemcp passes offline mode to uv and fails explicitly if the required
+artifacts are not cached.
+
+For local development and installation:
+
+```bash
+cd pi-codemcp
+just init
 pi install .
 ```
 
@@ -29,11 +40,18 @@ For isolated testing without installation:
 pi -ne -e . --no-session
 ```
 
-The sidecar starts lazily on the first Code Mode tool call or `/codemode`. Opening status never connects an upstream. Each upstream has its own lazy client and is connected only when its catalog must be discovered or one of its tools is executed. Connected stdio children are stopped on Pi session shutdown.
+The sidecar starts lazily on the first Code Mode tool call or `/codemcp`. Opening status never connects an upstream. Each upstream has its own lazy client and is connected only when its catalog must be discovered or one of its tools is executed. Connected stdio children are stopped on Pi session shutdown.
 
 ## MCP configuration
 
-The package reads the existing `~/.pi/agent/mcp.json`. Enabled stdio, Streamable HTTP, and SSE entries are supported. `disabled: true` entries are ignored.
+The package obtains Pi's agent directory through the official `getAgentDir()` API and reads its
+existing `mcp.json`. The default is `~/.pi/agent/mcp.json`; custom `PI_CODING_AGENT_DIR` values are
+respected automatically. Users do not need to set pi-codemcp-specific environment variables.
+Enabled stdio, Streamable HTTP, and SSE entries are supported. `disabled: true` and
+`enabled: false` entries are ignored. Stdio children receive Pi's restricted baseline environment,
+explicit per-server `env`, and ambient names allowed through `MY_PI_MCP_ENV_ALLOWLIST` or
+`MY_PI_CHILD_ENV_ALLOWLIST`. `${NAME}` references in HTTP headers use that same restricted
+environment.
 
 Linear uses FastMCP's native OAuth client directly:
 
@@ -49,15 +67,21 @@ Linear uses FastMCP's native OAuth client directly:
 }
 ```
 
-The first Linear discovery or execution opens one browser authorization. FastMCP persists the registration and tokens under `~/.pi/agent/pi-mcp-codemode/oauth` and handles refreshes. The package does not implement OAuth or import tokens from another client.
+The first Linear discovery or execution opens one browser authorization. FastMCP persists the
+registration and tokens under `<agent-dir>/pi-codemcp/oauth` and handles refreshes. The package does
+not implement OAuth or import tokens from another client.
 
-Per-server tool catalogs are cached under `~/.pi/agent/pi-mcp-codemode/catalog`. A valid cache makes search and schema lookup available without starting upstream servers. Cache entries expire after 24 hours and are invalidated independently when that server's configuration changes; cache files contain tool metadata, never MCP credentials.
+Per-server tool catalogs are cached under `<agent-dir>/pi-codemcp/catalog`. The managed uv binary
+and Python environment live under `<agent-dir>/pi-codemcp/runtime`; the installed npm package is
+never modified at runtime. A valid catalog cache makes search and schema lookup available without
+starting upstream servers. Cache entries expire after 24 hours and are invalidated independently
+when that server's configuration changes; cache files contain tool metadata, never MCP credentials.
 
 ## Model workflow
 
-1. Call `codemode_search` with a capability query, optionally scoped to one configured `server`.
-2. Call `codemode_get_schema` for the selected exact tool names.
-3. Call `codemode_execute` with the typed SDK facade shown in the schema, such as `await linear.list_issues(arguments)`, and a top-level `return`.
+1. Call `codemcp_search` with a capability query, optionally scoped to one configured `server`.
+2. Call `codemcp_get_schema` for the selected exact tool names.
+3. Call `codemcp_execute` with the typed SDK facade shown in the schema, such as `await linear.list_issues(arguments)`, and a top-level `return`.
 
 Example execution body:
 
@@ -69,7 +93,10 @@ for issue in issues:
 return {"issues": identifiers}
 ```
 
-Before any upstream call, Monty checks tool names, required arguments, represented JSON Schema types, and structured output usage. FastMCP and the upstream server still perform runtime validation.
+Before any upstream call, Monty checks tool names, required arguments, represented JSON Schema
+types, and structured output usage. FastMCP and the upstream server still perform runtime
+validation. When an upstream omits schema information, the facade uses recursive `JsonValue`
+instead of `Any`; model code must narrow it with `isinstance` before typed field access.
 
 ## Limits
 
@@ -86,7 +113,7 @@ Every enabled upstream tool is available, including mutations. Permissions come 
 ## TUI
 
 ```text
-/codemode
+/codemcp
 ```
 
 Opens a minimal read-only modal with connected upstreams, transports, authentication modes, and tool counts.
@@ -95,8 +122,21 @@ Code Mode tool calls render a compact summary and short preview by default. Use 
 
 ## Development
 
+Development requires Bun 1.3.10, uv 0.8.13, just, and Python 3.13. Install locked dependencies and
+repository hooks:
+
 ```bash
-bun run check
+just init
 ```
 
-This runs TypeScript type-checking, Biome, Bun integration tests, and the uv/pytest sidecar suite.
+Run the complete local/CI quality gate:
+
+```bash
+just check
+```
+
+This verifies both lockfiles, TypeScript with `tsc`, Biome, Bun tests, Ruff formatting and linting,
+mypy, ty, and pytest. `just release-check` additionally packs the npm tarball, installs it into a
+clean consumer directory, starts it without a system uv on `PATH`, and verifies package contents and
+runtime placement. Direct commits to `main` are rejected by the installed `prek` hook. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the branch and pull-request workflow.

@@ -3,40 +3,43 @@ from __future__ import annotations
 import ast
 import asyncio
 import textwrap
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Literal
+from typing import TYPE_CHECKING, Literal
 
 import pydantic_monty
-from pydantic import BaseModel, model_serializer
+from pydantic import BaseModel, ValidationError, model_serializer
 from pydantic_core import to_json
 
-from .schemas import ToolCatalog
+from .json_types import JSON_VALUE_ADAPTER, JsonObject, JsonValue
+
+if TYPE_CHECKING:
+    from .schemas import ToolCatalog
 
 RESULT_BYTE_LIMIT = 16 * 1024
 SHAPE_FIELD_LIMIT = 20
 
-ToolCall = Callable[[str, dict[str, Any]], Awaitable[Any]]
+ToolCall = Callable[[str, JsonObject], Awaitable[JsonValue]]
+ExternalFunction = Callable[..., Awaitable[JsonValue]]
 
 
 class ExecutionResponse(BaseModel):
     ok: bool
-    failure_stage: Literal[
-        "preflight", "runtime", "timeout", "cancelled", "result"
-    ] | None = None
-    result: Any | None = None
+    failure_stage: Literal["preflight", "runtime", "timeout", "cancelled", "result"] | None = None
+    result: JsonValue = None
     error: str | None = None
-    shape: dict[str, str] | None = None
+    shape: JsonObject | None = None
     calls_made: int = 0
 
     @model_serializer(mode="plain")
-    def serialize_compact(self) -> dict[str, Any]:
+    def serialize_compact(self) -> JsonObject:
         if self.ok:
             return {
                 "ok": True,
                 "result": self.result,
                 "calls_made": self.calls_made,
             }
-        response: dict[str, Any] = {
+        response: JsonObject = {
             "ok": False,
             "failure_stage": self.failure_stage,
             "error": self.error,
@@ -87,7 +90,7 @@ class MontyExecutor:
         catalog = self.catalog
         calls_made = 0
 
-        async def dispatch_wrapper(name: str, arguments: dict[str, Any]) -> Any:
+        async def dispatch_wrapper(name: str, arguments: JsonObject) -> JsonValue:
             nonlocal calls_made
             if name not in catalog.tools:
                 raise RuntimeError(f"Unknown tool: {name}")
@@ -106,7 +109,7 @@ class MontyExecutor:
         try:
             await pydantic_monty.Monty.acreate(
                 wrapped_code,
-                script_name="codemode_execute.py",
+                script_name="codemcp_execute.py",
                 type_check=True,
                 type_check_stubs=catalog.type_stubs,
             )
@@ -133,7 +136,7 @@ class MontyExecutor:
         try:
             monty = await pydantic_monty.Monty.acreate(
                 runtime_code,
-                script_name="codemode_execute.py",
+                script_name="codemcp_execute.py",
             )
         except (pydantic_monty.MontySyntaxError, RuntimeError) as error:
             return ExecutionResponse(
@@ -142,14 +145,14 @@ class MontyExecutor:
                 error=f"SDK facade compilation failed: {error}",
             )
 
-        external_functions: dict[str, Callable[..., Any]] = {}
+        external_functions: dict[str, ExternalFunction] = {}
         for spec in catalog.tools.values():
 
             async def sdk_method(
-                arguments: dict[str, Any],
+                arguments: JsonObject,
                 *,
                 _name: str = spec.name,
-            ) -> Any:
+            ) -> JsonValue:
                 return await dispatch_wrapper(_name, arguments)
 
             external_functions[spec.external_name] = sdk_method
@@ -160,9 +163,11 @@ class MontyExecutor:
         }
         try:
             async with asyncio.timeout(self.settings.timeout_seconds + 0.5):
-                result = await monty.run_async(
-                    external_functions=external_functions,
-                    limits=limits,
+                result = JSON_VALUE_ADAPTER.validate_python(
+                    await monty.run_async(
+                        external_functions=external_functions,
+                        limits=limits,
+                    )
                 )
         except asyncio.CancelledError:
             raise
@@ -171,6 +176,13 @@ class MontyExecutor:
                 ok=False,
                 failure_stage="timeout",
                 error=f"Execution timed out after {self.settings.timeout_seconds:g}s",
+                calls_made=calls_made,
+            )
+        except ValidationError as error:
+            return ExecutionResponse(
+                ok=False,
+                failure_stage="result",
+                error=f"Returned value is not JSON-compatible: {error.errors()[0]['msg']}",
                 calls_made=calls_made,
             )
         except pydantic_monty.MontyRuntimeError as error:
@@ -207,12 +219,11 @@ class MontyExecutor:
         )
 
 
-def _summarize_shape(value: Any) -> dict[str, str]:
+def _summarize_shape(value: JsonValue) -> JsonObject:
     if not isinstance(value, dict):
         return {"result": _shape_label(value)}
-    summary = {
-        str(key): _shape_label(item)
-        for key, item in list(value.items())[:SHAPE_FIELD_LIMIT]
+    summary: JsonObject = {
+        str(key): _shape_label(item) for key, item in list(value.items())[:SHAPE_FIELD_LIMIT]
     }
     remaining = len(value) - len(summary)
     if remaining > 0:
@@ -220,7 +231,7 @@ def _summarize_shape(value: Any) -> dict[str, str]:
     return summary
 
 
-def _shape_label(value: Any) -> str:
+def _shape_label(value: JsonValue) -> str:
     if value is None:
         return "null"
     if isinstance(value, bool):
@@ -242,14 +253,14 @@ def _wrap_code(code: str) -> str:
     """Allow a natural top-level ``return`` while keeping one final result value."""
     normalized = textwrap.dedent(code).strip("\n")
     return (
-        "async def __codemode_main():\n"
+        "async def __codemcp_main():\n"
         f"{textwrap.indent(normalized, '    ')}\n\n"
-        "await __codemode_main()\n"
+        "await __codemcp_main()\n"
     )
 
 
 def _rewrite_sdk_calls(code: str, catalog: ToolCatalog) -> str:
-    tree = ast.parse(code, filename="codemode_execute.py", mode="exec")
+    tree = ast.parse(code, filename="codemcp_execute.py", mode="exec")
 
     class FacadeCallRewriter(ast.NodeTransformer):
         def visit_Call(self, node: ast.Call) -> ast.AST:

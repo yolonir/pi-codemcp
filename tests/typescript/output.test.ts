@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
-import { formatCodeModeOutput } from "../../src/output.js";
+import { formatCodeMcpOutput } from "../../src/output.js";
 
 test("final output uses Pi limits and does not persist oversized content", () => {
-  const result = formatCodeModeOutput({
+  const result = formatCodeMcpOutput({
     lines: Array.from({ length: DEFAULT_MAX_LINES + 100 }, (_, index) => `line-${index}`),
     oversized: "x".repeat(DEFAULT_MAX_BYTES + 100),
   });

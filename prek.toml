@@ -1,0 +1,42 @@
+# Configuration for prek, a fast Git hook framework.
+# See https://prek.j178.dev.
+#:schema https://www.schemastore.org/prek.json
+
+minimum_prek_version = "0.4.8"
+
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "no-commit-to-branch", args = ["--branch", "main"] },
+  { id = "trailing-whitespace" },
+  { id = "end-of-file-fixer" },
+  { id = "fix-byte-order-marker" },
+  { id = "mixed-line-ending" },
+  { id = "check-added-large-files" },
+  { id = "check-case-conflict" },
+  { id = "check-illegal-windows-names" },
+  { id = "check-merge-conflict" },
+  { id = "check-json" },
+  { id = "check-toml" },
+  { id = "check-yaml" },
+  { id = "check-symlinks" },
+  { id = "destroyed-symlinks" },
+  { id = "forbid-new-submodules" },
+  { id = "detect-private-key" },
+  { id = "check-executables-have-shebangs" },
+  { id = "check-shebang-scripts-are-executable" },
+]
+
+[[repos]]
+repo = "local"
+hooks = [
+  {
+    id = "quality",
+    name = "locks, TypeScript, Python, and tests",
+    entry = "just check",
+    language = "system",
+    pass_filenames = false,
+    always_run = true,
+    require_serial = true,
+  },
+]

@@ -27,7 +27,13 @@ def make_tool(
     )
 
 
-def test_normalize_config_supports_transports_and_skips_disabled(tmp_path: Path) -> None:
+def test_normalize_config_supports_transports_and_skips_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODEMCP_TEST_TOKEN", "secret-token")
+    monkeypatch.setenv("UNLISTED_CODEMCP_SECRET", "must-not-leak")
+    monkeypatch.setenv("MY_PI_MCP_ENV_ALLOWLIST", "CODEMCP_TEST_TOKEN")
     normalized = normalize_mcp_config(
         {
             "mcpServers": {
@@ -37,31 +43,47 @@ def test_normalize_config_supports_transports_and_skips_disabled(tmp_path: Path)
                     "directTools": True,
                     "lifecycle": "lazy",
                     "idleTimeout": 10,
+                    "env": {"EXPLICIT_VALUE": "configured"},
                 },
                 "http": {
                     "type": "http",
                     "url": "https://example.test/mcp",
-                    "headers": {"x-test": "yes"},
+                    "headers": {
+                        "x-test": "yes",
+                        "authorization": "Bearer ${CODEMCP_TEST_TOKEN}",
+                    },
                 },
                 "events": {
                     "type": "sse",
                     "url": "https://example.test/sse",
                 },
                 "disabled": {"command": "never", "disabled": True},
+                "not-enabled": {"command": "never", "enabled": False},
             }
         },
         oauth_storage_dir=tmp_path / "oauth",
     )
 
     assert set(normalized.config.mcpServers) == {"stdio", "http", "events"}
-    assert [server.transport for server in normalized.servers] == ["stdio", "http", "sse"]
+    assert [server.transport for server in normalized.servers] == [
+        "stdio",
+        "http",
+        "sse",
+    ]
     stdio = normalized.config.mcpServers["stdio"]
     assert stdio.command == "example-server"
+    assert stdio.env["EXPLICIT_VALUE"] == "configured"
+    assert stdio.env["CODEMCP_TEST_TOKEN"] == "secret-token"
+    assert "UNLISTED_CODEMCP_SECRET" not in stdio.env
     assert "directTools" not in stdio.model_extra
+    http_server = normalized.config.mcpServers["http"]
+    assert http_server.headers["authorization"] == "Bearer secret-token"
 
 
 @pytest.mark.asyncio
-async def test_oauth_uses_native_fastmcp_persistence_and_refresh(tmp_path: Path) -> None:
+async def test_oauth_uses_native_fastmcp_persistence_and_refresh(
+    tmp_path: Path,
+) -> None:
     raw = {
         "linear": {
             "type": "http",
@@ -164,6 +186,28 @@ def test_catalog_namespaces_single_server_and_searches_compactly() -> None:
     assert "LinearGetIssueArgs" in compact.stub
     assert "input_schema" not in compact.model_dump_json()
     assert "output_schema" not in compact.model_dump_json()
+
+
+def test_untyped_schema_uses_recursive_json_value_instead_of_any() -> None:
+    catalog = ToolCatalog.from_server_tools(
+        {
+            "clickhouse": [
+                make_tool(
+                    "list_databases",
+                    {"type": "object", "additionalProperties": True},
+                )
+            ]
+        }
+    )
+
+    spec = catalog.tools["clickhouse_list_databases"]
+    assert spec.signature == (
+        "await clickhouse.list_databases(arguments: ClickhouseListDatabasesArgs) "
+        "-> ClickhouseListDatabasesResult"
+    )
+    assert "ClickhouseListDatabasesArgs: TypeAlias = dict[str, JsonValue]" in spec.stub
+    assert "ClickhouseListDatabasesResult: TypeAlias = JsonValue" in spec.stub
+    assert "Any" not in catalog.type_stubs
 
 
 def make_search_fixture_tool(
@@ -302,7 +346,7 @@ def representative_search_catalog() -> ToolCatalog:
             "linear": [
                 make_search_fixture_tool(
                     "list_issues",
-                    'List issues in the user\'s Linear workspace. For my issues, use '
+                    "List issues in the user's Linear workspace. For my issues, use "
                     '"me" as the assignee. Use "null" for no assignee.',
                     (
                         "limit",
@@ -529,13 +573,16 @@ def test_sdk_facade_aliases_are_valid_stable_and_collision_free() -> None:
     )
     assert any(call.endswith(".class_") for call in calls)
     assert len({spec.namespace for spec in catalog.tools.values()}) == 2
-    assert ToolCatalog.from_server_tools(
-        {
-            "my-server": [
-                make_tool("class", empty_schema),
-                make_tool("get-issue", empty_schema),
-                make_tool("get_issue", empty_schema),
-            ],
-            "my_server": [make_tool("list", empty_schema)],
-        }
-    ).facade_calls == catalog.facade_calls
+    assert (
+        ToolCatalog.from_server_tools(
+            {
+                "my-server": [
+                    make_tool("class", empty_schema),
+                    make_tool("get-issue", empty_schema),
+                    make_tool("get_issue", empty_schema),
+                ],
+                "my_server": [make_tool("list", empty_schema)],
+            }
+        ).facade_calls
+        == catalog.facade_calls
+    )

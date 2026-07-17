@@ -3,10 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import keyword
+import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Iterable, cast
+from typing import TYPE_CHECKING
 
 from fastmcp.client.auth import OAuth
 from fastmcp.mcp_config import (
@@ -26,10 +26,48 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_serializer
 from pydantic_core import to_jsonable_python
 from rapidfuzz import fuzz, process, utils
 
-PI_ONLY_FIELDS = {"directTools", "lifecycle", "idleTimeout", "disabled"}
+from .json_types import (
+    JSON_OBJECT_ADAPTER,
+    JSON_VALUE_ADAPTER,
+    JsonObject,
+    JsonSchema,
+    JsonValue,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from pathlib import Path
+
+    import httpx
+
+PI_ONLY_FIELDS = {"directTools", "lifecycle", "idleTimeout", "disabled", "enabled"}
 REMOTE_TRANSPORTS = {"http", "streamable-http", "sse"}
+BASE_CHILD_ENV_KEYS = {
+    "CI",
+    "COLORTERM",
+    "FORCE_COLOR",
+    "HOME",
+    "LANG",
+    "LOGNAME",
+    "NO_COLOR",
+    "PATH",
+    "PI_CODING_AGENT_DIR",
+    "SHELL",
+    "TEMP",
+    "TERM",
+    "TMP",
+    "TMPDIR",
+    "USER",
+}
+ENV_ALLOWLIST_KEYS = ("MY_PI_CHILD_ENV_ALLOWLIST", "MY_PI_MCP_ENV_ALLOWLIST")
+ENV_REFERENCE_PATTERN = re.compile(r"\$\{([^}]+)\}")
 # A 50-point partial match is generic half-string overlap; require evidence above it.
 SEARCH_SCORE_CUTOFF = 51
+STUB_IMPORTS = "from typing import Literal, Never, NotRequired, TypeAlias, TypedDict"
+JSON_TYPE_STUBS = (
+    "JsonScalar: TypeAlias = bool | int | float | str | None",
+    'JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]',
+)
 
 
 class NormalizedServerInfo(BaseModel):
@@ -57,8 +95,8 @@ class ToolSchemaView(BaseModel):
     stub: str
 
     @model_serializer(mode="plain")
-    def serialize_compact(self) -> dict[str, Any]:
-        values: dict[str, Any] = {
+    def serialize_compact(self) -> JsonObject:
+        values: JsonObject = {
             "name": self.name,
             "call": self.call,
             "signature": self.signature,
@@ -118,16 +156,16 @@ class ToolSpec:
     external_name: str
     short_name: str
     description: str | None
-    input_schema: dict[str, Any]
-    output_schema: dict[str, Any] | None
+    input_schema: JsonObject
+    output_schema: JsonObject | None
     input_type_name: str
     output_type_name: str
     signature: str
     stub: str
     search_blob: str
-    input_adapter: TypeAdapter[Any]
-    output_adapter: TypeAdapter[Any] | None = None
-    wrapped_output_adapter: TypeAdapter[Any] | None = None
+    input_adapter: TypeAdapter[object]
+    output_adapter: TypeAdapter[object] | None = None
+    wrapped_output_adapter: TypeAdapter[object] | None = None
     output_wrap_result: bool = False
 
 
@@ -154,15 +192,13 @@ class ToolCatalog:
             method_aliases = _unique_python_aliases(tool.name for tool in tools)
             for tool in tools:
                 public_name = f"{server}_{tool.name}"
-                prepared.append(
-                    (
-                        tool,
-                        public_name,
-                        server,
-                        namespace_aliases[server],
-                        method_aliases[tool.name],
-                    )
-                )
+                prepared.append((
+                    tool,
+                    public_name,
+                    server,
+                    namespace_aliases[server],
+                    method_aliases[tool.name],
+                ))
         return cls._from_prepared(prepared, server_name_list, namespace_aliases)
 
     @classmethod
@@ -218,19 +254,26 @@ class ToolCatalog:
         for tool, public_name, server, namespace, method in prepared:
             if public_name in specs:
                 raise ValueError(f"Duplicate MCP tool name after namespacing: {public_name}")
-            builder = StubBuilder(public_name, tool.inputSchema, tool.outputSchema)
+            input_schema = JSON_OBJECT_ADAPTER.validate_python(tool.inputSchema)
+            output_schema = (
+                JSON_OBJECT_ADAPTER.validate_python(tool.outputSchema)
+                if tool.outputSchema is not None
+                else None
+            )
+            builder = StubBuilder(public_name, input_schema, output_schema)
             input_type, output_type, tool_definitions = builder.build()
             call = f"{namespace}.{method}"
             signature = f"await {call}(arguments: {input_type}) -> {output_type}"
-            output_schema = tool.outputSchema
             wrap_output = bool(output_schema and output_schema.get("x-fastmcp-wrap-result"))
-            adapter_schema: dict[str, Any] | bool | None = output_schema
-            wrapped_schema: dict[str, Any] | bool | None = None
+            adapter_schema: JsonSchema | None = output_schema
+            wrapped_schema: JsonSchema | None = None
             if output_schema:
-                wrapped_schema = output_schema.get("properties", {}).get("result")
+                raw_wrapped_schema = _object_property(output_schema, "result")
+                if isinstance(raw_wrapped_schema, (dict, bool)):
+                    wrapped_schema = raw_wrapped_schema
             if wrap_output and output_schema:
                 adapter_schema = wrapped_schema or True
-            external_name = f"__codemode_{hashlib.sha256(public_name.encode()).hexdigest()[:16]}"
+            external_name = f"__codemcp_{hashlib.sha256(public_name.encode()).hexdigest()[:16]}"
 
             spec = ToolSpec(
                 name=public_name,
@@ -242,30 +285,26 @@ class ToolCatalog:
                 external_name=external_name,
                 short_name=tool.name,
                 description=tool.description,
-                input_schema=tool.inputSchema,
+                input_schema=input_schema,
                 output_schema=output_schema,
                 input_type_name=input_type,
                 output_type_name=output_type,
                 signature=signature,
-                stub="\n\n".join(tool_definitions),
+                stub="\n\n".join([*JSON_TYPE_STUBS, *tool_definitions]),
                 search_blob=_build_search_blob(
                     public_name,
                     call,
                     server,
                     tool.name,
                     tool.description,
-                    tool.inputSchema,
+                    input_schema,
                 ),
-                input_adapter=TypeAdapter(json_schema_to_type(tool.inputSchema)),
+                input_adapter=_schema_adapter(input_schema),
                 output_adapter=(
-                    TypeAdapter(json_schema_to_type(adapter_schema))
-                    if adapter_schema is not None
-                    else None
+                    _schema_adapter(adapter_schema) if adapter_schema is not None else None
                 ),
                 wrapped_output_adapter=(
-                    TypeAdapter(json_schema_to_type(wrapped_schema))
-                    if wrapped_schema is not None
-                    else None
+                    _schema_adapter(wrapped_schema) if wrapped_schema is not None else None
                 ),
                 output_wrap_result=wrap_output,
             )
@@ -278,23 +317,22 @@ class ToolCatalog:
             facade_methods.setdefault(namespace, []).append(
                 f"    async def {method}(self, arguments: {input_type}) -> {output_type}: ..."
             )
-            facade_calls[(namespace, method)] = public_name
+            facade_calls[namespace, method] = public_name
 
         facade_stubs: list[str] = []
         for namespace in sorted(facade_methods):
             class_name = facade_classes[namespace]
-            facade_stubs.append(
-                "\n".join([f"class {class_name}:", *facade_methods[namespace]])
-            )
-            facade_stubs.append(f"{namespace}: {class_name}")
+            facade_stubs.extend((
+                "\n".join([f"class {class_name}:", *facade_methods[namespace]]),
+                f"{namespace}: {class_name}",
+            ))
 
-        type_stubs = "\n\n".join(
-            [
-                "from typing import Any, Literal, NotRequired, TypeAlias, TypedDict",
-                *_dedupe(definitions),
-                *facade_stubs,
-            ]
-        )
+        type_stubs = "\n\n".join([
+            STUB_IMPORTS,
+            *JSON_TYPE_STUBS,
+            *_dedupe(definitions),
+            *facade_stubs,
+        ])
         return cls(
             fingerprint=fingerprint,
             tools=specs,
@@ -356,19 +394,21 @@ class ToolCatalog:
         ]
 
     def counts_by_server(self) -> dict[str, int]:
-        counts = {server: 0 for server in self.servers}
+        counts = dict.fromkeys(self.servers, 0)
         for spec in self.tools.values():
             if spec.server:
                 counts[spec.server] = counts.get(spec.server, 0) + 1
         return counts
 
-    def validate_arguments(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def validate_arguments(self, tool_name: str, arguments: JsonObject) -> JsonObject:
         spec = self.tools[tool_name]
         value = spec.input_adapter.validate_python(arguments)
-        dumped = spec.input_adapter.dump_python(
-            value,
-            mode="json",
-            exclude_unset=True,
+        dumped = JSON_VALUE_ADAPTER.validate_python(
+            spec.input_adapter.dump_python(
+                value,
+                mode="json",
+                exclude_unset=True,
+            )
         )
         if not isinstance(dumped, dict):
             raise TypeError(f"{tool_name}: arguments did not validate as an object")
@@ -377,7 +417,7 @@ class ToolCatalog:
             raise TypeError(f"{tool_name}: arguments did not normalize as an object")
         return projected
 
-    def normalize_result(self, tool_name: str, result: mcp_types.CallToolResult) -> Any:
+    def normalize_result(self, tool_name: str, result: mcp_types.CallToolResult) -> JsonValue:
         spec = self.tools[tool_name]
         if result.isError:
             message = "Upstream MCP tool returned an error"
@@ -388,10 +428,11 @@ class ToolCatalog:
         if spec.output_schema:
             if result.structuredContent is None:
                 raise RuntimeError(
-                    f"{tool_name}: upstream returned no structuredContent for its declared output schema"
+                    f"{tool_name}: upstream returned no structuredContent "
+                    "for its declared output schema"
                 )
-            structured: Any = result.structuredContent
-            raw_meta = (result.meta or {}).get("fastmcp")
+            structured = JSON_VALUE_ADAPTER.validate_python(result.structuredContent)
+            raw_meta: object = (result.meta or {}).get("fastmcp")
             wrap_from_meta = isinstance(raw_meta, dict) and bool(raw_meta.get("wrap_result"))
             if spec.output_wrap_result or wrap_from_meta:
                 if not isinstance(structured, dict) or "result" not in structured:
@@ -401,18 +442,27 @@ class ToolCatalog:
             if wrap_from_meta and not spec.output_wrap_result:
                 adapter = spec.wrapped_output_adapter
             if adapter is None:
-                return _normalize_json_value(to_jsonable_python(structured))
+                return _normalize_json_value(
+                    JSON_VALUE_ADAPTER.validate_python(to_jsonable_python(structured))
+                )
             validated = adapter.validate_python(structured)
-            return _normalize_json_value(adapter.dump_python(validated, mode="json"))
+            return _normalize_json_value(
+                JSON_VALUE_ADAPTER.validate_python(adapter.dump_python(validated, mode="json"))
+            )
 
         if result.structuredContent is not None:
-            return _normalize_json_value(to_jsonable_python(result.structuredContent))
+            return _normalize_json_value(
+                JSON_VALUE_ADAPTER.validate_python(to_jsonable_python(result.structuredContent))
+            )
         if len(result.content) == 1 and isinstance(result.content[0], mcp_types.TextContent):
             return _normalize_text_result(result.content[0].text)
-        return [block.model_dump(mode="json", by_alias=True) for block in result.content]
+        return [
+            JSON_OBJECT_ADAPTER.validate_python(block.model_dump(mode="json", by_alias=True))
+            for block in result.content
+        ]
 
 
-def _project_to_input_shape(normalized: Any, supplied: Any) -> Any:
+def _project_to_input_shape(normalized: JsonValue, supplied: JsonValue) -> JsonValue:
     if isinstance(normalized, dict) and isinstance(supplied, dict):
         return {
             key: _project_to_input_shape(normalized[key], supplied_value)
@@ -428,7 +478,7 @@ def _project_to_input_shape(normalized: Any, supplied: Any) -> Any:
     return normalized
 
 
-def _normalize_json_value(value: Any) -> Any:
+def _normalize_json_value(value: JsonValue) -> JsonValue:
     if isinstance(value, str):
         return _normalize_text_result(value)
     if isinstance(value, dict):
@@ -438,40 +488,100 @@ def _normalize_json_value(value: Any) -> Any:
     return value
 
 
-def _normalize_text_result(text: str) -> Any:
+def _normalize_text_result(text: str) -> JsonValue:
     stripped = text.strip()
     if stripped in {"null", "true", "false"}:
-        return json.loads(stripped)
+        return JSON_VALUE_ADAPTER.validate_json(stripped)
     if not stripped.startswith(("{", "[")):
         return text
     try:
         parsed = json.loads(stripped)
     except json.JSONDecodeError:
         return text
-    return _normalize_json_value(parsed) if isinstance(parsed, (dict, list)) else text
+    return (
+        _normalize_json_value(JSON_VALUE_ADAPTER.validate_python(parsed))
+        if isinstance(parsed, (dict, list))
+        else text
+    )
 
 
-def load_mcp_json(path: Path) -> dict[str, Any]:
+def load_mcp_json(path: Path) -> JsonObject:
     if not path.exists():
         raise FileNotFoundError(f"MCP config not found: {path}")
     raw = path.read_text(encoding="utf-8").strip()
     if not raw:
         raise ValueError(f"MCP config is empty: {path}")
-    parsed = json.loads(raw)
+    parsed = JSON_VALUE_ADAPTER.validate_json(raw)
     if not isinstance(parsed, dict):
-        raise ValueError("mcp.json root must be an object")
+        raise TypeError("mcp.json root must be an object")
     return parsed
 
 
+def _string_record(
+    value: JsonValue | None,
+    *,
+    label: str,
+    server_name: str,
+) -> JsonObject:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError(f"MCP server {server_name!r} {label} must be an object")
+    result: JsonObject = {}
+    for key, entry in value.items():
+        if not isinstance(entry, str):
+            raise TypeError(f"MCP server {server_name!r} {label}.{key} must be a string")
+        result[key] = entry
+    return result
+
+
+def _child_process_environment(
+    explicit_value: JsonValue | None,
+    *,
+    server_name: str,
+) -> JsonObject:
+    allowed_keys = set(BASE_CHILD_ENV_KEYS)
+    allowed_keys.update(key for key in os.environ if key.startswith("LC_"))
+    for allowlist_key in ENV_ALLOWLIST_KEYS:
+        allowed_keys.update(
+            key.strip() for key in os.environ.get(allowlist_key, "").split(",") if key.strip()
+        )
+
+    environment: JsonObject = {key: os.environ[key] for key in allowed_keys if key in os.environ}
+    environment.update(_string_record(explicit_value, label="env", server_name=server_name))
+    return environment
+
+
+def _expanded_headers(value: JsonValue, *, server_name: str) -> JsonObject:
+    headers = _string_record(value, label="headers", server_name=server_name)
+    environment = _child_process_environment(None, server_name=server_name)
+
+    def replace(match: re.Match[str]) -> str:
+        replacement = environment.get(match.group(1))
+        return replacement if isinstance(replacement, str) else ""
+
+    return {
+        key: ENV_REFERENCE_PATTERN.sub(replace, header)
+        for key, header in headers.items()
+        if isinstance(header, str)
+    }
+
+
+def _required_string(value: JsonValue | None, *, label: str, server_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise TypeError(f"MCP server {server_name!r} {label} must be a non-empty string")
+    return value
+
+
 def normalize_mcp_config(
-    raw_config: dict[str, Any],
+    raw_config: JsonObject,
     *,
     oauth_storage_dir: Path,
-    oauth_client_name: str = "pi-mcp-codemode",
+    oauth_client_name: str = "pi-codemcp",
 ) -> NormalizedConfig:
     server_block = raw_config.get("mcpServers", raw_config)
     if not isinstance(server_block, dict):
-        raise ValueError("mcp.json must contain an object at the root or under mcpServers")
+        raise TypeError("mcp.json must contain an object at the root or under mcpServers")
 
     oauth_storage_dir.mkdir(parents=True, exist_ok=True)
     oauth_storage = FileTreeStore(
@@ -486,56 +596,75 @@ def normalize_mcp_config(
 
     for name, value in server_block.items():
         if not isinstance(value, dict):
-            raise ValueError(f"MCP server {name!r} must be an object")
-        if value.get("disabled") is True:
+            raise TypeError(f"MCP server {name!r} must be an object")
+        if value.get("disabled") is True or value.get("enabled") is False:
             continue
-        cleaned = {key: item for key, item in value.items() if key not in PI_ONLY_FIELDS}
+        cleaned: JsonObject = {
+            key: item for key, item in value.items() if key not in PI_ONLY_FIELDS
+        }
         config_fingerprint = _server_config_fingerprint(name, cleaned)
 
         if "command" in cleaned:
-            normalized = StdioMCPServer.model_validate(
-                {**cleaned, "transport": "stdio", "type": "stdio"}
+            cleaned["env"] = _child_process_environment(
+                cleaned.get("env"),
+                server_name=name,
             )
-            normalized_servers[name] = normalized
+            stdio_server = StdioMCPServer.model_validate({
+                **cleaned,
+                "transport": "stdio",
+                "type": "stdio",
+            })
+            normalized_servers[name] = stdio_server
             server_infos.append(
                 NormalizedServerInfo(
                     name=name,
                     transport="stdio",
                     config_fingerprint=config_fingerprint,
-                    description=normalized.description,
+                    description=stdio_server.description,
                 )
             )
             continue
 
         if "url" in cleaned:
+            url = _required_string(cleaned.get("url"), label="url", server_name=name)
             transport = cleaned.get("transport") or cleaned.get("type")
             if transport is None:
-                transport = infer_transport_type_from_url(cleaned["url"])
-            if transport not in REMOTE_TRANSPORTS:
+                transport = infer_transport_type_from_url(url)
+            if not isinstance(transport, str) or transport not in REMOTE_TRANSPORTS:
                 raise ValueError(f"Unsupported MCP transport for {name}: {transport}")
+            raw_headers = cleaned.get("headers")
+            if raw_headers is not None:
+                cleaned["headers"] = _expanded_headers(raw_headers, server_name=name)
             raw_auth = cleaned.get("auth")
-            auth: Any = raw_auth
+            auth: str | httpx.Auth | None
             auth_kind: str | None = None
             if raw_auth == "oauth":
                 auth = OAuth(
-                    mcp_url=cleaned["url"],
+                    mcp_url=url,
                     client_name=oauth_client_name,
                     token_storage=oauth_storage,
                 )
                 auth_kind = "oauth"
-            elif isinstance(raw_auth, str) and raw_auth:
-                auth_kind = "bearer"
-            normalized = RemoteMCPServer.model_validate(
-                {**cleaned, "transport": transport, "auth": auth}
-            )
-            normalized_servers[name] = normalized
+            elif isinstance(raw_auth, str):
+                auth = raw_auth or None
+                auth_kind = "bearer" if raw_auth else None
+            elif raw_auth is None:
+                auth = None
+            else:
+                raise TypeError(f"MCP server {name!r} auth must be a string")
+            remote_server = RemoteMCPServer.model_validate({
+                **cleaned,
+                "transport": transport,
+                "auth": auth,
+            })
+            normalized_servers[name] = remote_server
             server_infos.append(
                 NormalizedServerInfo(
                     name=name,
                     transport="sse" if transport == "sse" else "http",
                     config_fingerprint=config_fingerprint,
                     auth=auth_kind,
-                    description=normalized.description,
+                    description=remote_server.description,
                 )
             )
             continue
@@ -550,12 +679,25 @@ def normalize_mcp_config(
     )
 
 
+def _as_schema(value: JsonValue | None) -> JsonSchema:
+    return value if isinstance(value, (dict, bool)) else True
+
+
+def _object_property(schema: JsonObject, name: str) -> JsonValue | None:
+    properties = schema.get("properties")
+    return properties.get(name) if isinstance(properties, dict) else None
+
+
+def _schema_adapter(schema: JsonSchema) -> TypeAdapter[object]:
+    return TypeAdapter(json_schema_to_type(schema))
+
+
 class StubBuilder:
     def __init__(
         self,
         tool_name: str,
-        input_schema: dict[str, Any],
-        output_schema: dict[str, Any] | None,
+        input_schema: JsonObject,
+        output_schema: JsonObject | None,
     ) -> None:
         self.tool_name = tool_name
         self.input_schema = input_schema
@@ -569,9 +711,9 @@ class StubBuilder:
             self.input_schema,
             self.input_schema,
         )
-        output_schema: dict[str, Any] | bool = self.output_schema or True
+        output_schema: JsonSchema = self.output_schema or True
         if self.output_schema and self.output_schema.get("x-fastmcp-wrap-result"):
-            output_schema = self.output_schema.get("properties", {}).get("result", True)
+            output_schema = _as_schema(_object_property(self.output_schema, "result"))
         if isinstance(output_schema, dict) and output_schema.get("type") == "string":
             # Runtime normalization promotes JSON object/array text to native values.
             # A plain `str` annotation would therefore be a false guarantee.
@@ -586,8 +728,8 @@ class StubBuilder:
     def _ensure_named_type(
         self,
         name: str,
-        schema: dict[str, Any] | bool,
-        root: dict[str, Any] | bool,
+        schema: JsonSchema,
+        root: JsonSchema,
     ) -> str:
         expression = self._type_expr(schema, root, name)
         if expression == name:
@@ -600,43 +742,56 @@ class StubBuilder:
 
     def _type_expr(
         self,
-        schema: dict[str, Any] | bool,
-        root: dict[str, Any] | bool,
+        schema: JsonSchema,
+        root: JsonSchema,
         name: str,
     ) -> str:
         if isinstance(schema, bool):
-            return "Any"
-        if "$ref" in schema:
-            return self._type_expr(_resolve_ref(schema["$ref"], root), root, name)
-        if "const" in schema:
-            return f"Literal[{schema['const']!r}]"
-        if schema.get("enum"):
-            return f"Literal[{', '.join(repr(value) for value in schema['enum'])}]"
+            return "JsonValue" if schema else "Never"
+        ref = schema.get("$ref")
+        if isinstance(ref, str):
+            return self._type_expr(_resolve_ref(ref, root), root, name)
+        constant = schema.get("const")
+        if isinstance(constant, (bool, int, float, str)) or (
+            constant is None and "const" in schema
+        ):
+            return f"Literal[{constant!r}]"
+        enum_values = schema.get("enum")
+        if (
+            isinstance(enum_values, list)
+            and enum_values
+            and all(
+                isinstance(value, (bool, int, float, str)) or value is None for value in enum_values
+            )
+        ):
+            return f"Literal[{', '.join(repr(value) for value in enum_values)}]"
         alternatives = schema.get("anyOf") or schema.get("oneOf")
-        if alternatives:
+        if isinstance(alternatives, list):
             rendered = [
                 self._type_expr(member, root, f"{name}Option{index}")
                 for index, member in enumerate(alternatives, start=1)
+                if isinstance(member, (dict, bool))
             ]
-            return " | ".join(dict.fromkeys(rendered)) or "Any"
+            return " | ".join(dict.fromkeys(rendered)) or "JsonValue"
         if "allOf" in schema:
             merged = _merge_all_of(schema, root)
-            return "Any" if merged is None else self._type_expr(merged, root, name)
+            return "JsonValue" if merged is None else self._type_expr(merged, root, name)
 
         raw_type = schema.get("type")
         if isinstance(raw_type, list):
             rendered = [
                 self._type_expr({**schema, "type": member}, root, name)
                 for member in raw_type
+                if isinstance(member, str)
             ]
-            return " | ".join(dict.fromkeys(rendered)) or "Any"
+            return " | ".join(dict.fromkeys(rendered)) or "JsonValue"
         if raw_type is None:
             if "properties" in schema or "additionalProperties" in schema:
                 raw_type = "object"
             elif "items" in schema:
                 raw_type = "array"
             else:
-                return "Any"
+                return "JsonValue"
 
         primitives = {
             "string": "str",
@@ -645,45 +800,54 @@ class StubBuilder:
             "boolean": "bool",
             "null": "None",
         }
-        if raw_type in primitives:
+        if isinstance(raw_type, str) and raw_type in primitives:
             return primitives[raw_type]
         if raw_type == "array":
             items = schema.get("items", True)
             if isinstance(items, list):
                 members = [
                     self._type_expr(
-                        cast(dict[str, Any] | bool, item)
-                        if isinstance(item, (dict, bool))
-                        else True,
+                        _as_schema(item),
                         root,
                         f"{name}Item{index}",
                     )
                     for index, item in enumerate(items, start=1)
                 ]
                 return f"tuple[{', '.join(members)}]"
-            return f"list[{self._type_expr(items, root, f'{name}Item')}]"
+            return f"list[{self._type_expr(_as_schema(items), root, f'{name}Item')}]"
         if raw_type == "object":
-            properties = schema.get("properties") or {}
+            raw_properties = schema.get("properties")
+            properties = raw_properties if isinstance(raw_properties, dict) else {}
             if properties:
                 if any(not _valid_identifier(prop) for prop in properties):
-                    return "dict[str, Any]"
+                    return "dict[str, JsonValue]"
                 key = (name, _schema_fingerprint(schema))
                 if key in self._seen:
                     return self._seen[key]
                 self._seen[key] = name
-                required = set(schema.get("required") or [])
+                raw_required = schema.get("required")
+                required = (
+                    {item for item in raw_required if isinstance(item, str)}
+                    if isinstance(raw_required, list)
+                    else set()
+                )
                 lines = [f"class {name}(TypedDict):"]
                 for prop, prop_schema in properties.items():
-                    prop_type = self._type_expr(prop_schema, root, f"{name}{_pascal_case(prop)}")
+                    child_schema = _as_schema(prop_schema)
+                    prop_type = self._type_expr(
+                        child_schema,
+                        root,
+                        f"{name}{_pascal_case(prop)}",
+                    )
                     wrapper = prop_type if prop in required else f"NotRequired[{prop_type}]"
-                    comment = _field_comment(prop_schema)
+                    comment = _field_comment(child_schema)
                     suffix = f"  # {comment}" if comment else ""
                     lines.append(f"    {prop}: {wrapper}{suffix}")
                 self._definitions.append("\n".join(lines))
                 return name
-            additional = schema.get("additionalProperties", True)
+            additional = _as_schema(schema.get("additionalProperties", True))
             return f"dict[str, {self._type_expr(additional, root, f'{name}Value')}]"
-        return "Any"
+        return "JsonValue"
 
 
 def _short_description(description: str | None, limit: int = 240) -> str | None:
@@ -696,11 +860,15 @@ def _short_description(description: str | None, limit: int = 240) -> str | None:
     return f"{compact[: limit - 1].rstrip()}…"
 
 
-def _field_comment(schema: dict[str, Any] | bool) -> str | None:
+def _field_comment(schema: JsonSchema) -> str | None:
     if isinstance(schema, bool):
         return None
     notes: list[str] = []
-    description = _short_description(schema.get("description"), limit=120)
+    raw_description = schema.get("description")
+    description = _short_description(
+        raw_description if isinstance(raw_description, str) else None,
+        limit=120,
+    )
     if description:
         notes.append(description)
     constraints = (
@@ -729,25 +897,25 @@ def _build_search_blob(
     server: str,
     short_name: str,
     description: str | None,
-    input_schema: dict[str, Any],
+    input_schema: JsonObject,
 ) -> str:
-    return " ".join(
-        [
-            public_name,
-            call,
-            server,
-            short_name,
-            description or "",
-            *_collect_property_names(input_schema),
-        ]
-    )
+    return " ".join([
+        public_name,
+        call,
+        server,
+        short_name,
+        description or "",
+        *_collect_property_names(input_schema),
+    ])
 
 
-def _collect_property_names(schema: dict[str, Any] | bool) -> list[str]:
+def _collect_property_names(schema: JsonSchema) -> list[str]:
     if isinstance(schema, bool):
         return []
     names: list[str] = []
-    for prop, child in (schema.get("properties") or {}).items():
+    raw_properties = schema.get("properties")
+    properties = raw_properties if isinstance(raw_properties, dict) else {}
+    for prop, child in properties.items():
         names.append(prop)
         if isinstance(child, dict):
             names.extend(_collect_property_names(child))
@@ -807,7 +975,7 @@ def _valid_identifier(value: str) -> bool:
     return value.isidentifier() and not keyword.iskeyword(value)
 
 
-def _server_config_fingerprint(name: str, config: dict[str, Any]) -> str:
+def _server_config_fingerprint(name: str, config: JsonObject) -> str:
     payload = json.dumps(
         {"name": name, "config": config},
         sort_keys=True,
@@ -816,14 +984,14 @@ def _server_config_fingerprint(name: str, config: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _schema_fingerprint(schema: dict[str, Any] | bool) -> str:
+def _schema_fingerprint(schema: JsonSchema) -> str:
     return hashlib.sha256(json.dumps(schema, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def _resolve_ref(ref: str, root: dict[str, Any] | bool) -> dict[str, Any]:
+def _resolve_ref(ref: str, root: JsonSchema) -> JsonObject:
     if isinstance(root, bool) or not ref.startswith("#/"):
         return {}
-    current: Any = root
+    current: JsonValue = root
     for raw_part in ref[2:].split("/"):
         part = raw_part.replace("~1", "/").replace("~0", "~")
         if not isinstance(current, dict):
@@ -833,20 +1001,41 @@ def _resolve_ref(ref: str, root: dict[str, Any] | bool) -> dict[str, Any]:
 
 
 def _merge_all_of(
-    schema: dict[str, Any],
-    root: dict[str, Any] | bool,
-) -> dict[str, Any] | None:
-    merged: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
-    for member in schema.get("allOf") or []:
-        resolved = _resolve_ref(member["$ref"], root) if "$ref" in member else member
+    schema: JsonObject,
+    root: JsonSchema,
+) -> JsonObject | None:
+    merged_properties: JsonObject = {}
+    merged_required: list[JsonValue] = []
+    additional_properties: JsonValue = True
+    has_additional_properties = False
+    raw_members = schema.get("allOf")
+    if not isinstance(raw_members, list):
+        return None
+    for member in raw_members:
+        if not isinstance(member, dict):
+            return None
+        ref = member.get("$ref")
+        resolved = _resolve_ref(ref, root) if isinstance(ref, str) else member
         if resolved.get("type") not in {None, "object"}:
             return None
-        merged["properties"].update(resolved.get("properties") or {})
-        merged["required"] = list(
-            dict.fromkeys([*merged["required"], *(resolved.get("required") or [])])
-        )
+        raw_properties = resolved.get("properties")
+        if isinstance(raw_properties, dict):
+            merged_properties.update(raw_properties)
+        raw_required = resolved.get("required")
+        if isinstance(raw_required, list):
+            for required in raw_required:
+                if isinstance(required, str) and required not in merged_required:
+                    merged_required.append(required)
         if "additionalProperties" in resolved:
-            merged["additionalProperties"] = resolved["additionalProperties"]
+            additional_properties = resolved["additionalProperties"]
+            has_additional_properties = True
+    merged: JsonObject = {
+        "type": "object",
+        "properties": merged_properties,
+        "required": merged_required,
+    }
+    if has_additional_properties:
+        merged["additionalProperties"] = additional_properties
     return merged
 
 
