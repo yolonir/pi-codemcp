@@ -68,11 +68,12 @@ def test_runtime_paths_honor_pi_agent_directory(
     monkeypatch.delenv("PI_CODEMCP_AGENT_DIR", raising=False)
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path))
 
-    config, oauth, catalog = gateway._runtime_paths()
+    config, oauth, catalog, settings = gateway._runtime_paths()
 
     assert config == tmp_path / "mcp.json"
     assert oauth == tmp_path / "pi-codemcp" / "oauth"
     assert catalog == tmp_path / "pi-codemcp" / "catalog"
+    assert settings == tmp_path / "pi-codemcp" / "settings.json"
 
 
 def configure_environment(
@@ -82,6 +83,89 @@ def configure_environment(
 ) -> None:
     assert config_path == tmp_path / "mcp.json"
     monkeypatch.setenv("PI_CODEMCP_AGENT_DIR", str(tmp_path))
+
+
+def test_gateway_reports_an_all_disabled_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(
+        json.dumps({"mcpServers": {"only": {"command": "unused", "disabled": True}}})
+    )
+
+    runtime = gateway.GatewayRuntime.create(
+        config_path,
+        tmp_path / "oauth",
+        tmp_path / "catalog",
+    )
+
+    assert runtime.status().model_dump()["upstreams"] == [
+        {
+            "name": "only",
+            "transport": "stdio",
+            "enabled": False,
+            "connected": False,
+            "discovered": False,
+            "auth": None,
+            "tool_count": 0,
+            "total_tool_count": 0,
+            "tools": [],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_force_discover_refreshes_only_the_selected_server(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).parents[2]
+    fixture = root / "tests" / "fixtures" / "upstream_server.py"
+    alpha_pid = tmp_path / "alpha.pid"
+    beta_pid = tmp_path / "beta.pid"
+    config_path = tmp_path / "mcp.json"
+    write_config(config_path, fixture, alpha_pid, beta_pid)
+    runtime = gateway.GatewayRuntime.create(
+        config_path,
+        tmp_path / "oauth",
+        tmp_path / "catalog",
+    )
+
+    try:
+        first_status = await runtime.discover("beta")
+        assert first_status.tool_count == 1
+        assert (
+            next(
+                upstream
+                for upstream in first_status.upstreams
+                if upstream.name == "beta"
+            ).discovered
+            is True
+        )
+        assert not alpha_pid.exists()
+        first_pid = int(beta_pid.read_text())
+        await wait_for_process_exit(first_pid)
+        beta_pid.unlink()
+
+        runtime.settings_path.write_text(
+            json.dumps({"disabledTools": {"beta": ["save_number"]}})
+        )
+        policy_status = await runtime.reload_settings()
+        beta_status = next(
+            upstream for upstream in policy_status.upstreams if upstream.name == "beta"
+        )
+        assert beta_status.tool_count == 0
+        assert beta_status.total_tool_count == 1
+        assert beta_status.tools[0].enabled is False
+        assert runtime.catalog.search("save number") == []
+        blocked = await runtime.execute('return await beta.save_number({"value": 1})')
+        assert blocked.ok is False
+        assert blocked.failure_stage == "preflight"
+
+        second_status = await runtime.discover("beta")
+        assert second_status.tool_count == 0
+        assert beta_pid.exists()
+        second_pid = int(beta_pid.read_text())
+        await wait_for_process_exit(second_pid)
+    finally:
+        await runtime.close()
 
 
 @pytest.mark.asyncio
@@ -100,11 +184,26 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
     client = Client(gateway.mcp)
     async with client:
         exposed = {tool.name for tool in await client.list_tools()}
-        assert exposed == {"search", "get_schema", "execute", "status"}
+        assert exposed == {"search", "discover", "reload_settings", "execute", "status"}
 
         initial_status = await client.call_tool("status", {})
         initial_data = structured_data(initial_status.structured_content)
         assert initial_data["tool_count"] == 0
+        upstreams = {item["name"]: item for item in initial_data["upstreams"]}
+        assert upstreams["alpha"]["enabled"] is True
+        assert upstreams["alpha"]["connected"] is False
+        assert upstreams["alpha"]["discovered"] is False
+        assert upstreams["ignored"] == {
+            "name": "ignored",
+            "transport": "stdio",
+            "enabled": False,
+            "connected": False,
+            "discovered": False,
+            "auth": None,
+            "tool_count": 0,
+            "total_tool_count": 0,
+            "tools": [],
+        }
         assert not alpha_pid.exists()
         assert not beta_pid.exists()
 
@@ -131,16 +230,13 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
         alpha_pid.unlink()
         beta_pid.unlink()
 
-        schema = await client.call_tool(
-            "get_schema",
-            {"tools": ["alpha_get_number", "beta_save_number"]},
+        assert "AlphaGetNumberArgs" in next(
+            item["stub"]
+            for item in search_data["results"]
+            if item["name"] == "alpha_get_number"
         )
-        schema_data = structured_data(schema.structured_content)
-        assert len(schema_data["tools"]) == 2
-        assert schema_data["tools"][0]["call"] == "alpha.get_number"
-        assert "input_schema" not in schema_data["tools"][0]
-        assert "output_schema" not in schema_data["tools"][0]
-        assert "catalog_fingerprint" not in schema_data
+        assert "input_schema" not in search_data["results"][0]
+        assert "output_schema" not in search_data["results"][0]
         assert not alpha_pid.exists()
         assert not beta_pid.exists()
 
@@ -258,7 +354,7 @@ async def test_catalog_cache_invalidates_only_changed_server(
             (await second.call_tool("status", {})).structured_content
         )
         counts = {item["name"]: item["tool_count"] for item in status["upstreams"]}
-        assert counts == {"alpha": 0, "beta": 1}
+        assert counts == {"alpha": 0, "beta": 1, "ignored": 0}
         await second.call_tool("search", {"query": "number"})
         assert alpha_pid.exists()
         assert not beta_pid.exists()

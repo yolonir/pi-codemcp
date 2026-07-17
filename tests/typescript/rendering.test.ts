@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, initTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { createCodeMcpExtension } from "../../extensions/index.js";
 
@@ -12,6 +12,8 @@ interface CapturedTool {
     theme: Theme,
   ) => Component;
 }
+
+initTheme(undefined, false);
 
 const plainTheme = {
   fg: (_color: string, text: string) => text,
@@ -76,6 +78,25 @@ describe("codemcp_execute rendering", () => {
     expect(result).toContain("value");
     expect(result).not.toContain("stage");
     expect(result).not.toContain("calls_made");
+
+    const compact = render(
+      tool.renderResult?.(
+        {
+          content: [{ type: "text", text: "result" }],
+          details: {
+            ok: true,
+            callsMade: 1,
+            outputTokens: 875,
+            preview: [],
+          },
+        },
+        { expanded: false, isPartial: false },
+        plainTheme,
+      ) as Component,
+    );
+    expect(compact).toContain("Output · 1 MCP call · ~875 tokens");
+    expect(compact).not.toContain("object");
+    expect(compact).not.toContain("KB");
   });
 
   test("formats preflight and runtime failures differently", () => {

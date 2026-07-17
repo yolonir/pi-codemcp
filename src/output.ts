@@ -11,16 +11,25 @@ export interface CodeMcpOutputDetails {
   totalBytes: number;
   outputLines: number;
   totalLines: number;
+  outputTokens: number;
 }
 
-export function formatCodeMcpOutput(value: unknown): {
+export interface CodeMcpOutputLimits {
+  maxBytes?: number;
+  maxLines?: number;
+}
+
+export function formatCodeMcpOutput(
+  value: unknown,
+  limits: CodeMcpOutputLimits = {},
+): {
   text: string;
   details: CodeMcpOutputDetails;
 } {
   const serialized = JSON.stringify(value, null, 2);
   const truncation = truncateHead(serialized, {
-    maxBytes: DEFAULT_MAX_BYTES,
-    maxLines: DEFAULT_MAX_LINES,
+    maxBytes: limits.maxBytes ?? DEFAULT_MAX_BYTES,
+    maxLines: limits.maxLines ?? DEFAULT_MAX_LINES,
   });
   let text = truncation.content;
   if (truncation.truncated) {
@@ -37,6 +46,7 @@ export function formatCodeMcpOutput(value: unknown): {
       totalBytes: truncation.totalBytes,
       outputLines: truncation.outputLines,
       totalLines: truncation.totalLines,
+      outputTokens: Math.ceil(text.length / 4),
     },
   };
 }

@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { loadCodeMcpSettings } from "./settings.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -47,6 +48,14 @@ export class SidecarClient {
     };
   }
 
+  get configPath(): string {
+    return join(this.agentDir, "mcp.json");
+  }
+
+  get settingsPath(): string {
+    return join(this.agentDir, "pi-codemcp", "settings.json");
+  }
+
   get pid(): number | null {
     return this.transport?.pid ?? null;
   }
@@ -56,14 +65,17 @@ export class SidecarClient {
   }
 
   async call(
-    name: "search" | "get_schema" | "execute" | "status",
+    name: "search" | "discover" | "reload_settings" | "execute" | "status",
     args: JsonObject,
     signal?: AbortSignal,
   ): Promise<JsonObject> {
     await this.ensureStarted(signal);
     const client = this.client;
     if (!client) throw new Error("Sidecar client failed to initialize");
-    const timeout = name === "execute" ? 35_000 : 30_000;
+    const timeout =
+      name === "execute"
+        ? loadCodeMcpSettings(this.settingsPath).executionTimeoutSeconds * 1_000 + 5_000
+        : 30_000;
     const result = await client.callTool({ name, arguments: args }, undefined, {
       timeout,
       ...(signal === undefined ? {} : { signal }),

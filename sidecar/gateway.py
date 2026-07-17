@@ -13,19 +13,20 @@ from fastmcp import Client, FastMCP
 from fastmcp.mcp_config import RemoteMCPServer, StdioMCPServer
 
 from .catalog_cache import CatalogCache
-from .executor import ExecutionResponse, ExecutionSettings, MontyExecutor
+from .executor import ExecutionResponse, MontyExecutor
 from .schemas import (
     NormalizedConfig,
     NormalizedServerInfo,
-    SchemaResponse,
     SearchResponse,
     ServerToolSummary,
     StatusResponse,
     ToolCatalog,
     UpstreamStatus,
+    UpstreamToolStatus,
     load_mcp_json,
     normalize_mcp_config,
 )
+from .settings import CodeMcpSettings, load_settings
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
@@ -38,8 +39,6 @@ if TYPE_CHECKING:
 DEFAULT_AGENT_DIR = Path.home() / ".pi" / "agent"
 CODEMCP_AGENT_DIR_ENV = "PI_CODEMCP_AGENT_DIR"
 PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR"
-MAX_SCHEMAS_PER_REQUEST = 20
-
 type ServerConfig = StdioMCPServer | RemoteMCPServer
 
 
@@ -67,9 +66,9 @@ class ServerHandle:
             tools=cache.load(info.name, info.config_fingerprint),
         )
 
-    async def discover(self) -> list[mcp_types.Tool]:
+    async def discover(self, *, force: bool = False) -> list[mcp_types.Tool]:
         async with self._lock:
-            if self.tools is not None:
+            if self.tools is not None and not force:
                 return self.tools
             was_connected = self.client is not None
             client = await self._connect_locked()
@@ -130,6 +129,8 @@ class ServerHandle:
 @dataclass(slots=True)
 class GatewayRuntime:
     config_path: Path
+    settings_path: Path
+    settings: CodeMcpSettings
     normalized: NormalizedConfig
     handles: dict[str, ServerHandle]
     catalog: ToolCatalog
@@ -142,30 +143,41 @@ class GatewayRuntime:
         config_path: Path,
         oauth_storage_dir: Path,
         catalog_cache_dir: Path,
-        *,
-        settings: ExecutionSettings | None = None,
+        settings_path: Path | None = None,
     ) -> GatewayRuntime:
+        resolved_settings_path = settings_path or catalog_cache_dir.parent / "settings.json"
+        settings = load_settings(resolved_settings_path)
         raw = load_mcp_json(config_path)
         normalized = normalize_mcp_config(
             raw,
             oauth_storage_dir=oauth_storage_dir,
         )
-        cache = CatalogCache(catalog_cache_dir)
+        cache = CatalogCache(
+            catalog_cache_dir,
+            max_age_seconds=settings.cache_ttl_seconds,
+        )
         info_by_name = {server.name: server for server in normalized.servers}
         handles = {
             name: ServerHandle.create(info_by_name[name], server_config, cache)
             for name, server_config in normalized.config.mcpServers.items()
         }
         catalog = ToolCatalog.from_server_tools(
-            {name: handle.tools or [] for name, handle in handles.items()},
+            {
+                name: [
+                    tool for tool in handle.tools or [] if settings.tool_enabled(name, tool.name)
+                ]
+                for name, handle in handles.items()
+            },
             handles.keys(),
         )
         return cls(
             config_path=config_path,
+            settings_path=resolved_settings_path,
+            settings=settings,
             normalized=normalized,
             handles=handles,
             catalog=catalog,
-            executor=MontyExecutor(catalog, settings=settings),
+            executor=MontyExecutor(catalog, settings=settings.execution_settings()),
         )
 
     async def close(self) -> None:
@@ -196,25 +208,6 @@ class GatewayRuntime:
             results=self.catalog.search(clean_query, bounded_limit, server=server),
         )
 
-    async def get_schema(
-        self,
-        tools: list[str],
-    ) -> SchemaResponse:
-        if not tools:
-            raise ValueError("tools must contain at least one tool name")
-        if len(tools) > MAX_SCHEMAS_PER_REQUEST:
-            raise ValueError(
-                f"at most {MAX_SCHEMAS_PER_REQUEST} tool schemas can be requested at once"
-            )
-        requested_servers: set[str] = set()
-        for tool_name in tools:
-            for server in sorted(self.handles, key=len, reverse=True):
-                if tool_name.startswith(f"{server}_"):
-                    requested_servers.add(server)
-                    break
-        await self._ensure_servers_discovered(requested_servers)
-        return SchemaResponse(tools=self.catalog.get_schema(tools))
-
     async def execute(self, code: str) -> ExecutionResponse:
         await self._ensure_servers_discovered(self._referenced_servers(code))
         self.executor.update_catalog(self.catalog)
@@ -231,21 +224,53 @@ class GatewayRuntime:
 
         return await self.executor.execute(code, dispatch)
 
+    async def discover(self, server: str) -> StatusResponse:
+        handle = self.handles.get(server)
+        if handle is None:
+            raise ValueError(f"Unknown or disabled MCP server: {server}")
+        await handle.discover(force=True)
+        await self._rebuild_catalog()
+        return self.status()
+
+    async def reload_settings(self) -> StatusResponse:
+        self.settings = load_settings(self.settings_path)
+        for handle in self.handles.values():
+            handle.cache.max_age_seconds = self.settings.cache_ttl_seconds
+        self.executor.settings = self.settings.execution_settings()
+        await self._rebuild_catalog()
+        return self.status()
+
     def status(self) -> StatusResponse:
-        counts = self.catalog.counts_by_server()
+        upstreams: list[UpstreamStatus] = []
+        for server in self.normalized.servers:
+            handle = self.handles.get(server.name)
+            all_tools = handle.tools if handle is not None and handle.tools is not None else []
+            tools = [
+                UpstreamToolStatus(
+                    name=tool.name,
+                    enabled=self.settings.tool_enabled(server.name, tool.name),
+                    description=_compact_description(tool.description),
+                )
+                for tool in sorted(all_tools, key=lambda item: item.name)
+            ]
+            upstreams.append(
+                UpstreamStatus(
+                    name=server.name,
+                    transport=server.transport,
+                    enabled=server.enabled,
+                    connected=handle is not None and handle.client is not None,
+                    discovered=handle is not None and handle.tools is not None,
+                    auth=server.auth,
+                    tool_count=sum(tool.enabled for tool in tools),
+                    total_tool_count=len(tools),
+                    tools=tools,
+                )
+            )
         return StatusResponse(
             connected=True,
             config_path=str(self.config_path),
             tool_count=len(self.catalog.tools),
-            upstreams=[
-                UpstreamStatus(
-                    name=server.name,
-                    transport=server.transport,
-                    auth=server.auth,
-                    tool_count=counts.get(server.name, 0),
-                )
-                for server in self.normalized.servers
-            ],
+            upstreams=upstreams,
         )
 
     async def _ensure_catalog_complete(self) -> None:
@@ -262,9 +287,19 @@ class GatewayRuntime:
             await asyncio.gather(*(handle.discover() for handle in missing))
         if not missing:
             return
+        await self._rebuild_catalog()
+
+    async def _rebuild_catalog(self) -> None:
         async with self._catalog_lock:
             self.catalog = ToolCatalog.from_server_tools(
-                {name: handle.tools or [] for name, handle in self.handles.items()},
+                {
+                    name: [
+                        tool
+                        for tool in handle.tools or []
+                        if self.settings.tool_enabled(name, tool.name)
+                    ]
+                    for name, handle in self.handles.items()
+                },
                 self.handles.keys(),
             )
             self.executor.update_catalog(self.catalog)
@@ -286,6 +321,13 @@ class GatewayRuntime:
         }
 
 
+def _compact_description(description: str | None, limit: int = 160) -> str | None:
+    if description is None:
+        return None
+    compact = " ".join(description.split("\n\n", 1)[0].split())
+    return compact if len(compact) <= limit else f"{compact[: limit - 1].rstrip()}…"
+
+
 @dataclass(slots=True)
 class RuntimeState:
     runtime: GatewayRuntime | None = None
@@ -300,17 +342,27 @@ def _require_runtime() -> GatewayRuntime:
     return _runtime_state.runtime
 
 
-def _runtime_paths() -> tuple[Path, Path, Path]:
+def _runtime_paths() -> tuple[Path, Path, Path, Path]:
     raw_agent_dir = os.environ.get(CODEMCP_AGENT_DIR_ENV) or os.environ.get(PI_AGENT_DIR_ENV)
     agent_dir = Path(raw_agent_dir).expanduser() if raw_agent_dir else DEFAULT_AGENT_DIR
     state_dir = agent_dir / "pi-codemcp"
-    return agent_dir / "mcp.json", state_dir / "oauth", state_dir / "catalog"
+    return (
+        agent_dir / "mcp.json",
+        state_dir / "oauth",
+        state_dir / "catalog",
+        state_dir / "settings.json",
+    )
 
 
 @asynccontextmanager
 async def lifespan(_: FastMCP[None]) -> AsyncIterator[None]:
-    config_path, oauth_dir, catalog_dir = _runtime_paths()
-    _runtime_state.runtime = GatewayRuntime.create(config_path, oauth_dir, catalog_dir)
+    config_path, oauth_dir, catalog_dir, settings_path = _runtime_paths()
+    _runtime_state.runtime = GatewayRuntime.create(
+        config_path,
+        oauth_dir,
+        catalog_dir,
+        settings_path,
+    )
     try:
         yield
     finally:
@@ -322,8 +374,7 @@ async def lifespan(_: FastMCP[None]) -> AsyncIterator[None]:
 mcp = FastMCP(
     "pi-codemcp-sidecar",
     instructions=(
-        "Search for MCP tools, inspect their compact typed SDK signatures, then execute "
-        "a sandboxed Python chain."
+        "Search for MCP tools and their typed SDK stubs, then execute a sandboxed Python chain."
     ),
     lifespan=lifespan,
 )
@@ -340,9 +391,15 @@ async def search(
 
 
 @mcp.tool
-async def get_schema(tools: list[str]) -> SchemaResponse:
-    """Return compact typed SDK signatures for selected upstream tools."""
-    return await _require_runtime().get_schema(tools)
+async def discover(server: str) -> StatusResponse:
+    """Force-refresh one enabled upstream tool catalog."""
+    return await _require_runtime().discover(server)
+
+
+@mcp.tool
+async def reload_settings() -> StatusResponse:
+    """Reload persisted CodeMCP settings and tool policy."""
+    return await _require_runtime().reload_settings()
 
 
 @mcp.tool

@@ -20,7 +20,7 @@ async function waitForExit(pid: number): Promise<void> {
   throw new Error(`process ${pid} did not exit`);
 }
 
-test("stdio client runs search/schema/chains, forwards cancellation, and cleans up", async () => {
+test("stdio client runs typed search/chains, forwards cancellation, and cleans up", async () => {
   const temporary = await mkdtemp(join(tmpdir(), "pi-codemcp-ts-"));
   const configPath = join(temporary, "mcp.json");
   const alphaPidPath = join(temporary, "alpha.pid");
@@ -57,16 +57,13 @@ test("stdio client runs search/schema/chains, forwards cancellation, and cleans 
       client.call("search", { query: "save number", limit: 5 }),
       client.call("status", {}),
     ]);
-    expect((search.results as Array<{ name: string }>)[0]?.name).toBe("beta_save_number");
+    const matches = search.results as Array<{ name: string; stub: string }>;
+    expect(matches[0]?.name).toBe("beta_save_number");
+    expect(matches[0]?.stub).toContain("BetaSaveNumberArgs");
     expect(initialStatus).toMatchObject({ connected: true, tool_count: 0 });
     expect(
       await readFile(join(temporary, "pi-codemcp", "runtime", "venv", "pyvenv.cfg"), "utf8"),
     ).toContain("version");
-
-    const schema = await client.call("get_schema", {
-      tools: ["alpha_get_number", "beta_save_number"],
-    });
-    expect(schema.tools).toHaveLength(2);
 
     const execution = await client.call("execute", {
       code: `

@@ -74,16 +74,9 @@ class NormalizedServerInfo(BaseModel):
     name: str
     transport: str
     config_fingerprint: str
+    enabled: bool = True
     auth: str | None = None
     description: str | None = None
-
-
-class SearchMatch(BaseModel):
-    name: str
-    call: str
-    server: str | None = None
-    description: str | None = None
-    signature: str
 
 
 class ToolSchemaView(BaseModel):
@@ -117,18 +110,25 @@ class ServerToolSummary(BaseModel):
 class SearchResponse(BaseModel):
     total_tool_count: int
     servers: list[ServerToolSummary]
-    results: list[SearchMatch]
+    results: list[ToolSchemaView]
 
 
-class SchemaResponse(BaseModel):
-    tools: list[ToolSchemaView]
+class UpstreamToolStatus(BaseModel):
+    name: str
+    enabled: bool = True
+    description: str | None = None
 
 
 class UpstreamStatus(BaseModel):
     name: str
     transport: str
+    enabled: bool = True
+    connected: bool = False
+    discovered: bool = False
     auth: str | None = None
     tool_count: int = 0
+    total_tool_count: int = 0
+    tools: list[UpstreamToolStatus] = Field(default_factory=list)
 
 
 class StatusResponse(BaseModel):
@@ -348,7 +348,7 @@ class ToolCatalog:
         limit: int = 5,
         *,
         server: str | None = None,
-    ) -> list[SearchMatch]:
+    ) -> list[ToolSchemaView]:
         candidates = {
             spec.name: spec.search_blob
             for spec in sorted(self.tools.values(), key=lambda item: item.name)
@@ -363,25 +363,6 @@ class ToolCatalog:
             limit=limit,
         )
         return [
-            SearchMatch(
-                name=self.tools[name].name,
-                call=self.tools[name].call,
-                server=self.tools[name].server,
-                description=self.tools[name].description,
-                signature=self.tools[name].signature,
-            )
-            for _, _, name in ranked
-        ]
-
-    def get_schema(
-        self,
-        tool_names: Iterable[str],
-    ) -> list[ToolSchemaView]:
-        requested = list(tool_names)
-        unknown = [name for name in requested if name not in self.tools]
-        if unknown:
-            raise ValueError(f"Unknown tools: {', '.join(unknown)}")
-        return [
             ToolSchemaView(
                 name=self.tools[name].name,
                 call=self.tools[name].call,
@@ -390,7 +371,7 @@ class ToolCatalog:
                 signature=self.tools[name].signature,
                 stub=self.tools[name].stub,
             )
-            for name in requested
+            for _, _, name in ranked
         ]
 
     def counts_by_server(self) -> dict[str, int]:
@@ -573,6 +554,44 @@ def _required_string(value: JsonValue | None, *, label: str, server_name: str) -
     return value
 
 
+def _disabled_server_info(
+    name: str,
+    config: JsonObject,
+    config_fingerprint: str,
+) -> NormalizedServerInfo:
+    if "command" in config:
+        _required_string(config.get("command"), label="command", server_name=name)
+        return NormalizedServerInfo(
+            name=name,
+            transport="stdio",
+            config_fingerprint=config_fingerprint,
+            enabled=False,
+        )
+    if "url" in config:
+        url = _required_string(config.get("url"), label="url", server_name=name)
+        transport = config.get("transport") or config.get("type")
+        if transport is None:
+            transport = infer_transport_type_from_url(url)
+        if not isinstance(transport, str) or transport not in REMOTE_TRANSPORTS:
+            raise ValueError(f"Unsupported MCP transport for {name}: {transport}")
+        raw_auth = config.get("auth")
+        auth_kind = (
+            "oauth"
+            if raw_auth == "oauth"
+            else "bearer"
+            if isinstance(raw_auth, str) and raw_auth
+            else None
+        )
+        return NormalizedServerInfo(
+            name=name,
+            transport="sse" if transport == "sse" else "http",
+            config_fingerprint=config_fingerprint,
+            enabled=False,
+            auth=auth_kind,
+        )
+    raise ValueError(f"MCP server {name!r} must define either command or url")
+
+
 def normalize_mcp_config(
     raw_config: JsonObject,
     *,
@@ -597,12 +616,13 @@ def normalize_mcp_config(
     for name, value in server_block.items():
         if not isinstance(value, dict):
             raise TypeError(f"MCP server {name!r} must be an object")
-        if value.get("disabled") is True or value.get("enabled") is False:
-            continue
         cleaned: JsonObject = {
             key: item for key, item in value.items() if key not in PI_ONLY_FIELDS
         }
         config_fingerprint = _server_config_fingerprint(name, cleaned)
+        if value.get("disabled") is True or value.get("enabled") is False:
+            server_infos.append(_disabled_server_info(name, cleaned, config_fingerprint))
+            continue
 
         if "command" in cleaned:
             cleaned["env"] = _child_process_environment(
@@ -671,8 +691,6 @@ def normalize_mcp_config(
 
         raise ValueError(f"MCP server {name!r} must define either command or url")
 
-    if not normalized_servers:
-        raise ValueError("No enabled MCP servers were found in mcp.json")
     return NormalizedConfig(
         config=MCPConfig(mcpServers=normalized_servers),
         servers=server_infos,
@@ -704,6 +722,7 @@ class StubBuilder:
         self.output_schema = output_schema
         self._definitions: list[str] = []
         self._seen: dict[tuple[str, str], str] = {}
+        self._active_refs: set[str] = set()
 
     def build(self) -> tuple[str, str, list[str]]:
         input_type = self._ensure_named_type(
@@ -750,7 +769,7 @@ class StubBuilder:
             return "JsonValue" if schema else "Never"
         ref = schema.get("$ref")
         if isinstance(ref, str):
-            return self._type_expr(_resolve_ref(ref, root), root, name)
+            return self._resolved_ref_type(ref, root, name)
         constant = schema.get("const")
         if isinstance(constant, (bool, int, float, str)) or (
             constant is None and "const" in schema
@@ -848,6 +867,15 @@ class StubBuilder:
             additional = _as_schema(schema.get("additionalProperties", True))
             return f"dict[str, {self._type_expr(additional, root, f'{name}Value')}]"
         return "JsonValue"
+
+    def _resolved_ref_type(self, ref: str, root: JsonSchema, name: str) -> str:
+        if ref in self._active_refs:
+            return "JsonValue"
+        self._active_refs.add(ref)
+        try:
+            return self._type_expr(_resolve_ref(ref, root), root, name)
+        finally:
+            self._active_refs.remove(ref)
 
 
 def _short_description(description: str | None, limit: int = 240) -> str | None:

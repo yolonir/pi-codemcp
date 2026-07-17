@@ -1,6 +1,5 @@
 import {
   type ExtensionAPI,
-  formatSize,
   highlightCode,
   keyHint,
   type Theme,
@@ -17,16 +16,10 @@ interface SearchRenderDetails extends CodeMcpOutputDetails {
   preview: string[];
 }
 
-interface SchemaRenderDetails extends CodeMcpOutputDetails {
-  toolCount: number;
-  preview: string[];
-}
-
 interface ExecuteRenderDetails extends CodeMcpOutputDetails {
   ok: boolean;
   failureStage?: string;
   callsMade: number;
-  resultKind: string;
   preview: string[];
 }
 
@@ -50,15 +43,6 @@ const SearchParameters = Type.Object({
   ),
 });
 
-const SchemaParameters = Type.Object({
-  tools: Type.Array(Type.String(), {
-    minItems: 1,
-    maxItems: 20,
-    uniqueItems: true,
-    description: "Exact names returned by codemcp_search",
-  }),
-});
-
 const ExecuteParameters = Type.Object({
   code: Type.String({
     minLength: 1,
@@ -71,10 +55,10 @@ export function registerCodeMcpTools(pi: ExtensionAPI, lifecycle: CodeMcpLifecyc
   pi.registerTool({
     name: "codemcp_search",
     label: "MCP Search",
-    description: "Search configured upstream MCP tools by capability.",
-    promptSnippet: "Search configured upstream MCP tools by capability",
+    description: "Search configured upstream MCP tools and return their typed SDK stubs.",
+    promptSnippet: "Search upstream MCP capabilities and inspect their typed SDK stubs",
     promptGuidelines: [
-      "Use codemcp_search before codemcp_get_schema when the exact upstream MCP tool names are unknown.",
+      "Use codemcp_search before codemcp_execute; every match includes the complete typed SDK stub needed to write the chain.",
     ],
     parameters: SearchParameters,
     async execute(_toolCallId, params, signal, onUpdate) {
@@ -91,7 +75,7 @@ export function registerCodeMcpTools(pi: ExtensionAPI, lifecycle: CodeMcpLifecyc
         },
         signal,
       );
-      const output = formatCodeMcpOutput(result);
+      const output = formatCodeMcpOutput(result, outputLimits(lifecycle));
       const results = Array.isArray(result.results) ? result.results : [];
       const preview = results
         .slice(0, 3)
@@ -137,63 +121,15 @@ export function registerCodeMcpTools(pi: ExtensionAPI, lifecycle: CodeMcpLifecyc
   });
 
   pi.registerTool({
-    name: "codemcp_get_schema",
-    label: "MCP Schema",
-    description: "Return compact typed Python SDK signatures for selected MCP tools.",
-    promptSnippet: "Inspect compact typed signatures for selected MCP tools",
-    promptGuidelines: [
-      "Use codemcp_get_schema for the exact tools selected by codemcp_search before writing a codemcp_execute chain.",
-    ],
-    parameters: SchemaParameters,
-    async execute(_toolCallId, params, signal, onUpdate) {
-      onUpdate?.({
-        content: [{ type: "text", text: "Loading typed MCP schemas..." }],
-        details: undefined,
-      });
-      const result = await lifecycle.request("get_schema", { tools: params.tools }, signal);
-      const output = formatCodeMcpOutput(result);
-      const tools = Array.isArray(result.tools) ? result.tools : [];
-      return {
-        content: [{ type: "text", text: output.text }],
-        details: {
-          ...output.details,
-          toolCount: tools.length,
-          preview: params.tools.slice(0, 3),
-        },
-      };
-    },
-    renderCall(args, theme) {
-      const names = args.tools.slice(0, 2).join(", ");
-      const rest = args.tools.length > 2 ? ` +${args.tools.length - 2}` : "";
-      return new Text(
-        `${theme.fg("toolTitle", theme.bold("MCP Schema "))}${theme.fg("accent", names)}${theme.fg("muted", rest)}`,
-        0,
-        0,
-      );
-    },
-    renderResult(result, { expanded, isPartial }, theme) {
-      if (isPartial) return new Text(theme.fg("warning", "Loading schemas..."), 0, 0);
-      if (expanded) return renderExpandedJson(result.content);
-      const details = result.details as SchemaRenderDetails | undefined;
-      let text = theme.fg("success", `${details?.toolCount ?? 0} typed schemas`);
-      for (const name of details?.preview ?? []) {
-        text += `\n${theme.fg("dim", `  ${name}`)}`;
-      }
-      text += `\n${theme.fg("muted", keyHint("app.tools.expand", "full schemas"))}`;
-      return new Text(text, 0, 0);
-    },
-  });
-
-  pi.registerTool({
     name: "codemcp_execute",
     label: "MCP Execute",
     description:
-      "Type-check and execute one sandboxed Python MCP chain. Supports sequential and dependent calls, loops, conditions, cross-server calls, and all upstream tools. The code has no host filesystem, environment, network, or subprocess access. Return a compact final value smaller than 16 KiB; oversized values fail with a shape summary.",
+      "Type-check and execute one sandboxed Python MCP chain. Supports sequential and dependent calls, loops, conditions, cross-server calls, and enabled upstream tools. The code has no host filesystem, environment, network, or subprocess access. Return a compact final value within the configured result limit; oversized values fail with a shape summary.",
     promptSnippet: "Run a typed, sandboxed multi-call chain across configured MCP servers",
     promptGuidelines: [
       "Use codemcp_execute if you know tool schemas; call the returned server.method facade and use top-level return for the compact final value.",
       "It is always better to execute multiple MCP calls in one codemcp_execute call rather than multiple single-call invocations.",
-      "You can chain multiple MCP results, call in parallel or sequentially, you have full control over the execution flow as long as it is efficient",
+      "You can chain multiple MCP results, call in parallel using asyncio gather or sequentially, you have full control over the execution flow as long as it is efficient",
     ],
     parameters: ExecuteParameters,
     async execute(_toolCallId, params, signal, onUpdate) {
@@ -202,7 +138,7 @@ export function registerCodeMcpTools(pi: ExtensionAPI, lifecycle: CodeMcpLifecyc
         details: undefined,
       });
       const result = await lifecycle.request("execute", { code: params.code }, signal);
-      const output = formatCodeMcpOutput(result);
+      const output = formatCodeMcpOutput(result, outputLimits(lifecycle));
       const ok = result.ok === true;
       return {
         content: [{ type: "text", text: output.text }],
@@ -211,7 +147,6 @@ export function registerCodeMcpTools(pi: ExtensionAPI, lifecycle: CodeMcpLifecyc
           ok,
           failureStage: typeof result.failure_stage === "string" ? result.failure_stage : undefined,
           callsMade: Number(result.calls_made ?? 0),
-          resultKind: describeKind(result.result),
           preview: previewValue(ok ? result.result : result.error),
         },
       };
@@ -249,9 +184,9 @@ export function registerCodeMcpTools(pi: ExtensionAPI, lifecycle: CodeMcpLifecyc
       const details = result.details as ExecuteRenderDetails | undefined;
       if (expanded) return renderExpandedExecuteResult(result.content, details, theme);
       const calls = details?.callsMade ?? 0;
-      const size = formatSize(details?.totalBytes ?? 0);
+      const outputTokens = details?.outputTokens ?? 0;
       let text = details?.ok
-        ? `\n${theme.fg("success", `✓ Output · ${formatMcpCalls(calls)} · ${details.resultKind} · ${size}`)}`
+        ? `\n${theme.fg("success", `✓ Output · ${formatMcpCalls(calls)} · ${formatTokenEstimate(outputTokens)}`)}`
         : `\n${renderCompactFailure(details?.failureStage, calls, theme)}`;
       for (const line of details?.preview ?? []) {
         text += `\n${theme.fg("dim", `  ${line}`)}`;
@@ -325,6 +260,18 @@ function failureHeading(stage: string, calls: number, theme: Theme): string {
   return `${theme.fg("error", theme.bold("Runtime failed"))}\n${theme.fg("muted", `Failure occurred after ${formatMcpCalls(calls)}`)}`;
 }
 
+function outputLimits(lifecycle: CodeMcpLifecycle): { maxBytes: number; maxLines: number } {
+  const settings = lifecycle.loadSettings();
+  return {
+    maxBytes: settings.outputLimitKiB * 1024,
+    maxLines: settings.outputLineLimit,
+  };
+}
+
+function formatTokenEstimate(tokens: number): string {
+  return `~${tokens.toLocaleString("en-US")} tokens`;
+}
+
 function formatMcpCalls(calls: number): string {
   return `${calls} MCP ${calls === 1 ? "call" : "calls"}`;
 }
@@ -372,12 +319,6 @@ function summarizeValue(value: unknown): string {
   }
   if (typeof value === "string") return truncate(value.replace(/\s+/g, " "), 100);
   return String(value);
-}
-
-function describeKind(value: unknown): string {
-  if (Array.isArray(value)) return `array[${value.length}]`;
-  if (value === null) return "null";
-  return typeof value === "object" ? "object" : typeof value;
 }
 
 function truncate(value: string, maxLength: number): string {

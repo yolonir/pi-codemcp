@@ -69,6 +69,15 @@ def test_normalize_config_supports_transports_and_skips_disabled(
         "stdio",
         "http",
         "sse",
+        "stdio",
+        "stdio",
+    ]
+    assert [server.enabled for server in normalized.servers] == [
+        True,
+        True,
+        True,
+        False,
+        False,
     ]
     stdio = normalized.config.mcpServers["stdio"]
     assert stdio.command == "example-server"
@@ -143,12 +152,16 @@ async def test_oauth_uses_native_fastmcp_persistence_and_refresh(
     assert restored.refresh_token == "next-refresh-token"
 
 
-def test_config_requires_enabled_servers(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="No enabled"):
-        normalize_mcp_config(
-            {"only": {"command": "unused", "disabled": True}},
-            oauth_storage_dir=tmp_path,
-        )
+def test_config_allows_every_server_to_be_disabled(tmp_path: Path) -> None:
+    normalized = normalize_mcp_config(
+        {"only": {"command": "unused", "disabled": True}},
+        oauth_storage_dir=tmp_path,
+    )
+
+    assert normalized.config.mcpServers == {}
+    assert [(server.name, server.enabled) for server in normalized.servers] == [
+        ("only", False)
+    ]
 
 
 def test_catalog_namespaces_single_server_and_searches_compactly() -> None:
@@ -182,10 +195,9 @@ def test_catalog_namespaces_single_server_and_searches_compactly() -> None:
     assert "call_tool" not in catalog.type_stubs
     assert "inputSchema" not in matches[0].model_dump_json()
 
-    compact = catalog.get_schema(["linear_get_issue"])[0]
-    assert "LinearGetIssueArgs" in compact.stub
-    assert "input_schema" not in compact.model_dump_json()
-    assert "output_schema" not in compact.model_dump_json()
+    assert "LinearGetIssueArgs" in matches[0].stub
+    assert "input_schema" not in matches[0].model_dump_json()
+    assert "output_schema" not in matches[0].model_dump_json()
 
 
 def test_untyped_schema_uses_recursive_json_value_instead_of_any() -> None:
@@ -207,6 +219,57 @@ def test_untyped_schema_uses_recursive_json_value_instead_of_any() -> None:
     )
     assert "ClickhouseListDatabasesArgs: TypeAlias = dict[str, JsonValue]" in spec.stub
     assert "ClickhouseListDatabasesResult: TypeAlias = JsonValue" in spec.stub
+    assert "Any" not in catalog.type_stubs
+
+
+def test_recursive_json_schema_refs_stop_at_json_value() -> None:
+    recursive_value = {
+        "anyOf": [
+            {"type": "string"},
+            {"type": "number"},
+            {"type": "boolean"},
+            {"type": "null"},
+            {
+                "type": "object",
+                "additionalProperties": {"$ref": "#/definitions/value"},
+            },
+            {
+                "type": "array",
+                "items": {"$ref": "#/definitions/value"},
+            },
+        ]
+    }
+    catalog = ToolCatalog.from_server_tools(
+        {
+            "dune": [
+                make_tool(
+                    "search_docs",
+                    {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                    output_schema={
+                        "type": "object",
+                        "properties": {
+                            "results": {
+                                "type": "array",
+                                "items": {"$ref": "#/definitions/value"},
+                            }
+                        },
+                        "required": ["results"],
+                        "definitions": {"value": recursive_value},
+                    },
+                )
+            ]
+        }
+    )
+
+    stub = catalog.tools["dune_search_docs"].stub
+    assert (
+        "results: list[str | float | bool | None | dict[str, JsonValue] | list[JsonValue]]"
+        in stub
+    )
     assert "Any" not in catalog.type_stubs
 
 
@@ -544,8 +607,7 @@ def test_catalog_validates_arguments_and_unknown_schema_names() -> None:
     ) == {"id": "x", "priority": 2}
     with pytest.raises(ValidationError):
         catalog.validate_arguments("linear_update_issue", {"id": "x", "priority": 9})
-    with pytest.raises(ValueError, match="Unknown tools"):
-        catalog.get_schema(["linear_missing"])
+    assert catalog.search("zzzzzzzz") == []
 
 
 def test_sdk_facade_aliases_are_valid_stable_and_collision_free() -> None:
