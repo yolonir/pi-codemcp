@@ -67,9 +67,23 @@ interface Keybindings {
   matches(data: string, id: "tui.select.up" | "tui.select.down" | "tui.select.cancel"): boolean;
 }
 
-interface SettingsSaveResult {
+export interface ServerEnabledChange {
+  name: string;
+  previousEnabled: boolean;
+  enabled: boolean;
+}
+
+export interface ChainEnabledChange {
+  name: string;
+  scope: ChainScope;
+  previousEnabled: boolean;
+  enabled: boolean;
+}
+
+interface ManagerSaveResult {
   settings: CodeMcpSettings;
   servers: ServerModalState[];
+  chains: ChainModalState[];
 }
 
 type UnsavedAction = "save" | "discard" | "cancel";
@@ -78,11 +92,13 @@ interface ServerManagerOptions {
   servers: ServerModalState[];
   chains: ChainModalState[];
   settings: CodeMcpSettings;
-  onSetServerEnabled(server: ServerModalState, enabled: boolean): Promise<ServerModalState>;
   onDiscover(server: ServerModalState): Promise<ServerModalState>;
-  onSaveSettings(settings: CodeMcpSettings): Promise<SettingsSaveResult>;
+  onSaveChanges(
+    settings: CodeMcpSettings,
+    serverChanges: ServerEnabledChange[],
+    chainChanges: ChainEnabledChange[],
+  ): Promise<ManagerSaveResult>;
   onResolveUnsaved(): Promise<UnsavedAction>;
-  onSetChainEnabled(chain: ChainModalState, enabled: boolean): Promise<ChainModalState[]>;
   onRevalidateChain(chain: ChainModalState): Promise<ChainModalState[]>;
   onDeleteChain(chain: ChainModalState): Promise<ChainModalState[]>;
 }
@@ -241,6 +257,8 @@ class ServerManagerModal implements Component, Focusable {
   private selectedSettingIndex = 0;
   private savedSettings: CodeMcpSettings;
   private draftSettings: CodeMcpSettings;
+  private savedServerEnabled: Map<string, boolean>;
+  private savedChainEnabled: Map<string, boolean>;
   private settingsBusy = false;
   private closePromptBusy = false;
   private settingsError: string | undefined;
@@ -255,6 +273,8 @@ class ServerManagerModal implements Component, Focusable {
   ) {
     this.savedSettings = cloneSettings(options.settings);
     this.draftSettings = cloneSettings(options.settings);
+    this.savedServerEnabled = serverEnabledMap(options.servers);
+    this.savedChainEnabled = chainEnabledMap(options.chains);
     this.applyDraftToolPolicy();
   }
 
@@ -670,7 +690,7 @@ class ServerManagerModal implements Component, Focusable {
           "",
           this.theme.fg("dim", "←/→ change · enter next · ctrl+s save"),
           ...(this.settingsBusy
-            ? ["", this.theme.fg("warning", "Saving settings and tool policy…")]
+            ? ["", this.theme.fg("warning", "Saving staged changes…")]
             : this.hasUnsavedChanges()
               ? ["", this.theme.fg("warning", "Unsaved changes")]
               : []),
@@ -719,30 +739,20 @@ class ServerManagerModal implements Component, Focusable {
 
   private toggleSelectedServer(): void {
     const server = this.selectedServer();
-    if (!server || server.busy) return;
-    const enabled = !server.enabled;
-    server.busy = true;
+    if (!server || server.busy || this.settingsBusy) return;
+    server.enabled = !server.enabled;
     delete server.error;
-    void this.options
-      .onSetServerEnabled(server, enabled)
-      .then((updated) => {
-        applyServerUpdate(server, updated);
-        this.applyDraftToolPolicy();
-      })
-      .catch((error: unknown) => {
-        server.error = summarizeError(error);
-      })
-      .finally(() => {
-        server.busy = false;
-        this.requestRender();
-      });
   }
 
   private discoverSelected(): void {
     const server = this.selectedServer();
-    if (!server || server.busy) return;
+    if (!server || server.busy || this.settingsBusy) return;
+    if (server.enabled !== this.savedServerEnabled.get(server.name)) {
+      server.error = "Save this server change before discovering tools";
+      return;
+    }
     if (!server.enabled) {
-      server.error = "Enable this server to discover its tools";
+      server.error = "Enable and save this server before discovering tools";
       return;
     }
     server.busy = true;
@@ -778,24 +788,18 @@ class ServerManagerModal implements Component, Focusable {
 
   private toggleSelectedChain(): void {
     const chain = this.selectedChain();
-    if (!chain || chain.busy) return;
-    chain.busy = true;
+    if (!chain || chain.busy || this.settingsBusy) return;
+    applyChainEnabled(chain, !chain.enabled);
     delete chain.error;
-    void this.options
-      .onSetChainEnabled(chain, !chain.enabled)
-      .then((updated) => this.replaceChains(updated, chain))
-      .catch((error: unknown) => {
-        chain.error = summarizeError(error);
-      })
-      .finally(() => {
-        chain.busy = false;
-        this.requestRender();
-      });
   }
 
   private revalidateSelectedChain(): void {
     const chain = this.selectedChain();
-    if (!chain || chain.busy) return;
+    if (!chain || chain.busy || this.settingsBusy) return;
+    if (chain.enabled !== this.savedChainEnabled.get(chainKey(chain))) {
+      chain.error = "Save this chain change before revalidation";
+      return;
+    }
     chain.busy = true;
     delete chain.error;
     void this.options
@@ -810,8 +814,20 @@ class ServerManagerModal implements Component, Focusable {
       });
   }
 
-  private replaceChains(updated: ChainModalState[], selected?: ChainModalState): void {
+  private replaceChains(
+    updated: ChainModalState[],
+    selected?: ChainModalState,
+    preserveDrafts = true,
+  ): void {
+    const drafts = preserveDrafts ? this.chainEnabledChanges() : [];
     this.options.chains.splice(0, this.options.chains.length, ...updated);
+    this.savedChainEnabled = chainEnabledMap(updated);
+    for (const draft of drafts) {
+      const chain = this.options.chains.find(
+        (candidate) => candidate.name === draft.name && candidate.scope === draft.scope,
+      );
+      if (chain) applyChainEnabled(chain, draft.enabled);
+    }
     if (selected) {
       const index = this.filteredChains().findIndex(
         (chain) => chain.name === selected.name && chain.scope === selected.scope,
@@ -871,10 +887,16 @@ class ServerManagerModal implements Component, Focusable {
     this.settingsError = undefined;
     this.requestRender();
     try {
-      const result = await this.options.onSaveSettings(cloneSettings(this.draftSettings));
+      const result = await this.options.onSaveChanges(
+        cloneSettings(this.draftSettings),
+        this.serverEnabledChanges(),
+        this.chainEnabledChanges(),
+      );
       this.savedSettings = cloneSettings(result.settings);
       this.draftSettings = cloneSettings(result.settings);
       this.options.servers.splice(0, this.options.servers.length, ...result.servers);
+      this.savedServerEnabled = serverEnabledMap(result.servers);
+      this.replaceChains(result.chains, undefined, false);
       this.applyDraftToolPolicy();
       return true;
     } catch (error) {
@@ -908,7 +930,36 @@ class ServerManagerModal implements Component, Focusable {
   }
 
   private hasUnsavedChanges(): boolean {
-    return !settingsEqual(this.savedSettings, this.draftSettings);
+    return (
+      !settingsEqual(this.savedSettings, this.draftSettings) ||
+      this.serverEnabledChanges().length > 0 ||
+      this.chainEnabledChanges().length > 0
+    );
+  }
+
+  private serverEnabledChanges(): ServerEnabledChange[] {
+    return this.options.servers.flatMap((server) => {
+      const previousEnabled = this.savedServerEnabled.get(server.name);
+      return previousEnabled === undefined || previousEnabled === server.enabled
+        ? []
+        : [{ name: server.name, previousEnabled, enabled: server.enabled }];
+    });
+  }
+
+  private chainEnabledChanges(): ChainEnabledChange[] {
+    return this.options.chains.flatMap((chain) => {
+      const previousEnabled = this.savedChainEnabled.get(chainKey(chain));
+      return previousEnabled === undefined || previousEnabled === chain.enabled
+        ? []
+        : [
+            {
+              name: chain.name,
+              scope: chain.scope,
+              previousEnabled,
+              enabled: chain.enabled,
+            },
+          ];
+    });
   }
 
   private applyDraftToolPolicy(): void {
@@ -1041,6 +1092,25 @@ function serverIcon(server: ServerModalState, theme: Theme): string {
   if (!server.enabled) return theme.fg("dim", "○");
   if (server.discovered) return theme.fg("success", "●");
   return theme.fg("warning", "◌");
+}
+
+function serverEnabledMap(servers: readonly ServerModalState[]): Map<string, boolean> {
+  return new Map(servers.map((server) => [server.name, server.enabled]));
+}
+
+function chainEnabledMap(chains: readonly ChainModalState[]): Map<string, boolean> {
+  return new Map(chains.map((chain) => [chainKey(chain), chain.enabled]));
+}
+
+function chainKey(chain: Pick<ChainModalState, "name" | "scope">): string {
+  return `${chain.scope}:${chain.name}`;
+}
+
+function applyChainEnabled(chain: ChainModalState, enabled: boolean): void {
+  const shadowed = chain.status === "shadowed";
+  chain.enabled = enabled;
+  if (shadowed) return;
+  chain.status = enabled ? (chain.staleDependencies.length > 0 ? "stale" : "ready") : "disabled";
 }
 
 function cloneSettings(settings: CodeMcpSettings): CodeMcpSettings {

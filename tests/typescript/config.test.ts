@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setMcpServerEnabled } from "../../src/config.js";
+import { setMcpServerEnabled, setMcpServersEnabled } from "../../src/config.js";
 
 test("server toggles preserve config shape and existing enable convention", async () => {
   const temporary = await mkdtemp(join(tmpdir(), "pi-codemcp-config-"));
@@ -20,8 +20,10 @@ test("server toggles preserve config shape and existing enable convention", asyn
       "utf8",
     );
 
-    setMcpServerEnabled(configPath, "alpha", false);
-    setMcpServerEnabled(configPath, "beta", false);
+    setMcpServersEnabled(configPath, [
+      { name: "alpha", enabled: false },
+      { name: "beta", enabled: false },
+    ]);
 
     const updated = JSON.parse(await readFile(configPath, "utf8"));
     expect(updated).toEqual({

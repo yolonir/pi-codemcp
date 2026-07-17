@@ -46,6 +46,17 @@ export interface SavedChainView {
   calledBy: string[];
 }
 
+export interface ChainEnabledChange {
+  name: string;
+  scope: ChainScope;
+  enabled: boolean;
+}
+
+export interface ManagerApplyResult {
+  chains: SavedChainView[];
+  status: Record<string, unknown>;
+}
+
 export interface SaveChainInput {
   scope: ChainScope;
   name: string;
@@ -123,21 +134,21 @@ export class SavedChainManager {
     return views;
   }
 
-  async setEnabled(
-    name: string,
-    scope: ChainScope,
-    enabled: boolean,
+  async applyEnabled(
+    changes: readonly ChainEnabledChange[],
     signal?: AbortSignal,
-  ): Promise<SavedChainView> {
+  ): Promise<ManagerApplyResult> {
     const result = await this.lifecycle.request(
-      "set_chain_enabled",
-      { name, scope, enabled },
+      "apply_manager_changes",
+      {
+        changes: changes.map((change) => ({ ...change })),
+      },
       signal,
     );
-    const view = parseSavedChainView(result, "set_chain_enabled");
-    this.upsertView(view);
-    this.refreshNativeTools();
-    return view;
+    const views = parseViewList(result.chains, "apply_manager_changes.chains");
+    const status = requireRecord(result.status, "apply_manager_changes.status");
+    this.synchronizeViews(views);
+    return { chains: views, status };
   }
 
   async revalidate(name: string, scope: ChainScope, signal?: AbortSignal): Promise<SavedChainView> {

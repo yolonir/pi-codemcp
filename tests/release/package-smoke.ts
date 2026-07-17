@@ -77,6 +77,20 @@ try {
   if (executed.ok !== true || JSON.stringify(executed.result) !== JSON.stringify({ value: 7 })) {
     throw new Error(`project chain execution failed: ${JSON.stringify(executed)}`);
   }
+  const applied = await client.call("apply_manager_changes", {
+    changes: [{ name: "release_echo", scope: "project", enabled: false }],
+  });
+  const chains = applied.chains;
+  if (!Array.isArray(chains) || chains[0]?.status !== "disabled") {
+    throw new Error(`staged chain change was not applied: ${JSON.stringify(applied)}`);
+  }
+  const blocked = await client.call("execute_chain", {
+    name: "release_echo",
+    arguments: { value: 8 },
+  });
+  if (blocked.ok !== false || blocked.failure_stage !== "preflight") {
+    throw new Error(`disabled project chain still executed: ${JSON.stringify(blocked)}`);
+  }
 } finally {
   await client.close();
 }

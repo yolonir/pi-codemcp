@@ -10,6 +10,7 @@ import pytest
 from fastmcp import Client
 
 from sidecar import gateway
+from sidecar.chains import ChainEnabledChange
 from sidecar.json_types import JSON_OBJECT_ADAPTER, JsonObject
 
 
@@ -194,11 +195,11 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
             "search",
             "discover",
             "reload_settings",
+            "apply_manager_changes",
             "execute",
             "save_chain",
             "list_chains",
             "execute_chain",
-            "set_chain_enabled",
             "revalidate_chain",
             "delete_chain",
             "status",
@@ -478,7 +479,14 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
         with pytest.raises(ValueError, match="used by: double_countdown"):
             await runtime.chains.delete("countdown", "global")
 
-        disabled = await runtime.chains.set_enabled("countdown", "global", False)
+        applied = await runtime.apply_manager_changes(
+            [ChainEnabledChange(name="countdown", scope="global", enabled=False)]
+        )
+        disabled = next(
+            view
+            for view in applied.chains
+            if view.chain.name == "countdown" and view.scope == "global"
+        )
         assert disabled.status == "disabled"
         blocked = await runtime.chains.execute("countdown", {"count": 1})
         assert blocked.ok is False
@@ -544,7 +552,16 @@ async def test_project_chains_shadow_global_chains_without_disabled_fallback(
         assert project_result.ok is True
         assert project_result.result == {"source": "project"}
 
-        await runtime.chains.set_enabled("source", "project", False)
+        (tmp_path / "settings.json").write_text(json.dumps({"maxCalls": 17}))
+        applied = await runtime.apply_manager_changes(
+            [ChainEnabledChange(name="source", scope="project", enabled=False)]
+        )
+        assert runtime.settings.max_calls == 17
+        assert applied.status.connected is True
+        assert [(view.scope, view.status) for view in applied.chains] == [
+            ("project", "disabled"),
+            ("global", "shadowed"),
+        ]
         assert [(view.scope, view.status) for view in runtime.chains.list().chains] == [
             ("project", "disabled"),
             ("global", "shadowed"),

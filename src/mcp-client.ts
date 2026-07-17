@@ -21,11 +21,11 @@ export type SidecarToolName =
   | "search"
   | "discover"
   | "reload_settings"
+  | "apply_manager_changes"
   | "execute"
   | "save_chain"
   | "list_chains"
   | "execute_chain"
-  | "set_chain_enabled"
   | "revalidate_chain"
   | "delete_chain"
   | "status";

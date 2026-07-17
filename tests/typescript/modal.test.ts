@@ -2,12 +2,14 @@ import { expect, test } from "bun:test";
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import {
+  type ChainEnabledChange,
   type ChainModalState,
+  type ServerEnabledChange,
   type ServerModalState,
   serverStatesFromStatus,
   showServerManagerModal,
 } from "../../src/modal.js";
-import { DEFAULT_CODEMCP_SETTINGS } from "../../src/settings.js";
+import { type CodeMcpSettings, DEFAULT_CODEMCP_SETTINGS } from "../../src/settings.js";
 
 type ModalFactory = (
   tui: { requestRender(): void },
@@ -131,10 +133,12 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   ];
   let component: Component | undefined;
   let overlayOptions: Record<string, unknown> | undefined;
-  const toggles: Array<{ name: string; enabled: boolean }> = [];
-  const savedSettings: Array<typeof DEFAULT_CODEMCP_SETTINGS> = [];
+  const savedChanges: Array<{
+    settings: CodeMcpSettings;
+    serverChanges: ServerEnabledChange[];
+    chainChanges: ChainEnabledChange[];
+  }> = [];
   const discoveries: string[] = [];
-  const chainToggles: boolean[] = [];
   const revalidated: string[] = [];
   let unsavedAction: "save" | "discard" | "cancel" = "cancel";
   let unsavedPrompts = 0;
@@ -157,10 +161,6 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
     servers,
     chains,
     settings: { ...DEFAULT_CODEMCP_SETTINGS, disabledTools: {} },
-    async onSetServerEnabled(server, enabled) {
-      toggles.push({ name: server.name, enabled });
-      return { ...server, enabled };
-    },
     async onDiscover(server) {
       discoveries.push(server.name);
       return {
@@ -177,27 +177,20 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
         ],
       };
     },
-    async onSaveSettings(settings) {
-      savedSettings.push(settings);
+    async onSaveChanges(settings, serverChanges, chainChanges) {
+      savedChanges.push({ settings, serverChanges, chainChanges });
       return {
         settings,
         servers: servers.map((server) => ({
           ...server,
           tools: server.tools.map((tool) => ({ ...tool })),
         })),
+        chains: chains.map((chain) => ({ ...chain })),
       };
     },
     async onResolveUnsaved() {
       unsavedPrompts += 1;
       return unsavedAction;
-    },
-    async onSetChainEnabled(chain, enabled) {
-      chainToggles.push(enabled);
-      return chains.map((candidate) =>
-        candidate === chain
-          ? { ...candidate, enabled, status: enabled ? "ready" : "disabled" }
-          : candidate,
-      );
     },
     async onRevalidateChain(chain) {
       revalidated.push(chain.name);
@@ -239,15 +232,21 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   component?.handleInput?.("\u001b[C");
   component?.handleInput?.("\r");
   await Bun.sleep(0);
-  expect(savedSettings).toEqual([]);
+  expect(savedChanges).toEqual([]);
   expect(servers[0]?.tools[0]?.enabled).toBe(false);
   expect(servers[0]?.toolCount).toBe(0);
 
   component?.handleInput?.("\u001b[D");
   component?.handleInput?.("\r");
   await Bun.sleep(0);
-  expect(toggles).toEqual([{ name: "grafana", enabled: false }]);
+  expect(savedChanges).toEqual([]);
   expect(servers[0]?.enabled).toBe(false);
+  component?.handleInput?.("d");
+  await Bun.sleep(0);
+  expect(discoveries).toEqual(["grafana"]);
+  expect((component?.render(100) ?? []).join("\n")).toContain(
+    "Save this server change before discovering tools",
+  );
 
   component?.handleInput?.("\t");
   const renderedChainLines = renderWithRows(component, 120, 60);
@@ -272,22 +271,35 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   expect(revalidated).toEqual(["weekly_digest"]);
   component?.handleInput?.(" ");
   await Bun.sleep(0);
-  expect(chainToggles).toEqual([false]);
+  expect(chains[0]?.enabled).toBe(false);
+  expect(savedChanges).toEqual([]);
+  component?.handleInput?.("r");
+  await Bun.sleep(0);
+  expect(revalidated).toEqual(["weekly_digest"]);
+  expect((component?.render(120) ?? []).join("\n")).toContain(
+    "Save this chain change before revalidation",
+  );
 
   component?.handleInput?.("\t");
   expect((component?.render(90) ?? []).join("\n")).toContain("[Settings]");
   component?.handleInput?.("\u001b[C");
   await Bun.sleep(0);
-  expect(savedSettings).toEqual([]);
+  expect(savedChanges).toEqual([]);
   expect((component?.render(90) ?? []).join("\n")).toContain("Unsaved changes");
 
   component?.handleInput?.("\u0013");
   await Bun.sleep(0);
-  expect(savedSettings).toHaveLength(1);
-  expect(savedSettings[0]).toMatchObject({
+  expect(savedChanges).toHaveLength(1);
+  expect(savedChanges[0]?.settings).toMatchObject({
     backgroundWarmup: false,
     disabledTools: { grafana: ["query"] },
   });
+  expect(savedChanges[0]?.serverChanges).toEqual([
+    { name: "grafana", previousEnabled: true, enabled: false },
+  ]);
+  expect(savedChanges[0]?.chainChanges).toEqual([
+    { name: "weekly_digest", scope: "project", previousEnabled: true, enabled: false },
+  ]);
 
   component?.handleInput?.("\u001b[C");
   component?.handleInput?.("\u001b");
@@ -298,7 +310,9 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   component?.handleInput?.("\u001b");
   await Bun.sleep(0);
   expect(unsavedPrompts).toBe(2);
-  expect(savedSettings).toHaveLength(2);
-  expect(savedSettings[1]?.backgroundWarmup).toBe(true);
+  expect(savedChanges).toHaveLength(2);
+  expect(savedChanges[1]?.settings.backgroundWarmup).toBe(true);
+  expect(savedChanges[1]?.serverChanges).toEqual([]);
+  expect(savedChanges[1]?.chainChanges).toEqual([]);
   expect(closed).toBe(1);
 });

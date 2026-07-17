@@ -93,7 +93,7 @@ Incomplete upstream schemas become recursive `JsonValue`, not `Any`; unknown val
 
 FastMCP owns MCP transports, runtime validation, and OAuth. [Pydantic Monty](https://github.com/pydantic/monty) type-checks and executes agent-written Python without host filesystem, environment, network, or subprocess access.
 
-`/codemcp` configures execution/per-call timeouts, total calls, final-result size, agent-visible output, cache TTL, warmup, and per-tool policy. Setting and tool-policy edits stay local and instantaneous until one `Ctrl+S` save/reload. The sandbox also has a fixed memory ceiling; executions are serialized per Pi session. There are no automatic retries or cross-service rollback.
+`/codemcp` configures servers, saved chains, per-tool policy, timeouts, call limits, output limits, cache TTL, and warmup. Server, chain, tool-policy, and setting toggles stay local and instantaneous until one `Ctrl+S` batch save/reload. Discovery, revalidation, and deletion remain explicit immediate actions. The sandbox also has a fixed memory ceiling; executions are serialized per Pi session. There are no automatic retries or cross-service rollback.
 
 Enabled tools retain their upstream permissions. Saved chains never bypass server or per-tool policy and are checked against the current enabled catalog whenever they run.
 

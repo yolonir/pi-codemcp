@@ -5,12 +5,15 @@ import {
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import { SavedChainManager } from "../src/chains.js";
-import { setMcpServerEnabled } from "../src/config.js";
+import { setMcpServersEnabled } from "../src/config.js";
 import { summarizeError } from "../src/errors.js";
 import { CodeMcpLifecycle } from "../src/lifecycle.js";
 import type { SidecarClientOptions } from "../src/mcp-client.js";
 import {
+  type ChainModalState,
   chainStatesFromViews,
+  type ChainEnabledChange as ModalChainEnabledChange,
+  type ServerEnabledChange,
   type ServerModalState,
   serverStatesFromStatus,
   showServerManagerModal,
@@ -44,27 +47,13 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
             servers,
             chains: chainStatesFromViews(savedChains),
             settings,
-            onSetServerEnabled: (server, enabled) =>
-              setServerEnabledFromManager(lifecycle, server, enabled),
             onDiscover: async (server) =>
               requireServerStatus(
                 await lifecycle.request("discover", { server: server.name }),
                 server.name,
               ),
-            onSaveSettings: async (updated) => {
-              const previous = lifecycle.loadSettings();
-              saveCodeMcpSettings(lifecycle.settingsPath, updated);
-              try {
-                const status = await lifecycle.request("reload_settings", {});
-                return {
-                  settings: lifecycle.loadSettings(),
-                  servers: serverStatesFromStatus(status),
-                };
-              } catch (error) {
-                saveCodeMcpSettings(lifecycle.settingsPath, previous);
-                throw error;
-              }
-            },
+            onSaveChanges: (updated, serverChanges, chainChanges) =>
+              saveManagerChanges(lifecycle, chains, updated, serverChanges, chainChanges),
             onResolveUnsaved: async () => {
               const choice = await ctx.ui.select("Unsaved CodeMCP changes", [
                 "Save",
@@ -74,10 +63,6 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
               if (choice === "Save") return "save";
               if (choice === "Discard") return "discard";
               return "cancel";
-            },
-            onSetChainEnabled: async (chain, enabled) => {
-              await chains.setEnabled(chain.name, chain.scope, enabled);
-              return chainStatesFromViews(await chains.list());
             },
             onRevalidateChain: async (chain) => {
               await chains.revalidate(chain.name, chain.scope);
@@ -115,29 +100,65 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
   };
 }
 
-export default createCodeMcpExtension();
-
-export async function setServerEnabledFromManager(
-  lifecycle: Pick<CodeMcpLifecycle, "configPath" | "reload" | "request">,
-  previous: ServerModalState,
-  enabled: boolean,
-): Promise<ServerModalState> {
-  setMcpServerEnabled(lifecycle.configPath, previous.name, enabled);
-  await lifecycle.reload();
+export async function saveManagerChanges(
+  lifecycle: Pick<CodeMcpLifecycle, "configPath" | "settingsPath" | "loadSettings" | "reload">,
+  chains: Pick<SavedChainManager, "applyEnabled">,
+  updated: CodeMcpSettings,
+  serverChanges: readonly ServerEnabledChange[],
+  chainChanges: readonly ModalChainEnabledChange[],
+): Promise<{
+  settings: CodeMcpSettings;
+  servers: ServerModalState[];
+  chains: ChainModalState[];
+}> {
+  const previousSettings = lifecycle.loadSettings();
+  let serverConfigChanged = false;
   try {
-    const status = enabled
-      ? await lifecycle.request("discover", { server: previous.name })
-      : await lifecycle.request("status", {});
-    return requireServerStatus(status, previous.name);
-  } catch (error) {
-    try {
-      const current = requireServerStatus(await lifecycle.request("status", {}), previous.name);
-      return { ...current, error: summarizeError(error) };
-    } catch {
-      throw error;
+    saveCodeMcpSettings(lifecycle.settingsPath, updated);
+    if (serverChanges.length > 0) {
+      setMcpServersEnabled(
+        lifecycle.configPath,
+        serverChanges.map((change) => ({ name: change.name, enabled: change.enabled })),
+      );
+      serverConfigChanged = true;
+      await lifecycle.reload();
     }
+    const applied = await chains.applyEnabled(
+      chainChanges.map((change) => ({
+        name: change.name,
+        scope: change.scope,
+        enabled: change.enabled,
+      })),
+    );
+    return {
+      settings: lifecycle.loadSettings(),
+      servers: serverStatesFromStatus(applied.status),
+      chains: chainStatesFromViews(applied.chains),
+    };
+  } catch (error) {
+    saveCodeMcpSettings(lifecycle.settingsPath, previousSettings);
+    if (serverConfigChanged) {
+      setMcpServersEnabled(
+        lifecycle.configPath,
+        serverChanges.map((change) => ({
+          name: change.name,
+          enabled: change.previousEnabled,
+        })),
+      );
+    }
+    try {
+      await lifecycle.reload();
+    } catch (rollbackError) {
+      throw new AggregateError(
+        [error, rollbackError],
+        "CodeMCP save failed and runtime rollback also failed",
+      );
+    }
+    throw error;
   }
 }
+
+export default createCodeMcpExtension();
 
 function requireServerStatus(
   status: Record<string, unknown>,
