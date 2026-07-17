@@ -18,10 +18,12 @@ from .catalog_cache import CatalogCache
 from .chains import (
     ChainDependency,
     ChainListResponse,
+    ChainScope,
     ChainStatusView,
     ChainStore,
     SaveChainResponse,
     SavedChainManifest,
+    ScopedChainStore,
 )
 from .executor import ExecutionContext, ExecutionResponse, MontyExecutor
 from .mcp_config import NormalizedConfig, load_mcp_json, normalize_mcp_config
@@ -44,6 +46,7 @@ if TYPE_CHECKING:
 
 DEFAULT_AGENT_DIR = Path.home() / ".pi" / "agent"
 CODEMCP_AGENT_DIR_ENV = "PI_CODEMCP_AGENT_DIR"
+CODEMCP_PROJECT_CHAINS_DIR_ENV = "PI_CODEMCP_PROJECT_CHAINS_DIR"
 PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR"
 type ServerConfig = StdioMCPServer | RemoteMCPServer
 type JsonObject = json_types.JsonObject
@@ -152,6 +155,7 @@ class SaveChainHandler(Protocol):
     async def __call__(
         self,
         *,
+        scope: ChainScope,
         name: str,
         description: str,
         code: str,
@@ -164,9 +168,9 @@ class SavedChainHandlers(NamedTuple):
     execute: Callable[[str, JsonObject], Awaitable[ExecutionResponse]]
     save: SaveChainHandler
     list: Callable[[], ChainListResponse]
-    set_enabled: Callable[[str, bool], Awaitable[ChainStatusView]]
-    revalidate: Callable[[str], Awaitable[ChainStatusView]]
-    delete: Callable[[str], Awaitable[ChainListResponse]]
+    set_enabled: Callable[[str, ChainScope, bool], Awaitable[ChainStatusView]]
+    revalidate: Callable[[str, ChainScope], Awaitable[ChainStatusView]]
+    delete: Callable[[str, ChainScope], Awaitable[ChainListResponse]]
 
 
 class SavedChainRuntime:
@@ -179,6 +183,7 @@ class SavedChainRuntime:
     async def save(
         self,
         *,
+        scope: ChainScope,
         name: str,
         description: str,
         code: str,
@@ -186,6 +191,7 @@ class SavedChainRuntime:
         output_schema: JsonObject,
     ) -> SaveChainResponse:
         return await self.handlers.save(
+            scope=scope,
             name=name,
             description=description,
             code=code,
@@ -196,14 +202,19 @@ class SavedChainRuntime:
     def list(self) -> ChainListResponse:
         return self.handlers.list()
 
-    async def set_enabled(self, name: str, enabled: bool) -> ChainStatusView:
-        return await self.handlers.set_enabled(name, enabled)
+    async def set_enabled(
+        self,
+        name: str,
+        scope: ChainScope,
+        enabled: bool,
+    ) -> ChainStatusView:
+        return await self.handlers.set_enabled(name, scope, enabled)
 
-    async def revalidate(self, name: str) -> ChainStatusView:
-        return await self.handlers.revalidate(name)
+    async def revalidate(self, name: str, scope: ChainScope) -> ChainStatusView:
+        return await self.handlers.revalidate(name, scope)
 
-    async def delete(self, name: str) -> ChainListResponse:
-        return await self.handlers.delete(name)
+    async def delete(self, name: str, scope: ChainScope) -> ChainListResponse:
+        return await self.handlers.delete(name, scope)
 
 
 class GatewayRuntime:
@@ -215,7 +226,7 @@ class GatewayRuntime:
         settings: CodeMcpSettings,
         normalized: NormalizedConfig,
         handles: dict[str, ServerHandle],
-        chain_store: ChainStore,
+        chain_store: ScopedChainStore,
         catalog: ToolCatalog,
         executor: MontyExecutor,
     ) -> None:
@@ -246,6 +257,8 @@ class GatewayRuntime:
         oauth_storage_dir: Path,
         catalog_cache_dir: Path,
         settings_path: Path | None = None,
+        global_chain_dir: Path | None = None,
+        project_chain_dir: Path | None = None,
     ) -> GatewayRuntime:
         resolved_settings_path = settings_path or catalog_cache_dir.parent / "settings.json"
         settings = load_settings(resolved_settings_path)
@@ -263,7 +276,10 @@ class GatewayRuntime:
             name: ServerHandle.create(info_by_name[name], server_config, cache)
             for name, server_config in normalized.config.mcpServers.items()
         }
-        chain_store = ChainStore(catalog_cache_dir.parent / "chains")
+        chain_store = ScopedChainStore(
+            global_chain_dir or catalog_cache_dir.parent / "chains",
+            project_chain_dir,
+        )
         catalog = ToolCatalog.from_server_tools(
             {
                 name: [
@@ -322,7 +338,7 @@ class GatewayRuntime:
         return await self.executor.execute_graph(code, self._dispatch)
 
     async def _execute_chain(self, name: str, arguments: JsonObject) -> ExecutionResponse:
-        chain = self.chain_store.get(name)
+        chain = self.chain_store.get(name).chain
         if not chain.enabled:
             return ExecutionResponse(
                 ok=False,
@@ -336,17 +352,19 @@ class GatewayRuntime:
     async def _save_chain(
         self,
         *,
+        scope: ChainScope,
         name: str,
         description: str,
         code: str,
         input_schema: JsonObject,
         output_schema: JsonObject,
     ) -> SaveChainResponse:
-        previous = next(
-            (chain for chain in self.chain_store.load_all() if chain.name == name),
-            None,
+        previous = (
+            self.chain_store.get(name, scope).chain
+            if self.chain_store.contains(scope, name)
+            else None
         )
-        candidate = self.chain_store.build(
+        candidate = ChainStore.build(
             name=name,
             description=description,
             code=code,
@@ -369,7 +387,7 @@ class GatewayRuntime:
                 message = error.display("type-msg").strip()
             raise ValueError(f"Saved chain failed preflight: {message}") from error
         dependencies = self._chain_dependencies(code, candidate_catalog)
-        saved = self.chain_store.build(
+        saved = ChainStore.build(
             name=name,
             description=description,
             code=code,
@@ -378,23 +396,28 @@ class GatewayRuntime:
             dependencies=dependencies,
             previous=previous,
         ).model_copy(update={"enabled": True})
-        self.chain_store.save(saved)
+        self.chain_store.save(scope, saved)
         await self._rebuild_catalog()
         return SaveChainResponse(
-            chain=self._chain_view(saved.name),
+            chain=self._chain_view(saved.name, scope),
             created=previous is None,
         )
 
     def _list_chains(self) -> ChainListResponse:
         return ChainListResponse(chains=self._chain_views())
 
-    async def _set_chain_enabled(self, name: str, enabled: bool) -> ChainStatusView:
-        self.chain_store.set_enabled(name, enabled)
+    async def _set_chain_enabled(
+        self,
+        name: str,
+        scope: ChainScope,
+        enabled: bool,
+    ) -> ChainStatusView:
+        self.chain_store.set_enabled(scope, name, enabled)
         await self._rebuild_catalog()
-        return self._chain_view(name)
+        return self._chain_view(name, scope)
 
-    async def _revalidate_chain(self, name: str) -> ChainStatusView:
-        current = self.chain_store.get(name)
+    async def _revalidate_chain(self, name: str, scope: ChainScope) -> ChainStatusView:
+        current = self.chain_store.get(name, scope).chain
         await self._ensure_servers_discovered(self._referenced_servers(current.code))
         chains = [chain for chain in self.chain_store.enabled() if chain.name != name]
         chains.append(current)
@@ -414,17 +437,18 @@ class GatewayRuntime:
                 "validated_at": time.time(),
             }
         )
-        self.chain_store.save(updated)
+        self.chain_store.save(scope, updated)
         await self._rebuild_catalog()
-        return self._chain_view(name)
+        return self._chain_view(name, scope)
 
-    async def _delete_chain(self, name: str) -> ChainListResponse:
-        called_by = self._called_by().get(name, [])
+    async def _delete_chain(self, name: str, scope: ChainScope) -> ChainListResponse:
+        effective = self.chain_store.get(name)
+        called_by = self._called_by().get(name, []) if effective.scope == scope else []
         if called_by:
             raise ValueError(
                 f"Cannot delete saved chain {name}; it is used by: {', '.join(called_by)}"
             )
-        self.chain_store.delete(name)
+        self.chain_store.delete(scope, name)
         await self._rebuild_catalog()
         return self._list_chains()
 
@@ -436,7 +460,7 @@ class GatewayRuntime:
     ) -> JsonValue:
         spec = context.catalog.tools[public_name]
         if spec.kind == "saved_chain":
-            chain = self.chain_store.get(spec.backend_name)
+            chain = self.chain_store.get(spec.backend_name).chain
             return await self.executor.execute_nested_chain(chain, arguments, context)
 
         handle = self.handles[spec.server]
@@ -554,14 +578,17 @@ class GatewayRuntime:
     def _chain_views(self) -> list[ChainStatusView]:
         called_by = self._called_by()
         views: list[ChainStatusView] = []
-        for chain in self.chain_store.load_all():
+        for item in self.chain_store.load_all():
+            chain = item.chain
             stale = [
                 dependency.call
                 for dependency in chain.dependencies
                 if self._dependency_is_stale(dependency)
             ]
-            status: Literal["ready", "disabled", "stale"]
-            if not chain.enabled:
+            status: Literal["ready", "disabled", "stale", "shadowed"]
+            if self.chain_store.is_shadowed(item):
+                status = "shadowed"
+            elif not chain.enabled:
                 status = "disabled"
             elif stale:
                 status = "stale"
@@ -570,9 +597,10 @@ class GatewayRuntime:
             views.append(
                 ChainStatusView(
                     chain=chain,
+                    scope=item.scope,
                     status=status,
                     stale_dependencies=stale,
-                    called_by=called_by.get(chain.name, []),
+                    called_by=called_by.get(chain.name, []) if status != "shadowed" else [],
                 )
             )
         return views
@@ -587,15 +615,23 @@ class GatewayRuntime:
                 return False
         return True
 
-    def _chain_view(self, name: str) -> ChainStatusView:
-        view = next((view for view in self._chain_views() if view.chain.name == name), None)
+    def _chain_view(self, name: str, scope: ChainScope) -> ChainStatusView:
+        view = next(
+            (
+                view
+                for view in self._chain_views()
+                if view.chain.name == name and view.scope == scope
+            ),
+            None,
+        )
         if view is None:
-            raise ValueError(f"Unknown saved chain: {name}")
+            raise ValueError(f"Unknown {scope} saved chain: {name}")
         return view
 
     def _called_by(self) -> dict[str, list[str]]:
         result: dict[str, list[str]] = {}
-        for chain in self.chain_store.load_all():
+        for item in self.chain_store.effective():
+            chain = item.chain
             for dependency in chain.dependencies:
                 if dependency.kind != "saved_chain":
                     continue
@@ -611,7 +647,7 @@ class GatewayRuntime:
             spec = self.catalog.tools[public_name]
             if spec.kind == "saved_chain":
                 required.update(
-                    self._required_servers_for_chain(self.chain_store.get(spec.backend_name))
+                    self._required_servers_for_chain(self.chain_store.get(spec.backend_name).chain)
                 )
         return required
 
@@ -625,7 +661,7 @@ class GatewayRuntime:
             return set()
         seen.add(chain.name)
         required: set[str] = set()
-        manifests = {item.name: item for item in self.chain_store.load_all()}
+        manifests = {item.chain.name: item.chain for item in self.chain_store.effective()}
         for dependency in chain.dependencies:
             if dependency.kind == "mcp_tool":
                 required.add(dependency.server)
@@ -696,26 +732,41 @@ def _require_runtime() -> GatewayRuntime:
     return _runtime_state.runtime
 
 
-def _runtime_paths() -> tuple[Path, Path, Path, Path]:
+def _runtime_paths() -> tuple[Path, Path, Path, Path, Path, Path | None]:
     raw_agent_dir = os.environ.get(CODEMCP_AGENT_DIR_ENV) or os.environ.get(PI_AGENT_DIR_ENV)
     agent_dir = Path(raw_agent_dir).expanduser() if raw_agent_dir else DEFAULT_AGENT_DIR
     state_dir = agent_dir / "pi-codemcp"
+    raw_project_chains_dir = os.environ.get(CODEMCP_PROJECT_CHAINS_DIR_ENV)
+    project_chains_dir = (
+        Path(raw_project_chains_dir).expanduser() if raw_project_chains_dir else None
+    )
     return (
         agent_dir / "mcp.json",
         state_dir / "oauth",
         state_dir / "catalog",
         state_dir / "settings.json",
+        state_dir / "chains",
+        project_chains_dir,
     )
 
 
 @asynccontextmanager
 async def lifespan(_: FastMCP[None]) -> AsyncIterator[None]:
-    config_path, oauth_dir, catalog_dir, settings_path = _runtime_paths()
+    (
+        config_path,
+        oauth_dir,
+        catalog_dir,
+        settings_path,
+        global_chains_dir,
+        project_chains_dir,
+    ) = _runtime_paths()
     _runtime_state.runtime = GatewayRuntime.create(
         config_path,
         oauth_dir,
         catalog_dir,
         settings_path,
+        global_chain_dir=global_chains_dir,
+        project_chain_dir=project_chains_dir,
     )
     try:
         yield
@@ -769,9 +820,11 @@ async def save_chain(
     code: str,
     input_schema: JsonObject,
     output_schema: JsonObject,
+    scope: ChainScope = "project",
 ) -> SaveChainResponse:
     """Validate and persist one reusable typed MCP chain."""
     return await _require_runtime().chains.save(
+        scope=scope,
         name=name,
         description=description,
         code=code,
@@ -794,21 +847,25 @@ async def execute_chain(name: str, arguments: JsonObject) -> ExecutionResponse:
 
 
 @mcp.tool
-async def set_chain_enabled(name: str, enabled: bool) -> ChainStatusView:
-    """Enable or disable one saved chain."""
-    return await _require_runtime().chains.set_enabled(name, enabled)
+async def set_chain_enabled(
+    name: str,
+    scope: ChainScope,
+    enabled: bool,
+) -> ChainStatusView:
+    """Enable or disable one saved chain in its storage scope."""
+    return await _require_runtime().chains.set_enabled(name, scope, enabled)
 
 
 @mcp.tool
-async def revalidate_chain(name: str) -> ChainStatusView:
-    """Revalidate one saved chain against the current callable catalog."""
-    return await _require_runtime().chains.revalidate(name)
+async def revalidate_chain(name: str, scope: ChainScope) -> ChainStatusView:
+    """Revalidate one scoped saved chain against the current callable catalog."""
+    return await _require_runtime().chains.revalidate(name, scope)
 
 
 @mcp.tool
-async def delete_chain(name: str) -> ChainListResponse:
-    """Delete an unused saved chain."""
-    return await _require_runtime().chains.delete(name)
+async def delete_chain(name: str, scope: ChainScope) -> ChainListResponse:
+    """Delete an unused saved chain from its storage scope."""
+    return await _require_runtime().chains.delete(name, scope)
 
 
 @mcp.tool

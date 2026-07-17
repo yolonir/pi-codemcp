@@ -41,6 +41,7 @@ export interface SidecarClientOptions {
   packageRoot?: string;
   agentDir?: string;
   environment?: Record<string, string>;
+  projectChainsPath?: string;
 }
 
 export class SidecarClient {
@@ -52,6 +53,7 @@ export class SidecarClient {
   private transport: StdioClientTransport | undefined;
   private startPromise: Promise<void> | undefined;
   private closePromise: Promise<void> | undefined;
+  private projectChainsDirectory: string | undefined;
   private stderrTail = "";
 
   constructor(options: SidecarClientOptions = {}) {
@@ -60,12 +62,21 @@ export class SidecarClient {
     );
     this.packageVersion = readPackageVersion(this.packageRoot);
     this.agentDir = resolve(options.agentDir ?? getAgentDir());
+    this.projectChainsDirectory = options.projectChainsPath
+      ? resolve(options.projectChainsPath)
+      : undefined;
     this.environment = {
       ...definedProcessEnvironment(),
       ...(options.environment ?? {}),
       PI_CODEMCP_AGENT_DIR: this.agentDir,
+      ...(this.projectChainsDirectory === undefined
+        ? {}
+        : { PI_CODEMCP_PROJECT_CHAINS_DIR: this.projectChainsDirectory }),
       UV_PROJECT_ENVIRONMENT: join(this.agentDir, "pi-codemcp", "runtime", "venv"),
     };
+    if (this.projectChainsDirectory === undefined) {
+      delete this.environment.PI_CODEMCP_PROJECT_CHAINS_DIR;
+    }
   }
 
   get configPath(): string {
@@ -78,6 +89,21 @@ export class SidecarClient {
 
   get chainsPath(): string {
     return join(this.agentDir, "pi-codemcp", "chains");
+  }
+
+  get projectChainsPath(): string | undefined {
+    return this.projectChainsDirectory;
+  }
+
+  configureProjectChains(path: string | undefined): void {
+    const resolved = path === undefined ? undefined : resolve(path);
+    if (resolved === this.projectChainsDirectory) return;
+    if (this.client || this.transport || this.startPromise || this.closePromise) {
+      throw new Error("Cannot change CodeMCP project chain scope after the sidecar has started");
+    }
+    this.projectChainsDirectory = resolved;
+    if (resolved === undefined) delete this.environment.PI_CODEMCP_PROJECT_CHAINS_DIR;
+    else this.environment.PI_CODEMCP_PROJECT_CHAINS_DIR = resolved;
   }
 
   get pid(): number | null {

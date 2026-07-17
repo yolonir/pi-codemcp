@@ -66,7 +66,7 @@ return {"posted": result["ok"], "count": issues["count"]}
 
 Nested chains share the same deadline, cancellation signal, catalog snapshot, and total call budget. Every nested input and output is runtime-validated. Recursion is supported but bounded. Dependency fingerprints mark chains stale when a referenced contract changes.
 
-Saved manifests live under `<agent-dir>/pi-codemcp/chains`. They contain sandboxed code and schemas, never credentials or execution results. Use `/codemcp` to inspect dependencies, enable or disable chains, revalidate them, or delete unused chains.
+New manifests default to project scope under `<project>/.pi/pi-codemcp/chains`; explicitly global chains live under `<agent-dir>/pi-codemcp/chains`. A project chain overrides a same-named global chain without deleting it. Manifests contain sandboxed code and schemas, never credentials or execution results. `/codemcp` labels both scopes and can revalidate, enable, disable, or delete chains.
 
 ## Install
 
@@ -93,7 +93,7 @@ Incomplete upstream schemas become recursive `JsonValue`, not `Any`; unknown val
 
 FastMCP owns MCP transports, runtime validation, and OAuth. [Pydantic Monty](https://github.com/pydantic/monty) type-checks and executes agent-written Python without host filesystem, environment, network, or subprocess access.
 
-`/codemcp` configures execution/per-call timeouts, total calls, final-result size, agent-visible output, cache TTL, and warmup. The sandbox also has a fixed memory ceiling; executions are serialized per Pi session. There are no automatic retries or cross-service rollback.
+`/codemcp` configures execution/per-call timeouts, total calls, final-result size, agent-visible output, cache TTL, warmup, and per-tool policy. Setting and tool-policy edits stay local and instantaneous until one `Ctrl+S` save/reload. The sandbox also has a fixed memory ceiling; executions are serialized per Pi session. There are no automatic retries or cross-service rollback.
 
 Enabled tools retain their upstream permissions. Saved chains never bypass server or per-tool policy and are checked against the current enabled catalog whenever they run.
 

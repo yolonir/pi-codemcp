@@ -7,7 +7,7 @@ import re
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -16,6 +16,7 @@ from .json_types import JSON_OBJECT_ADAPTER, JsonObject
 
 CHAIN_NAME_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
 CHAIN_STORE_VERSION: Literal[1] = 1
+type ChainScope = Literal["global", "project"]
 
 
 class ChainDependency(BaseModel):
@@ -76,7 +77,8 @@ class ChainStatusView(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     chain: SavedChainManifest
-    status: Literal["ready", "disabled", "stale"]
+    scope: ChainScope
+    status: Literal["ready", "disabled", "stale", "shadowed"]
     stale_dependencies: list[str] = Field(default_factory=list)
     called_by: list[str] = Field(default_factory=list)
 
@@ -113,6 +115,10 @@ class ChainStore:
 
     def enabled(self) -> list[SavedChainManifest]:
         return [chain for chain in self.load_all() if chain.enabled]
+
+    def contains(self, name: str) -> bool:
+        self._validate_name(name)
+        return self._path(name).is_file()
 
     def get(self, name: str) -> SavedChainManifest:
         self._validate_name(name)
@@ -194,6 +200,84 @@ class ChainStore:
                 "Saved chain name must start with a lowercase letter and contain only "
                 "lowercase letters, digits, and underscores (maximum 64 characters)"
             )
+
+
+class ScopedChain(NamedTuple):
+    scope: ChainScope
+    chain: SavedChainManifest
+
+
+class ScopedChainStore:
+    def __init__(self, global_directory: Path, project_directory: Path | None) -> None:
+        self.global_store = ChainStore(global_directory)
+        self.project_store = (
+            ChainStore(project_directory) if project_directory is not None else None
+        )
+
+    def load_all(self) -> list[ScopedChain]:
+        chains = [
+            ScopedChain(scope="global", chain=chain) for chain in self.global_store.load_all()
+        ]
+        if self.project_store is not None:
+            chains.extend(
+                ScopedChain(scope="project", chain=chain) for chain in self.project_store.load_all()
+            )
+        return sorted(
+            chains,
+            key=lambda item: (item.chain.name, item.scope != "project"),
+        )
+
+    def effective(self) -> list[ScopedChain]:
+        effective: dict[str, ScopedChain] = {}
+        for item in self.load_all():
+            current = effective.get(item.chain.name)
+            if current is None or item.scope == "project":
+                effective[item.chain.name] = item
+        return [effective[name] for name in sorted(effective)]
+
+    def enabled(self) -> list[SavedChainManifest]:
+        return [item.chain for item in self.effective() if item.chain.enabled]
+
+    def get(self, name: str, scope: ChainScope | None = None) -> ScopedChain:
+        if scope is not None:
+            return ScopedChain(scope=scope, chain=self._store(scope).get(name))
+        if self.project_store is not None and self.project_store.contains(name):
+            return ScopedChain(scope="project", chain=self.project_store.get(name))
+        return ScopedChain(scope="global", chain=self.global_store.get(name))
+
+    def contains(self, scope: ChainScope, name: str) -> bool:
+        return self._store(scope).contains(name)
+
+    def save(self, scope: ChainScope, chain: SavedChainManifest) -> None:
+        self._store(scope).save(chain)
+
+    def set_enabled(
+        self,
+        scope: ChainScope,
+        name: str,
+        enabled: bool,
+    ) -> ScopedChain:
+        return ScopedChain(
+            scope=scope,
+            chain=self._store(scope).set_enabled(name, enabled),
+        )
+
+    def delete(self, scope: ChainScope, name: str) -> None:
+        self._store(scope).delete(name)
+
+    def is_shadowed(self, item: ScopedChain) -> bool:
+        return (
+            item.scope == "global"
+            and self.project_store is not None
+            and self.project_store.contains(item.chain.name)
+        )
+
+    def _store(self, scope: ChainScope) -> ChainStore:
+        if scope == "global":
+            return self.global_store
+        if self.project_store is None:
+            raise ValueError("Project saved-chain scope is unavailable for this session")
+        return self.project_store
 
 
 def schema_fingerprint(input_schema: JsonObject, output_schema: JsonObject) -> str:

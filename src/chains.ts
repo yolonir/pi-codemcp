@@ -36,14 +36,18 @@ export interface SavedChainManifest {
   validatedAt: number;
 }
 
+export type ChainScope = "global" | "project";
+
 export interface SavedChainView {
   chain: SavedChainManifest;
-  status: "ready" | "disabled" | "stale";
+  scope: ChainScope;
+  status: "ready" | "disabled" | "stale" | "shadowed";
   staleDependencies: string[];
   calledBy: string[];
 }
 
 export interface SaveChainInput {
+  scope: ChainScope;
   name: string;
   description: string;
   code: string;
@@ -51,8 +55,13 @@ export interface SaveChainInput {
   outputSchema: ChainJsonSchema;
 }
 
+interface ScopedSavedChain {
+  scope: ChainScope;
+  chain: SavedChainManifest;
+}
+
 interface LoadedChains {
-  chains: SavedChainManifest[];
+  chains: ScopedSavedChain[];
   errors: string[];
 }
 
@@ -60,33 +69,29 @@ const CHAIN_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 
 export class SavedChainManager {
   readonly startupErrors: string[] = [];
-  private readonly manifests = new Map<string, SavedChainManifest>();
+  private readonly manifests = new Map<string, ScopedSavedChain>();
   private readonly registered = new Set<string>();
+  private projectChainsPath: string | undefined;
 
   constructor(
     private readonly pi: ExtensionAPI,
     private readonly lifecycle: CodeMcpLifecycle,
   ) {
-    const loaded = loadSavedChains(lifecycle.chainsPath);
-    this.startupErrors.push(...loaded.errors);
-    for (const chain of loaded.chains) this.manifests.set(chain.name, chain);
+    this.reloadPersisted();
+  }
+
+  configureProject(path: string | undefined): void {
+    if (path === this.projectChainsPath) return;
+    this.projectChainsPath = path;
+    this.reloadPersisted();
   }
 
   activatePersisted(): void {
-    for (const chain of this.manifests.values()) {
-      if (this.registered.has(chain.name)) continue;
-      try {
-        this.register(chain);
-      } catch (error) {
-        this.startupErrors.push(summarizeError(error));
-      }
+    try {
+      this.refreshNativeTools();
+    } catch (error) {
+      this.startupErrors.push(summarizeError(error));
     }
-    const managedNames = new Set([...this.registered].map((name) => nativeChainToolName(name)));
-    const active = this.pi.getActiveTools().filter((name) => !managedNames.has(name));
-    for (const chain of this.manifests.values()) {
-      if (chain.enabled) active.push(nativeChainToolName(chain.name));
-    }
-    this.pi.setActiveTools([...new Set(active)]);
   }
 
   async save(input: SaveChainInput, signal?: AbortSignal): Promise<SavedChainView> {
@@ -95,6 +100,7 @@ export class SavedChainManager {
     const result = await this.lifecycle.request(
       "save_chain",
       {
+        scope: input.scope,
         name: input.name,
         description: input.description,
         code: input.code,
@@ -105,47 +111,48 @@ export class SavedChainManager {
     );
     const root = requireRecord(result.chain, "save_chain.chain");
     const view = parseSavedChainView(root, "save_chain.chain");
-    this.register(view.chain);
-    this.setActive(view.chain.name, true);
+    this.upsertView(view);
+    this.refreshNativeTools();
     return view;
   }
 
   async list(signal?: AbortSignal): Promise<SavedChainView[]> {
     const result = await this.lifecycle.request("list_chains", {}, signal);
-    const values = Array.isArray(result.chains) ? result.chains : [];
-    const views = values.map((value, index) =>
-      parseSavedChainView(value, `list_chains.chains[${index}]`),
-    );
-    for (const view of views) {
-      this.register(view.chain);
-      this.setActive(view.chain.name, view.chain.enabled);
-    }
+    const views = parseViewList(result.chains, "list_chains.chains");
+    this.synchronizeViews(views);
     return views;
   }
 
-  async setEnabled(name: string, enabled: boolean, signal?: AbortSignal): Promise<SavedChainView> {
-    const result = await this.lifecycle.request("set_chain_enabled", { name, enabled }, signal);
-    const view = parseSavedChainView(result, "set_chain_enabled");
-    this.register(view.chain);
-    this.setActive(name, enabled);
-    return view;
-  }
-
-  async revalidate(name: string, signal?: AbortSignal): Promise<SavedChainView> {
-    const result = await this.lifecycle.request("revalidate_chain", { name }, signal);
-    const view = parseSavedChainView(result, "revalidate_chain");
-    this.register(view.chain);
-    return view;
-  }
-
-  async delete(name: string, signal?: AbortSignal): Promise<SavedChainView[]> {
-    const result = await this.lifecycle.request("delete_chain", { name }, signal);
-    this.setActive(name, false);
-    this.manifests.delete(name);
-    const values = Array.isArray(result.chains) ? result.chains : [];
-    return values.map((value, index) =>
-      parseSavedChainView(value, `delete_chain.chains[${index}]`),
+  async setEnabled(
+    name: string,
+    scope: ChainScope,
+    enabled: boolean,
+    signal?: AbortSignal,
+  ): Promise<SavedChainView> {
+    const result = await this.lifecycle.request(
+      "set_chain_enabled",
+      { name, scope, enabled },
+      signal,
     );
+    const view = parseSavedChainView(result, "set_chain_enabled");
+    this.upsertView(view);
+    this.refreshNativeTools();
+    return view;
+  }
+
+  async revalidate(name: string, scope: ChainScope, signal?: AbortSignal): Promise<SavedChainView> {
+    const result = await this.lifecycle.request("revalidate_chain", { name, scope }, signal);
+    const view = parseSavedChainView(result, "revalidate_chain");
+    this.upsertView(view);
+    this.refreshNativeTools();
+    return view;
+  }
+
+  async delete(name: string, scope: ChainScope, signal?: AbortSignal): Promise<SavedChainView[]> {
+    const result = await this.lifecycle.request("delete_chain", { name, scope }, signal);
+    const views = parseViewList(result.chains, "delete_chain.chains");
+    this.synchronizeViews(views);
+    return views;
   }
 
   private register(chain: SavedChainManifest): void {
@@ -204,8 +211,58 @@ export class SavedChainManager {
         });
       },
     });
-    this.manifests.set(chain.name, chain);
     this.registered.add(chain.name);
+  }
+
+  private refreshNativeTools(): void {
+    const effective = this.effectiveManifests();
+    for (const item of effective) this.register(item.chain);
+    const managedNames = new Set([...this.registered].map((name) => nativeChainToolName(name)));
+    const active = this.pi.getActiveTools().filter((name) => !managedNames.has(name));
+    for (const item of effective) {
+      if (item.chain.enabled) active.push(nativeChainToolName(item.chain.name));
+    }
+    this.pi.setActiveTools([...new Set(active)]);
+  }
+
+  private effectiveManifests(): ScopedSavedChain[] {
+    const effective = new Map<string, ScopedSavedChain>();
+    for (const item of this.manifests.values()) {
+      const current = effective.get(item.chain.name);
+      if (!current || item.scope === "project") effective.set(item.chain.name, item);
+    }
+    return [...effective.values()].sort((left, right) =>
+      left.chain.name.localeCompare(right.chain.name),
+    );
+  }
+
+  private synchronizeViews(views: SavedChainView[]): void {
+    this.manifests.clear();
+    for (const view of views) this.upsertView(view);
+    this.refreshNativeTools();
+  }
+
+  private upsertView(view: SavedChainView): void {
+    this.manifests.set(scopeKey(view.scope, view.chain.name), {
+      scope: view.scope,
+      chain: view.chain,
+    });
+  }
+
+  private reloadPersisted(): void {
+    this.startupErrors.length = 0;
+    this.manifests.clear();
+    const global = loadSavedChains(this.lifecycle.chainsPath, "global");
+    this.startupErrors.push(...global.errors);
+    for (const item of global.chains) {
+      this.manifests.set(scopeKey(item.scope, item.chain.name), item);
+    }
+    if (this.projectChainsPath === undefined) return;
+    const project = loadSavedChains(this.projectChainsPath, "project");
+    this.startupErrors.push(...project.errors);
+    for (const item of project.chains) {
+      this.manifests.set(scopeKey(item.scope, item.chain.name), item);
+    }
   }
 
   private assertToolNameAvailable(name: string): void {
@@ -216,13 +273,6 @@ export class SavedChainManager {
         `Cannot register saved chain ${name}: native tool ${nativeName} already exists`,
       );
     }
-  }
-
-  private setActive(name: string, enabled: boolean): void {
-    const nativeName = nativeChainToolName(name);
-    const active = this.pi.getActiveTools().filter((toolName) => toolName !== nativeName);
-    if (enabled) active.push(nativeName);
-    this.pi.setActiveTools([...new Set(active)]);
   }
 }
 
@@ -258,11 +308,16 @@ export function nativeChainToolName(name: string): string {
 export function parseSavedChainView(value: unknown, label: string): SavedChainView {
   const root = requireRecord(value, label);
   const status = root.status;
-  if (status !== "ready" && status !== "disabled" && status !== "stale") {
-    throw new TypeError(`${label}.status must be ready, disabled, or stale`);
+  if (status !== "ready" && status !== "disabled" && status !== "stale" && status !== "shadowed") {
+    throw new TypeError(`${label}.status must be ready, disabled, stale, or shadowed`);
+  }
+  const scope = root.scope;
+  if (scope !== "global" && scope !== "project") {
+    throw new TypeError(`${label}.scope must be global or project`);
   }
   return {
     chain: parseSavedChainManifest(root.chain, `${label}.chain`),
+    scope,
     status,
     staleDependencies: stringArray(root.stale_dependencies, `${label}.stale_dependencies`),
     calledBy: stringArray(root.called_by, `${label}.called_by`),
@@ -296,9 +351,9 @@ export function parseSavedChainManifest(value: unknown, label: string): SavedCha
   };
 }
 
-function loadSavedChains(directory: string): LoadedChains {
+function loadSavedChains(directory: string, scope: ChainScope): LoadedChains {
   if (!existsSync(directory)) return { chains: [], errors: [] };
-  const chains: SavedChainManifest[] = [];
+  const chains: ScopedSavedChain[] = [];
   const errors: string[] = [];
   for (const filename of readdirSync(directory)
     .filter((name) => name.endsWith(".json"))
@@ -306,12 +361,21 @@ function loadSavedChains(directory: string): LoadedChains {
     const path = join(directory, filename);
     try {
       const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-      chains.push(parseSavedChainManifest(parsed, path));
+      chains.push({ scope, chain: parseSavedChainManifest(parsed, path) });
     } catch (error) {
-      errors.push(`Saved chain ${filename} failed to load: ${summarizeError(error)}`);
+      errors.push(`Saved ${scope} chain ${filename} failed to load: ${summarizeError(error)}`);
     }
   }
   return { chains, errors };
+}
+
+function parseViewList(value: unknown, label: string): SavedChainView[] {
+  const values = Array.isArray(value) ? value : [];
+  return values.map((item, index) => parseSavedChainView(item, `${label}[${index}]`));
+}
+
+function scopeKey(scope: ChainScope, name: string): string {
+  return `${scope}:${name}`;
 }
 
 function parseDependency(value: unknown, label: string): SavedChainDependency {

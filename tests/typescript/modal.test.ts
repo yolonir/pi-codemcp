@@ -105,6 +105,7 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   const chains: ChainModalState[] = [
     {
       name: "weekly_digest",
+      scope: "project",
       description: "Collect Linear issues and post a weekly digest to Slack.",
       nativeTool: "mcp_chain_weekly_digest",
       code: "return {}",
@@ -131,11 +132,13 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   let component: Component | undefined;
   let overlayOptions: Record<string, unknown> | undefined;
   const toggles: Array<{ name: string; enabled: boolean }> = [];
-  const toolToggles: Array<{ name: string; enabled: boolean }> = [];
-  const settingChanges: Array<{ key: string; value: boolean | number }> = [];
+  const savedSettings: Array<typeof DEFAULT_CODEMCP_SETTINGS> = [];
   const discoveries: string[] = [];
   const chainToggles: boolean[] = [];
   const revalidated: string[] = [];
+  let unsavedAction: "save" | "discard" | "cancel" = "cancel";
+  let unsavedPrompts = 0;
+  let closed = 0;
 
   const ctx = {
     mode: "tui",
@@ -143,12 +146,9 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
       notify() {},
       async custom(factory: ModalFactory, options: Record<string, unknown>) {
         overlayOptions = options;
-        component = factory(
-          { requestRender() {} },
-          theme,
-          { matches: () => false },
-          () => undefined,
-        );
+        component = factory({ requestRender() {} }, theme, { matches: () => false }, () => {
+          closed += 1;
+        });
       },
     },
   } as unknown as ExtensionCommandContext;
@@ -177,29 +177,35 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
         ],
       };
     },
-    async onSetToolEnabled(server, tool, enabled) {
-      toolToggles.push({ name: tool.name, enabled });
+    async onSaveSettings(settings) {
+      savedSettings.push(settings);
       return {
-        ...server,
-        toolCount: enabled ? 1 : 0,
-        tools: server.tools.map((candidate) =>
-          candidate.name === tool.name ? { ...candidate, enabled } : candidate,
-        ),
+        settings,
+        servers: servers.map((server) => ({
+          ...server,
+          tools: server.tools.map((tool) => ({ ...tool })),
+        })),
       };
     },
-    async onSetSetting(key, value) {
-      settingChanges.push({ key, value });
-      return { ...DEFAULT_CODEMCP_SETTINGS, [key]: value, disabledTools: {} };
+    async onResolveUnsaved() {
+      unsavedPrompts += 1;
+      return unsavedAction;
     },
     async onSetChainEnabled(chain, enabled) {
       chainToggles.push(enabled);
-      return { ...chain, enabled, status: enabled ? "ready" : "disabled" };
+      return chains.map((candidate) =>
+        candidate === chain
+          ? { ...candidate, enabled, status: enabled ? "ready" : "disabled" }
+          : candidate,
+      );
     },
     async onRevalidateChain(chain) {
       revalidated.push(chain.name);
-      return chain;
+      return chains;
     },
-    async onDeleteChain() {},
+    async onDeleteChain() {
+      return chains;
+    },
   });
 
   expect(overlayOptions).toEqual({
@@ -233,7 +239,8 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   component?.handleInput?.("\u001b[C");
   component?.handleInput?.("\r");
   await Bun.sleep(0);
-  expect(toolToggles).toEqual([{ name: "query", enabled: false }]);
+  expect(savedSettings).toEqual([]);
+  expect(servers[0]?.tools[0]?.enabled).toBe(false);
   expect(servers[0]?.toolCount).toBe(0);
 
   component?.handleInput?.("\u001b[D");
@@ -247,7 +254,8 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   const chainLines = renderedChainLines.join("\n");
   expect(chainLines).toContain("[Chains]");
   expect(chainLines).toContain("weekly_digest");
-  expect(chainLines).toContain("mcp_chain_weekly_digest");
+  expect(chainLines).toContain("[P]");
+  expect(chainLines).toContain("project · ready · mcp_chain_weekly_digest");
   expect(chainLines).toContain("linear.list_issues");
   expect(chainLines).toContain("assignee: string");
   const inputSection = renderedChainLines.findIndex((line) => line.includes("INPUT"));
@@ -270,5 +278,27 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   expect((component?.render(90) ?? []).join("\n")).toContain("[Settings]");
   component?.handleInput?.("\u001b[C");
   await Bun.sleep(0);
-  expect(settingChanges).toEqual([{ key: "backgroundWarmup", value: false }]);
+  expect(savedSettings).toEqual([]);
+  expect((component?.render(90) ?? []).join("\n")).toContain("Unsaved changes");
+
+  component?.handleInput?.("\u0013");
+  await Bun.sleep(0);
+  expect(savedSettings).toHaveLength(1);
+  expect(savedSettings[0]).toMatchObject({
+    backgroundWarmup: false,
+    disabledTools: { grafana: ["query"] },
+  });
+
+  component?.handleInput?.("\u001b[C");
+  component?.handleInput?.("\u001b");
+  await Bun.sleep(0);
+  expect(unsavedPrompts).toBe(1);
+  expect(closed).toBe(0);
+  unsavedAction = "save";
+  component?.handleInput?.("\u001b");
+  await Bun.sleep(0);
+  expect(unsavedPrompts).toBe(2);
+  expect(savedSettings).toHaveLength(2);
+  expect(savedSettings[1]?.backgroundWarmup).toBe(true);
+  expect(closed).toBe(1);
 });

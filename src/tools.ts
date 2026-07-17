@@ -1,7 +1,7 @@
 import { type ExtensionAPI, highlightCode, keyHint } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { nativeChainToolName, type SavedChainManager } from "./chains.js";
+import { type ChainScope, nativeChainToolName, type SavedChainManager } from "./chains.js";
 import {
   getTextContent,
   previewExecutionValue,
@@ -38,6 +38,12 @@ const SearchParameters = Type.Object({
 });
 
 const SaveChainParameters = Type.Object({
+  scope: Type.Optional(
+    Type.String({
+      enum: ["project", "global"],
+      description: "Storage scope for the chain (default project)",
+    }),
+  ),
   name: Type.String({
     minLength: 1,
     maxLength: 64,
@@ -211,12 +217,13 @@ export function registerCodeMcpTools(
     name: "codemcp_save_chain",
     label: "Save MCP Chain",
     description:
-      "Validate and globally persist a reusable typed MCP chain. The chain is immediately registered as a native mcp_chain_<name> tool and as chains.<name> inside CodeMCP. Requires explicit input and output JSON Schemas. Saving the same name updates and re-enables it.",
+      "Validate and persist a reusable typed MCP chain in project scope by default or global scope when explicitly requested. Project chains override same-named global chains. The effective chain is immediately registered as a native mcp_chain_<name> tool and as chains.<name> inside CodeMCP. Requires explicit input and output JSON Schemas. Saving the same scoped name updates and re-enables it.",
     promptSnippet: "Save a repeated MCP execution as a typed reusable native tool",
     promptGuidelines: [
       "If a user repeatedly performs the same MCP workflow, you may offer to save it with codemcp_save_chain, but do not persist it until the user explicitly asks or accepts.",
       "Use codemcp_save_chain only after the user explicitly asks to save a chain or accepts your suggestion to do so.",
       "When using codemcp_save_chain, parameterize repeated values through the typed input object and provide exact inputSchema and outputSchema contracts.",
+      "Save chains in project scope unless the user explicitly asks to make one available globally across projects.",
     ],
     parameters: SaveChainParameters,
     async execute(_toolCallId, params, signal, onUpdate) {
@@ -224,8 +231,10 @@ export function registerCodeMcpTools(
         content: [{ type: "text", text: `Validating saved chain ${params.name}...` }],
         details: undefined,
       });
+      const scope = requireChainScope(params.scope ?? "project");
       const view = await chains.save(
         {
+          scope,
           name: params.name,
           description: params.description,
           code: params.code,
@@ -236,6 +245,7 @@ export function registerCodeMcpTools(
       );
       const result = {
         saved: true,
+        scope: view.scope,
         name: view.chain.name,
         native_tool: nativeChainToolName(view.chain.name),
         call: `chains.${view.chain.name}`,
@@ -255,7 +265,7 @@ export function registerCodeMcpTools(
     },
     renderCall(args, theme) {
       return new Text(
-        `${theme.fg("toolTitle", theme.bold("Save MCP Chain "))}${theme.fg("accent", args.name)}`,
+        `${theme.fg("toolTitle", theme.bold("Save MCP Chain "))}${theme.fg("accent", args.name)} ${theme.fg("muted", `· ${args.scope ?? "project"}`)}`,
         0,
         0,
       );
@@ -308,6 +318,13 @@ function outputLimits(lifecycle: CodeMcpLifecycle): { maxBytes: number; maxLines
 
 function truncate(value: string, maxLength: number): string {
   return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}…`;
+}
+
+function requireChainScope(value: string): ChainScope {
+  if (value !== "project" && value !== "global") {
+    throw new TypeError("Saved chain scope must be project or global");
+  }
+  return value;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

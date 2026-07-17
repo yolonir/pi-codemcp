@@ -1,4 +1,9 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
+import {
+  CONFIG_DIR_NAME,
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+} from "@earendil-works/pi-coding-agent";
 import { SavedChainManager } from "../src/chains.js";
 import { setMcpServerEnabled } from "../src/config.js";
 import { summarizeError } from "../src/errors.js";
@@ -10,12 +15,7 @@ import {
   serverStatesFromStatus,
   showServerManagerModal,
 } from "../src/modal.js";
-import {
-  type CodeMcpSettings,
-  saveCodeMcpSettings,
-  setEditableSetting,
-  setToolEnabled,
-} from "../src/settings.js";
+import { type CodeMcpSettings, saveCodeMcpSettings } from "../src/settings.js";
 import { registerCodeMcpTools } from "../src/tools.js";
 
 export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
@@ -28,6 +28,7 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
       description: "Manage CodeMCP servers, saved chains, tools, and settings",
       handler: async (_args, ctx) => {
         try {
+          bindProjectChainScope(ctx, lifecycle, chains);
           const [status, savedChains, settings] = await Promise.all([
             lifecycle.request("status", {}),
             chains.list(),
@@ -50,40 +51,40 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
                 await lifecycle.request("discover", { server: server.name }),
                 server.name,
               ),
-            onSetToolEnabled: async (server, tool, enabled) => {
-              const updated = setToolEnabled(
-                lifecycle.loadSettings(),
-                server.name,
-                tool.name,
-                enabled,
-              );
+            onSaveSettings: async (updated) => {
+              const previous = lifecycle.loadSettings();
               saveCodeMcpSettings(lifecycle.settingsPath, updated);
-              return requireServerStatus(
-                await lifecycle.request("reload_settings", {}),
-                server.name,
-              );
+              try {
+                const status = await lifecycle.request("reload_settings", {});
+                return {
+                  settings: lifecycle.loadSettings(),
+                  servers: serverStatesFromStatus(status),
+                };
+              } catch (error) {
+                saveCodeMcpSettings(lifecycle.settingsPath, previous);
+                throw error;
+              }
             },
-            onSetSetting: async (key, value) => {
-              const updated = setEditableSetting(lifecycle.loadSettings(), key, value);
-              saveCodeMcpSettings(lifecycle.settingsPath, updated);
-              await lifecycle.request("reload_settings", {});
-              return updated;
+            onResolveUnsaved: async () => {
+              const choice = await ctx.ui.select("Unsaved CodeMCP changes", [
+                "Save",
+                "Discard",
+                "Cancel",
+              ]);
+              if (choice === "Save") return "save";
+              if (choice === "Discard") return "discard";
+              return "cancel";
             },
             onSetChainEnabled: async (chain, enabled) => {
-              const updated = await chains.setEnabled(chain.name, enabled);
-              const state = chainStatesFromViews([updated])[0];
-              if (!state) throw new Error(`CodeMCP returned no chain state for ${chain.name}`);
-              return state;
+              await chains.setEnabled(chain.name, chain.scope, enabled);
+              return chainStatesFromViews(await chains.list());
             },
             onRevalidateChain: async (chain) => {
-              const updated = await chains.revalidate(chain.name);
-              const state = chainStatesFromViews([updated])[0];
-              if (!state) throw new Error(`CodeMCP returned no chain state for ${chain.name}`);
-              return state;
+              await chains.revalidate(chain.name, chain.scope);
+              return chainStatesFromViews(await chains.list());
             },
-            onDeleteChain: async (chain) => {
-              await chains.delete(chain.name);
-            },
+            onDeleteChain: async (chain) =>
+              chainStatesFromViews(await chains.delete(chain.name, chain.scope)),
           });
         } catch (error) {
           ctx.ui.notify(summarizeError(error), "error");
@@ -92,6 +93,7 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
     });
 
     pi.on("session_start", (_event, ctx) => {
+      bindProjectChainScope(ctx, lifecycle, chains);
       chains.activatePersisted();
       for (const error of chains.startupErrors) ctx.ui.notify(error, "warning");
       let settings: CodeMcpSettings;
@@ -144,6 +146,18 @@ function requireServerStatus(
   const server = serverStatesFromStatus(status).find((candidate) => candidate.name === serverName);
   if (!server) throw new Error(`CodeMCP returned no status for ${serverName}`);
   return server;
+}
+
+function bindProjectChainScope(
+  ctx: Pick<ExtensionCommandContext, "cwd" | "isProjectTrusted">,
+  lifecycle: CodeMcpLifecycle,
+  chains: SavedChainManager,
+): void {
+  const projectChainsPath = ctx.isProjectTrusted()
+    ? join(ctx.cwd, CONFIG_DIR_NAME, "pi-codemcp", "chains")
+    : undefined;
+  lifecycle.configureProjectChains(projectChainsPath);
+  chains.configureProject(projectChainsPath);
 }
 
 function formatStatusSummary(servers: ServerModalState[]): string {

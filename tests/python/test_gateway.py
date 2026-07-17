@@ -65,15 +65,21 @@ def test_runtime_paths_honor_pi_agent_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    project_chains_path = tmp_path / "workspace" / ".pi" / "pi-codemcp" / "chains"
     monkeypatch.delenv("PI_CODEMCP_AGENT_DIR", raising=False)
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path))
+    monkeypatch.setenv("PI_CODEMCP_PROJECT_CHAINS_DIR", str(project_chains_path))
 
-    config, oauth, catalog, settings = gateway._runtime_paths()
+    config, oauth, catalog, settings, global_chains, project_chains = (
+        gateway._runtime_paths()
+    )
 
     assert config == tmp_path / "mcp.json"
     assert oauth == tmp_path / "pi-codemcp" / "oauth"
     assert catalog == tmp_path / "pi-codemcp" / "catalog"
     assert settings == tmp_path / "pi-codemcp" / "settings.json"
+    assert global_chains == tmp_path / "pi-codemcp" / "chains"
+    assert project_chains == project_chains_path
 
 
 def configure_environment(
@@ -402,6 +408,7 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
 
     try:
         saved = await runtime.chains.save(
+            scope="global",
             name="countdown",
             description="Recursively count down to zero and rebuild the total.",
             code="""
@@ -414,6 +421,7 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
             output_schema=integer_output,
         )
         assert saved.created is True
+        assert saved.chain.scope == "global"
         assert saved.chain.status == "ready"
         assert saved.chain.chain.native_tool == "mcp_chain_countdown"
         assert [dependency.call for dependency in saved.chain.chain.dependencies] == [
@@ -441,6 +449,7 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
         runtime.executor.settings.max_chain_depth = 16
 
         await runtime.chains.save(
+            scope="global",
             name="double_countdown",
             description="Compose the countdown chain twice.",
             code="""
@@ -467,9 +476,9 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
         assert all(match.source == "saved_chain" for match in matches.results)
 
         with pytest.raises(ValueError, match="used by: double_countdown"):
-            await runtime.chains.delete("countdown")
+            await runtime.chains.delete("countdown", "global")
 
-        disabled = await runtime.chains.set_enabled("countdown", False)
+        disabled = await runtime.chains.set_enabled("countdown", "global", False)
         assert disabled.status == "disabled"
         blocked = await runtime.chains.execute("countdown", {"count": 1})
         assert blocked.ok is False
@@ -480,5 +489,76 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
             if view.chain.name == "double_countdown"
         )
         assert dependent.status == "stale"
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_project_chains_shadow_global_chains_without_disabled_fallback(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(json.dumps({"mcpServers": {}}))
+    runtime = gateway.GatewayRuntime.create(
+        config_path,
+        tmp_path / "oauth",
+        tmp_path / "catalog",
+        project_chain_dir=tmp_path / "project" / ".pi" / "pi-codemcp" / "chains",
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {"source": {"type": "string"}},
+        "required": ["source"],
+        "additionalProperties": False,
+    }
+
+    try:
+        await runtime.chains.save(
+            scope="global",
+            name="source",
+            description="Return the global source.",
+            code='return {"source": "global"}',
+            input_schema=input_schema,
+            output_schema=output_schema,
+        )
+        await runtime.chains.save(
+            scope="project",
+            name="source",
+            description="Return the project source.",
+            code='return {"source": "project"}',
+            input_schema=input_schema,
+            output_schema=output_schema,
+        )
+
+        views = runtime.chains.list().chains
+        assert [(view.scope, view.status) for view in views] == [
+            ("project", "ready"),
+            ("global", "shadowed"),
+        ]
+        project_result = await runtime.chains.execute("source", {})
+        assert project_result.ok is True
+        assert project_result.result == {"source": "project"}
+
+        await runtime.chains.set_enabled("source", "project", False)
+        assert [(view.scope, view.status) for view in runtime.chains.list().chains] == [
+            ("project", "disabled"),
+            ("global", "shadowed"),
+        ]
+        blocked = await runtime.chains.execute("source", {})
+        assert blocked.ok is False
+        assert blocked.error == "Saved chain is disabled: source"
+
+        await runtime.chains.delete("source", "project")
+        global_result = await runtime.chains.execute("source", {})
+        assert global_result.ok is True
+        assert global_result.result == {"source": "global"}
+        assert [(view.scope, view.status) for view in runtime.chains.list().chains] == [
+            ("global", "ready")
+        ]
     finally:
         await runtime.close()

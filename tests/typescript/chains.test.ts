@@ -62,9 +62,14 @@ function manifest(name: string, enabled = true): Record<string, unknown> {
   };
 }
 
-function view(name: string, enabled = true): Record<string, unknown> {
+function view(
+  name: string,
+  enabled = true,
+  scope: "global" | "project" = "project",
+): Record<string, unknown> {
   return {
     chain: manifest(name, enabled),
+    scope,
     status: enabled ? "ready" : "disabled",
     stale_dependencies: [],
     called_by: [],
@@ -74,8 +79,14 @@ function view(name: string, enabled = true): Record<string, unknown> {
 test("saved manifests defer runtime actions and new saves activate immediately", async () => {
   const temporary = await mkdtemp(join(tmpdir(), "pi-codemcp-chains-"));
   const chainsPath = join(temporary, "pi-codemcp", "chains");
+  const projectChainsPath = join(temporary, "project", ".pi", "pi-codemcp", "chains");
   await mkdir(chainsPath, { recursive: true });
+  await mkdir(projectChainsPath, { recursive: true });
   await writeFile(join(chainsPath, "echo_value.json"), JSON.stringify(manifest("echo_value")));
+  await writeFile(
+    join(projectChainsPath, "echo_value.json"),
+    JSON.stringify({ ...manifest("echo_value"), description: "Run project echo_value" }),
+  );
 
   const tools: RegisteredTool[] = [];
   let active = ["codemcp_search"];
@@ -111,7 +122,11 @@ test("saved manifests defer runtime actions and new saves activate immediately",
         return { ok: true, result: { value: 4 }, calls_made: 1, chain_calls: 2 };
       }
       if (name === "save_chain") {
-        return { chain: view(String(args.name)), created: true };
+        const scope = args.scope === "global" ? "global" : "project";
+        return { chain: view(String(args.name), true, scope), created: true };
+      }
+      if (name === "delete_chain") {
+        return { chains: [view("echo_value", true, "global")] };
       }
       throw new Error(`Unexpected request: ${name}`);
     },
@@ -119,11 +134,13 @@ test("saved manifests defer runtime actions and new saves activate immediately",
 
   try {
     const manager = new SavedChainManager(pi, lifecycle);
+    manager.configureProject(projectChainsPath);
     expect(manager.startupErrors).toEqual([]);
     expect(tools).toEqual([]);
     runtimeReady = true;
     manager.activatePersisted();
     expect(tools.map((tool) => tool.name)).toEqual(["mcp_chain_echo_value"]);
+    expect(tools[0]?.description).toBe("Run project echo_value");
     expect(active).toEqual(["codemcp_search", "mcp_chain_echo_value"]);
 
     const native = tools[0];
@@ -148,7 +165,14 @@ test("saved manifests defer runtime actions and new saves activate immediately",
       args: { name: "echo_value", arguments: { value: 4 } },
     });
 
+    await manager.delete("echo_value", "project");
+    expect(tools.find((tool) => tool.name === "mcp_chain_echo_value")?.description).toBe(
+      "Run echo_value",
+    );
+    expect(active).toContain("mcp_chain_echo_value");
+
     const saved = await manager.save({
+      scope: "project",
       name: "new_chain",
       description: "Run new_chain",
       code: 'return {"value": input["value"]}',

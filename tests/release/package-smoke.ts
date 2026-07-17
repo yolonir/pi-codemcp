@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { SidecarClient } from "../../src/mcp-client.js";
 
@@ -10,6 +10,7 @@ if (!rawPackageRoot || !rawAgentDir) {
 
 const packageRoot = resolve(rawPackageRoot);
 const agentDir = resolve(rawAgentDir);
+const projectChainsPath = join(agentDir, "project", ".pi", "pi-codemcp", "chains");
 await mkdir(agentDir, { recursive: true });
 await writeFile(
   join(agentDir, "mcp.json"),
@@ -23,7 +24,7 @@ await writeFile(
   "utf8",
 );
 
-const client = new SidecarClient({ packageRoot, agentDir });
+const client = new SidecarClient({ packageRoot, agentDir, projectChainsPath });
 try {
   const status = await client.call("status", {});
   if (status.connected !== true || status.tool_count !== 0) {
@@ -35,6 +36,46 @@ try {
   const upstreams = status.upstreams;
   if (!Array.isArray(upstreams) || upstreams.length !== 1 || upstreams[0]?.name !== "placeholder") {
     throw new Error(`unexpected upstream status: ${JSON.stringify(upstreams)}`);
+  }
+
+  const saved = await client.call("save_chain", {
+    scope: "project",
+    name: "release_echo",
+    description: "Exercise project-scoped persistence from the packed release.",
+    code: 'return {"value": input["value"]}',
+    input_schema: {
+      type: "object",
+      properties: { value: { type: "integer" } },
+      required: ["value"],
+      additionalProperties: false,
+    },
+    output_schema: {
+      type: "object",
+      properties: { value: { type: "integer" } },
+      required: ["value"],
+      additionalProperties: false,
+    },
+  });
+  if (saved.created !== true) {
+    throw new Error(`project chain was not created: ${JSON.stringify(saved)}`);
+  }
+  const projectManifest = join(projectChainsPath, "release_echo.json");
+  if (!existsSync(projectManifest)) {
+    throw new Error(`project chain was not written to ${projectManifest}`);
+  }
+  if (existsSync(join(agentDir, "pi-codemcp", "chains", "release_echo.json"))) {
+    throw new Error("project chain leaked into the global chain store");
+  }
+  const manifest = JSON.parse(await readFile(projectManifest, "utf8"));
+  if (manifest.name !== "release_echo") {
+    throw new Error(`unexpected project chain manifest: ${JSON.stringify(manifest)}`);
+  }
+  const executed = await client.call("execute_chain", {
+    name: "release_echo",
+    arguments: { value: 7 },
+  });
+  if (executed.ok !== true || JSON.stringify(executed.result) !== JSON.stringify({ value: 7 })) {
+    throw new Error(`project chain execution failed: ${JSON.stringify(executed)}`);
   }
 } finally {
   await client.close();

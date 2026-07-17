@@ -11,9 +11,15 @@ import {
   truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
-import type { SavedChainView } from "./chains.js";
+import type { ChainScope, SavedChainView } from "./chains.js";
 import { summarizeError } from "./errors.js";
-import type { CodeMcpSettings, EditableSettingKey, EditableSettingValue } from "./settings.js";
+import {
+  type CodeMcpSettings,
+  type EditableSettingKey,
+  type EditableSettingValue,
+  setEditableSetting,
+  setToolEnabled,
+} from "./settings.js";
 
 export interface ToolModalState {
   name: string;
@@ -24,11 +30,12 @@ export interface ToolModalState {
 
 export interface ChainModalState {
   name: string;
+  scope: ChainScope;
   description: string;
   nativeTool: string;
   code: string;
   enabled: boolean;
-  status: "ready" | "disabled" | "stale";
+  status: "ready" | "disabled" | "stale" | "shadowed";
   inputSchema: Record<string, unknown>;
   outputSchema: Record<string, unknown>;
   dependencies: Array<{
@@ -60,21 +67,24 @@ interface Keybindings {
   matches(data: string, id: "tui.select.up" | "tui.select.down" | "tui.select.cancel"): boolean;
 }
 
+interface SettingsSaveResult {
+  settings: CodeMcpSettings;
+  servers: ServerModalState[];
+}
+
+type UnsavedAction = "save" | "discard" | "cancel";
+
 interface ServerManagerOptions {
   servers: ServerModalState[];
   chains: ChainModalState[];
   settings: CodeMcpSettings;
   onSetServerEnabled(server: ServerModalState, enabled: boolean): Promise<ServerModalState>;
   onDiscover(server: ServerModalState): Promise<ServerModalState>;
-  onSetToolEnabled(
-    server: ServerModalState,
-    tool: ToolModalState,
-    enabled: boolean,
-  ): Promise<ServerModalState>;
-  onSetSetting(key: EditableSettingKey, value: EditableSettingValue): Promise<CodeMcpSettings>;
-  onSetChainEnabled(chain: ChainModalState, enabled: boolean): Promise<ChainModalState>;
-  onRevalidateChain(chain: ChainModalState): Promise<ChainModalState>;
-  onDeleteChain(chain: ChainModalState): Promise<void>;
+  onSaveSettings(settings: CodeMcpSettings): Promise<SettingsSaveResult>;
+  onResolveUnsaved(): Promise<UnsavedAction>;
+  onSetChainEnabled(chain: ChainModalState, enabled: boolean): Promise<ChainModalState[]>;
+  onRevalidateChain(chain: ChainModalState): Promise<ChainModalState[]>;
+  onDeleteChain(chain: ChainModalState): Promise<ChainModalState[]>;
 }
 
 interface SettingChoice {
@@ -177,6 +187,7 @@ export async function showServerManagerModal(
 export function chainStatesFromViews(views: SavedChainView[]): ChainModalState[] {
   return views.map((view) => ({
     name: view.chain.name,
+    scope: view.scope,
     description: view.chain.description,
     nativeTool: `mcp_chain_${view.chain.name}`,
     code: view.chain.code,
@@ -228,6 +239,10 @@ class ServerManagerModal implements Component, Focusable {
   private selectedToolIndex = 0;
   private selectedChainIndex = 0;
   private selectedSettingIndex = 0;
+  private savedSettings: CodeMcpSettings;
+  private draftSettings: CodeMcpSettings;
+  private settingsBusy = false;
+  private closePromptBusy = false;
   private settingsError: string | undefined;
   private _focused = false;
 
@@ -237,7 +252,11 @@ class ServerManagerModal implements Component, Focusable {
     private readonly keybindings: Keybindings,
     private readonly close: () => void,
     private readonly requestRender: () => void,
-  ) {}
+  ) {
+    this.savedSettings = cloneSettings(options.settings);
+    this.draftSettings = cloneSettings(options.settings);
+    this.applyDraftToolPolicy();
+  }
 
   get focused(): boolean {
     return this._focused;
@@ -271,6 +290,11 @@ class ServerManagerModal implements Component, Focusable {
   }
 
   handleInput(data: string): void {
+    if (matchesKey(data, Key.ctrl("s"))) {
+      this.saveDraft();
+      return;
+    }
+    if (this.settingsBusy || this.closePromptBusy) return;
     if (this.keybindings.matches(data, "tui.select.cancel") || matchesKey(data, Key.escape)) {
       if (this.activeTab !== "settings" && this.search.getValue()) {
         this.search.setValue("");
@@ -278,7 +302,8 @@ class ServerManagerModal implements Component, Focusable {
         this.requestRender();
         return;
       }
-      this.close();
+      if (this.hasUnsavedChanges()) this.resolveUnsavedClose();
+      else this.close();
       return;
     }
     if (matchesKey(data, Key.tab)) {
@@ -367,6 +392,7 @@ class ServerManagerModal implements Component, Focusable {
   }
 
   private handleSettingsInput(data: string): void {
+    if (this.settingsBusy) return;
     if (this.keybindings.matches(data, "tui.select.up") || matchesKey(data, Key.up)) {
       this.selectedSettingIndex = cycleIndex(
         this.selectedSettingIndex,
@@ -542,9 +568,10 @@ class ServerManagerModal implements Component, Focusable {
         const selected = chains.indexOf(chain) === this.selectedChainIndex;
         const prefix = selected ? this.theme.fg("accent", "→") : " ";
         const icon = chainIcon(chain, this.theme);
+        const scope = this.theme.fg("dim", chain.scope === "project" ? "[P]" : "[G]");
         left.push(
           truncateToWidth(
-            `${prefix} ${icon} ${selected ? this.theme.fg("accent", chain.name) : chain.name}`,
+            `${prefix} ${icon} ${scope} ${selected ? this.theme.fg("accent", chain.name) : chain.name}`,
             leftWidth,
           ),
         );
@@ -573,7 +600,7 @@ class ServerManagerModal implements Component, Focusable {
     ];
     const lines = [
       this.theme.fg("accent", this.theme.bold(chain.name)),
-      this.theme.fg("muted", `${chain.status} · ${chain.nativeTool}`),
+      this.theme.fg("muted", `${chain.scope} · ${chain.status} · ${chain.nativeTool}`),
       chain.busy
         ? this.theme.fg("warning", "Working…")
         : `${this.theme.fg("accent", "[space]")} ${chain.enabled ? "Disable" : "Enable"}  ${this.theme.fg("accent", "[r]")} Revalidate  ${this.theme.fg("accent", "[del]")} Delete`,
@@ -620,7 +647,7 @@ class ServerManagerModal implements Component, Focusable {
     for (const [index, definition] of SETTING_DEFINITIONS.entries()) {
       const selected = index === this.selectedSettingIndex;
       const prefix = selected ? this.theme.fg("accent", "→") : " ";
-      const value = settingLabel(definition, this.options.settings[definition.key]);
+      const value = settingLabel(definition, this.draftSettings[definition.key]);
       const reserved = visibleWidth(prefix) + visibleWidth(value) + 3;
       const label = truncateToWidth(definition.label, Math.max(4, leftWidth - reserved), "…");
       const gap = " ".repeat(Math.max(1, leftWidth - reserved - visibleWidth(label) + 1));
@@ -635,13 +662,18 @@ class ServerManagerModal implements Component, Focusable {
     const right = definition
       ? [
           this.theme.fg("accent", this.theme.bold(definition.label)),
-          this.theme.fg("muted", settingLabel(definition, this.options.settings[definition.key])),
+          this.theme.fg("muted", settingLabel(definition, this.draftSettings[definition.key])),
           "",
           ...wrapPlainText(definition.description, rightWidth).map((line) =>
             this.theme.fg("muted", line),
           ),
           "",
-          this.theme.fg("dim", "←/→ change · enter next"),
+          this.theme.fg("dim", "←/→ change · enter next · ctrl+s save"),
+          ...(this.settingsBusy
+            ? ["", this.theme.fg("warning", "Saving settings and tool policy…")]
+            : this.hasUnsavedChanges()
+              ? ["", this.theme.fg("warning", "Unsaved changes")]
+              : []),
           ...(this.settingsError
             ? ["", this.theme.fg("warning", `Error: ${this.settingsError}`)]
             : []),
@@ -657,13 +689,14 @@ class ServerManagerModal implements Component, Focusable {
   }
 
   private footer(): string {
+    const pending = this.hasUnsavedChanges() ? " · * unsaved · ctrl+s save" : "";
     if (this.activeTab === "settings") {
-      return "tab servers · ↑/↓ navigate · ←/→/enter change · esc close";
+      return `tab servers · ↑/↓ navigate · ←/→/enter change · ctrl+s save · esc close${pending}`;
     }
     if (this.activeTab === "chains") {
-      return "tab settings · ↑/↓ navigate · space toggle · r revalidate · del delete · esc close";
+      return `tab settings · ↑/↓ navigate · space toggle · r revalidate · del delete · esc close${pending}`;
     }
-    return "tab chains · ←/→ pane · ↑/↓ navigate · space toggle · d discover · esc close";
+    return `tab chains · ←/→ pane · ↑/↓ navigate · space toggle · d discover · esc close${pending}`;
   }
 
   private moveSelection(direction: -1 | 1): void {
@@ -692,7 +725,10 @@ class ServerManagerModal implements Component, Focusable {
     delete server.error;
     void this.options
       .onSetServerEnabled(server, enabled)
-      .then((updated) => applyServerUpdate(server, updated))
+      .then((updated) => {
+        applyServerUpdate(server, updated);
+        this.applyDraftToolPolicy();
+      })
       .catch((error: unknown) => {
         server.error = summarizeError(error);
       })
@@ -714,7 +750,10 @@ class ServerManagerModal implements Component, Focusable {
     this.requestRender();
     void this.options
       .onDiscover(server)
-      .then((updated) => applyServerUpdate(server, updated))
+      .then((updated) => {
+        applyServerUpdate(server, updated);
+        this.applyDraftToolPolicy();
+      })
       .catch((error: unknown) => {
         server.error = summarizeError(error);
       })
@@ -726,21 +765,15 @@ class ServerManagerModal implements Component, Focusable {
 
   private toggleSelectedTool(): void {
     const server = this.selectedServer();
-    if (!server || server.busy) return;
+    if (!server || server.busy || this.settingsBusy) return;
     const tools = this.filteredTools(server);
     const tool = tools[this.selectedToolIndex];
     if (!tool || tool.busy) return;
-    tool.busy = true;
-    void this.options
-      .onSetToolEnabled(server, tool, !tool.enabled)
-      .then((updated) => applyServerUpdate(server, updated))
-      .catch((error: unknown) => {
-        server.error = summarizeError(error);
-      })
-      .finally(() => {
-        tool.busy = false;
-        this.requestRender();
-      });
+    const enabled = !tool.enabled;
+    this.draftSettings = setToolEnabled(this.draftSettings, server.name, tool.name, enabled);
+    tool.enabled = enabled;
+    server.toolCount = server.tools.filter((candidate) => candidate.enabled).length;
+    this.settingsError = undefined;
   }
 
   private toggleSelectedChain(): void {
@@ -750,7 +783,7 @@ class ServerManagerModal implements Component, Focusable {
     delete chain.error;
     void this.options
       .onSetChainEnabled(chain, !chain.enabled)
-      .then((updated) => applyChainUpdate(chain, updated))
+      .then((updated) => this.replaceChains(updated, chain))
       .catch((error: unknown) => {
         chain.error = summarizeError(error);
       })
@@ -767,7 +800,7 @@ class ServerManagerModal implements Component, Focusable {
     delete chain.error;
     void this.options
       .onRevalidateChain(chain)
-      .then((updated) => applyChainUpdate(chain, updated))
+      .then((updated) => this.replaceChains(updated, chain))
       .catch((error: unknown) => {
         chain.error = summarizeError(error);
       })
@@ -777,6 +810,20 @@ class ServerManagerModal implements Component, Focusable {
       });
   }
 
+  private replaceChains(updated: ChainModalState[], selected?: ChainModalState): void {
+    this.options.chains.splice(0, this.options.chains.length, ...updated);
+    if (selected) {
+      const index = this.filteredChains().findIndex(
+        (chain) => chain.name === selected.name && chain.scope === selected.scope,
+      );
+      if (index >= 0) {
+        this.selectedChainIndex = index;
+        return;
+      }
+    }
+    this.selectedChainIndex = clampIndex(this.selectedChainIndex, this.filteredChains().length);
+  }
+
   private deleteSelectedChain(): void {
     const chain = this.selectedChain();
     if (!chain || chain.busy) return;
@@ -784,11 +831,7 @@ class ServerManagerModal implements Component, Focusable {
     delete chain.error;
     void this.options
       .onDeleteChain(chain)
-      .then(() => {
-        const index = this.options.chains.indexOf(chain);
-        if (index >= 0) this.options.chains.splice(index, 1);
-        this.selectedChainIndex = clampIndex(this.selectedChainIndex, this.options.chains.length);
-      })
+      .then((updated) => this.replaceChains(updated))
       .catch((error: unknown) => {
         chain.error = summarizeError(error);
       })
@@ -800,8 +843,8 @@ class ServerManagerModal implements Component, Focusable {
 
   private cycleSelectedSetting(direction: -1 | 1): void {
     const definition = SETTING_DEFINITIONS[this.selectedSettingIndex];
-    if (!definition) return;
-    const current = this.options.settings[definition.key];
+    if (!definition || this.settingsBusy) return;
+    const current = this.draftSettings[definition.key];
     const currentIndex = Math.max(
       0,
       definition.choices.findIndex((choice) => choice.value === current),
@@ -810,15 +853,70 @@ class ServerManagerModal implements Component, Focusable {
       definition.choices[cycleIndex(currentIndex, direction, definition.choices.length)];
     if (!choice) return;
     this.settingsError = undefined;
+    try {
+      this.draftSettings = setEditableSetting(this.draftSettings, definition.key, choice.value);
+    } catch (error) {
+      this.settingsError = summarizeError(error);
+    }
+  }
+
+  private saveDraft(): void {
+    void this.persistDraft();
+  }
+
+  private async persistDraft(): Promise<boolean> {
+    if (this.settingsBusy) return false;
+    if (!this.hasUnsavedChanges()) return true;
+    this.settingsBusy = true;
+    this.settingsError = undefined;
+    this.requestRender();
+    try {
+      const result = await this.options.onSaveSettings(cloneSettings(this.draftSettings));
+      this.savedSettings = cloneSettings(result.settings);
+      this.draftSettings = cloneSettings(result.settings);
+      this.options.servers.splice(0, this.options.servers.length, ...result.servers);
+      this.applyDraftToolPolicy();
+      return true;
+    } catch (error) {
+      this.settingsError = summarizeError(error);
+      return false;
+    } finally {
+      this.settingsBusy = false;
+      this.requestRender();
+    }
+  }
+
+  private resolveUnsavedClose(): void {
+    if (this.closePromptBusy || this.settingsBusy) return;
+    this.closePromptBusy = true;
     void this.options
-      .onSetSetting(definition.key, choice.value)
-      .then((settings) => {
-        this.options.settings = settings;
+      .onResolveUnsaved()
+      .then(async (action) => {
+        if (action === "discard") {
+          this.close();
+          return;
+        }
+        if (action === "save" && (await this.persistDraft())) this.close();
       })
       .catch((error: unknown) => {
         this.settingsError = summarizeError(error);
       })
-      .finally(() => this.requestRender());
+      .finally(() => {
+        this.closePromptBusy = false;
+        this.requestRender();
+      });
+  }
+
+  private hasUnsavedChanges(): boolean {
+    return !settingsEqual(this.savedSettings, this.draftSettings);
+  }
+
+  private applyDraftToolPolicy(): void {
+    for (const server of this.options.servers) {
+      const disabled = new Set(this.draftSettings.disabledTools[server.name] ?? []);
+      for (const tool of server.tools) tool.enabled = !disabled.has(tool.name);
+      server.toolCount = server.tools.filter((tool) => tool.enabled).length;
+    }
   }
 
   private filteredServers(): ServerModalState[] {
@@ -900,23 +998,9 @@ function applyServerUpdate(target: ServerModalState, updated: ServerModalState):
   else target.error = updated.error;
 }
 
-function applyChainUpdate(target: ChainModalState, updated: ChainModalState): void {
-  target.description = updated.description;
-  target.nativeTool = updated.nativeTool;
-  target.code = updated.code;
-  target.enabled = updated.enabled;
-  target.status = updated.status;
-  target.inputSchema = updated.inputSchema;
-  target.outputSchema = updated.outputSchema;
-  target.dependencies = updated.dependencies;
-  target.staleDependencies = updated.staleDependencies;
-  target.calledBy = updated.calledBy;
-  if (updated.error === undefined) delete target.error;
-  else target.error = updated.error;
-}
-
 function chainIcon(chain: ChainModalState, theme: Theme): string {
   if (chain.busy) return theme.fg("warning", "…");
+  if (chain.status === "shadowed") return theme.fg("dim", "◇");
   if (!chain.enabled) return theme.fg("dim", "○");
   if (chain.status === "stale") return theme.fg("warning", "◌");
   return theme.fg("success", "●");
@@ -957,6 +1041,19 @@ function serverIcon(server: ServerModalState, theme: Theme): string {
   if (!server.enabled) return theme.fg("dim", "○");
   if (server.discovered) return theme.fg("success", "●");
   return theme.fg("warning", "◌");
+}
+
+function cloneSettings(settings: CodeMcpSettings): CodeMcpSettings {
+  return {
+    ...settings,
+    disabledTools: Object.fromEntries(
+      Object.entries(settings.disabledTools).map(([server, tools]) => [server, [...tools]]),
+    ),
+  };
+}
+
+function settingsEqual(left: CodeMcpSettings, right: CodeMcpSettings): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function settingLabel(definition: SettingDefinition, value: EditableSettingValue): string {

@@ -21,6 +21,14 @@ export class CodeMcpLifecycle {
     return this.sidecar.chainsPath;
   }
 
+  get projectChainsPath(): string | undefined {
+    return this.sidecar.projectChainsPath;
+  }
+
+  configureProjectChains(path: string | undefined): void {
+    this.sidecar.configureProjectChains(path);
+  }
+
   loadSettings(): CodeMcpSettings {
     return loadCodeMcpSettings(this.settingsPath);
   }

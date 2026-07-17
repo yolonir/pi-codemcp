@@ -23,6 +23,7 @@ async function waitForExit(pid: number): Promise<void> {
 test("stdio client runs typed search/chains, forwards cancellation, and cleans up", async () => {
   const temporary = await mkdtemp(join(tmpdir(), "pi-codemcp-ts-"));
   const configPath = join(temporary, "mcp.json");
+  const projectChainsPath = join(temporary, "project", ".pi", "pi-codemcp", "chains");
   const alphaPidPath = join(temporary, "alpha.pid");
   const betaPidPath = join(temporary, "beta.pid");
   const fixture = join(root, "tests", "fixtures", "upstream_server.py");
@@ -49,6 +50,7 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
   const client = new SidecarClient({
     packageRoot: root,
     agentDir: temporary,
+    projectChainsPath,
   });
   let sidecarPid: number | null = null;
   let upstreamPids: number[] = [];
@@ -80,6 +82,7 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     expect(execution).not.toHaveProperty("stage");
 
     const savedChain = await client.call("save_chain", {
+      scope: "project",
       name: "increment",
       description: "Increment one input through the alpha MCP server.",
       code: 'return await alpha.get_number({"seed": input["seed"]})',
@@ -100,9 +103,13 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
       created: true,
       chain: {
         status: "ready",
+        scope: "project",
         chain: { name: "increment", enabled: true },
       },
     });
+    expect(await readFile(join(projectChainsPath, "increment.json"), "utf8")).toContain(
+      '"name": "increment"',
+    );
     const nativeChain = await client.call("execute_chain", {
       name: "increment",
       arguments: { seed: 4 },
