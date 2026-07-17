@@ -14,12 +14,12 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-  "mypy==2.2.0",
-  "prek==0.4.8",
-  "pytest==8.4.2",
+  "mypy==2.3.0",
+  "prek==0.4.10",
+  "pytest==9.1.1",
   "pytest-asyncio==1.4.0",
-  "ruff==0.15.21",
-  "ty==0.0.58",
+  "ruff==0.15.22",
+  "ty==0.0.60",
 ]
 
 [tool.pytest.ini_options]
