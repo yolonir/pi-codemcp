@@ -1,9 +1,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { SavedChainManager } from "../src/chains.js";
 import { setMcpServerEnabled } from "../src/config.js";
 import { summarizeError } from "../src/errors.js";
 import { CodeMcpLifecycle } from "../src/lifecycle.js";
 import type { SidecarClientOptions } from "../src/mcp-client.js";
 import {
+  chainStatesFromViews,
   type ServerModalState,
   serverStatesFromStatus,
   showServerManagerModal,
@@ -19,14 +21,16 @@ import { registerCodeMcpTools } from "../src/tools.js";
 export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
   return function codeMcpExtension(pi: ExtensionAPI): void {
     const lifecycle = new CodeMcpLifecycle(options);
-    registerCodeMcpTools(pi, lifecycle);
+    const chains = new SavedChainManager(pi, lifecycle);
+    registerCodeMcpTools(pi, lifecycle, chains);
 
     pi.registerCommand("codemcp", {
-      description: "Manage CodeMCP servers, tools, and settings",
+      description: "Manage CodeMCP servers, saved chains, tools, and settings",
       handler: async (_args, ctx) => {
         try {
-          const [status, settings] = await Promise.all([
+          const [status, savedChains, settings] = await Promise.all([
             lifecycle.request("status", {}),
+            chains.list(),
             Promise.resolve(lifecycle.loadSettings()),
           ]);
           const servers = serverStatesFromStatus(status);
@@ -37,6 +41,7 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
 
           await showServerManagerModal(ctx, {
             servers,
+            chains: chainStatesFromViews(savedChains),
             settings,
             onSetServerEnabled: (server, enabled) =>
               setServerEnabledFromManager(lifecycle, server, enabled),
@@ -64,6 +69,21 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
               await lifecycle.request("reload_settings", {});
               return updated;
             },
+            onSetChainEnabled: async (chain, enabled) => {
+              const updated = await chains.setEnabled(chain.name, enabled);
+              const state = chainStatesFromViews([updated])[0];
+              if (!state) throw new Error(`CodeMCP returned no chain state for ${chain.name}`);
+              return state;
+            },
+            onRevalidateChain: async (chain) => {
+              const updated = await chains.revalidate(chain.name);
+              const state = chainStatesFromViews([updated])[0];
+              if (!state) throw new Error(`CodeMCP returned no chain state for ${chain.name}`);
+              return state;
+            },
+            onDeleteChain: async (chain) => {
+              await chains.delete(chain.name);
+            },
           });
         } catch (error) {
           ctx.ui.notify(summarizeError(error), "error");
@@ -72,6 +92,8 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
     });
 
     pi.on("session_start", (_event, ctx) => {
+      chains.activatePersisted();
+      for (const error of chains.startupErrors) ctx.ui.notify(error, "warning");
       let settings: CodeMcpSettings;
       try {
         settings = lifecycle.loadSettings();

@@ -6,7 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createCodeMcpExtension, setServerEnabledFromManager } from "../../extensions/index.js";
 
 describe("Pi extension registration", () => {
-  test("registers exactly search/execute and one manager command", () => {
+  test("registers search, execute, save, and one manager command", () => {
     const tools: Array<{ name: string; description?: string; parameters?: unknown }> = [];
     const commands: string[] = [];
     const events: string[] = [];
@@ -24,13 +24,17 @@ describe("Pi extension registration", () => {
 
     createCodeMcpExtension()(fakePi);
 
-    expect(tools.map((tool) => tool.name)).toEqual(["codemcp_search", "codemcp_execute"]);
+    expect(tools.map((tool) => tool.name)).toEqual([
+      "codemcp_search",
+      "codemcp_execute",
+      "codemcp_save_chain",
+    ]);
     expect(commands).toEqual(["codemcp"]);
     expect(events).toEqual(["session_start", "session_shutdown"]);
 
     const search = tools[0];
     expect(search?.description).toBe(
-      "Search configured upstream MCP tools and return their typed SDK stubs.",
+      "Search configured upstream MCP tools and saved chains, returning their typed SDK stubs.",
     );
     expect(search?.parameters).toMatchObject({
       properties: { server: { type: "string" } },

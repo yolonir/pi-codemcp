@@ -1,11 +1,12 @@
-import {
-  type ExtensionAPI,
-  highlightCode,
-  keyHint,
-  type Theme,
-} from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, highlightCode, keyHint } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { nativeChainToolName, type SavedChainManager } from "./chains.js";
+import {
+  getTextContent,
+  previewExecutionValue,
+  renderExecutionResult,
+} from "./execution-rendering.js";
 import type { CodeMcpLifecycle } from "./lifecycle.js";
 import { type CodeMcpOutputDetails, formatCodeMcpOutput } from "./output.js";
 
@@ -16,17 +17,10 @@ interface SearchRenderDetails extends CodeMcpOutputDetails {
   preview: string[];
 }
 
-interface ExecuteRenderDetails extends CodeMcpOutputDetails {
-  ok: boolean;
-  failureStage?: string;
-  callsMade: number;
-  preview: string[];
-}
-
 const SearchParameters = Type.Object({
   query: Type.String({
     minLength: 1,
-    description: "Words describing the upstream capability or tool to find",
+    description: "Words describing an upstream capability, tool, or saved chain",
   }),
   limit: Type.Optional(
     Type.Integer({
@@ -38,9 +32,34 @@ const SearchParameters = Type.Object({
   server: Type.Optional(
     Type.String({
       minLength: 1,
-      description: "Configured upstream server to search",
+      description: "Configured upstream server to search, or chains for saved chains",
     }),
   ),
+});
+
+const SaveChainParameters = Type.Object({
+  name: Type.String({
+    minLength: 1,
+    maxLength: 64,
+    pattern: "^[a-z][a-z0-9_]{0,63}$",
+    description: "Stable lowercase SDK method name used as chains.<name>",
+  }),
+  description: Type.String({
+    minLength: 1,
+    maxLength: 1000,
+    description: "Purpose and appropriate use of the reusable native tool",
+  }),
+  code: Type.String({
+    minLength: 1,
+    description:
+      "Sandboxed Python body. Read typed arguments from input, call MCP or chains SDK methods, and return a value matching outputSchema.",
+  }),
+  inputSchema: Type.Record(Type.String(), Type.Unknown(), {
+    description: "JSON Schema for the native tool arguments; the root must be an object",
+  }),
+  outputSchema: Type.Record(Type.String(), Type.Unknown(), {
+    description: "Required JSON Schema for the chain return value",
+  }),
 });
 
 const ExecuteParameters = Type.Object({
@@ -51,14 +70,19 @@ const ExecuteParameters = Type.Object({
   }),
 });
 
-export function registerCodeMcpTools(pi: ExtensionAPI, lifecycle: CodeMcpLifecycle): void {
+export function registerCodeMcpTools(
+  pi: ExtensionAPI,
+  lifecycle: CodeMcpLifecycle,
+  chains: SavedChainManager,
+): void {
   pi.registerTool({
     name: "codemcp_search",
     label: "MCP Search",
-    description: "Search configured upstream MCP tools and return their typed SDK stubs.",
-    promptSnippet: "Search upstream MCP capabilities and inspect their typed SDK stubs",
+    description:
+      "Search configured upstream MCP tools and saved chains, returning their typed SDK stubs.",
+    promptSnippet: "Search MCP capabilities and reusable chains, then inspect typed SDK stubs",
     promptGuidelines: [
-      "Use codemcp_search before codemcp_execute; every match includes the complete typed SDK stub needed to write the chain.",
+      "Use codemcp_search before codemcp_execute; every upstream or saved-chain match includes the complete typed SDK stub needed to write the execution.",
     ],
     parameters: SearchParameters,
     async execute(_toolCallId, params, signal, onUpdate) {
@@ -124,12 +148,12 @@ export function registerCodeMcpTools(pi: ExtensionAPI, lifecycle: CodeMcpLifecyc
     name: "codemcp_execute",
     label: "MCP Execute",
     description:
-      "Type-check and execute one sandboxed Python MCP chain. Supports sequential and dependent calls, loops, conditions, cross-server calls, and enabled upstream tools. The code has no host filesystem, environment, network, or subprocess access. Return a compact final value within the configured result limit; oversized values fail with a shape summary.",
+      "Type-check and execute one sandboxed Python MCP call graph. Supports sequential and dependent calls, loops, conditions, cross-server calls, enabled upstream tools, and reusable chains.* calls. The code has no host filesystem, environment, network, or subprocess access. Return a compact final value within the configured result limit; oversized values fail with a shape summary.",
     promptSnippet: "Run a typed, sandboxed multi-call chain across configured MCP servers",
     promptGuidelines: [
       "Use codemcp_execute if you know tool schemas; call the returned server.method facade and use top-level return for the compact final value.",
       "It is always better to execute multiple MCP calls in one codemcp_execute call rather than multiple single-call invocations.",
-      "You can chain multiple MCP results, call in parallel using asyncio gather or sequentially, you have full control over the execution flow as long as it is efficient",
+      "You can compose upstream SDK calls and saved chains.* calls, running independent work with asyncio.gather or dependent work sequentially.",
     ],
     parameters: ExecuteParameters,
     async execute(_toolCallId, params, signal, onUpdate) {
@@ -147,7 +171,8 @@ export function registerCodeMcpTools(pi: ExtensionAPI, lifecycle: CodeMcpLifecyc
           ok,
           failureStage: typeof result.failure_stage === "string" ? result.failure_stage : undefined,
           callsMade: Number(result.calls_made ?? 0),
-          preview: previewValue(ok ? result.result : result.error),
+          chainCalls: Number(result.chain_calls ?? 0),
+          preview: previewExecutionValue(ok ? result.result : result.error),
         },
       };
     },
@@ -177,23 +202,94 @@ export function registerCodeMcpTools(pi: ExtensionAPI, lifecycle: CodeMcpLifecyc
         0,
       );
     },
-    renderResult(result, { expanded, isPartial }, theme) {
-      if (isPartial) {
-        return new Text(`\n${theme.fg("warning", "Preflight check, then execution...")}`, 0, 0);
+    renderResult(result, state, theme) {
+      return renderExecutionResult(result, state, theme);
+    },
+  });
+
+  pi.registerTool({
+    name: "codemcp_save_chain",
+    label: "Save MCP Chain",
+    description:
+      "Validate and globally persist a reusable typed MCP chain. The chain is immediately registered as a native mcp_chain_<name> tool and as chains.<name> inside CodeMCP. Requires explicit input and output JSON Schemas. Saving the same name updates and re-enables it.",
+    promptSnippet: "Save a repeated MCP execution as a typed reusable native tool",
+    promptGuidelines: [
+      "If a user repeatedly performs the same MCP workflow, you may offer to save it with codemcp_save_chain, but do not persist it until the user explicitly asks or accepts.",
+      "Use codemcp_save_chain only after the user explicitly asks to save a chain or accepts your suggestion to do so.",
+      "When using codemcp_save_chain, parameterize repeated values through the typed input object and provide exact inputSchema and outputSchema contracts.",
+    ],
+    parameters: SaveChainParameters,
+    async execute(_toolCallId, params, signal, onUpdate) {
+      onUpdate?.({
+        content: [{ type: "text", text: `Validating saved chain ${params.name}...` }],
+        details: undefined,
+      });
+      const view = await chains.save(
+        {
+          name: params.name,
+          description: params.description,
+          code: params.code,
+          inputSchema: params.inputSchema,
+          outputSchema: params.outputSchema,
+        },
+        signal,
+      );
+      const result = {
+        saved: true,
+        name: view.chain.name,
+        native_tool: nativeChainToolName(view.chain.name),
+        call: `chains.${view.chain.name}`,
+        status: view.status,
+        dependencies: view.chain.dependencies.map((dependency) => dependency.call),
+      };
+      const output = formatCodeMcpOutput(result, outputLimits(lifecycle));
+      return {
+        content: [{ type: "text", text: output.text }],
+        details: {
+          ...output.details,
+          name: view.chain.name,
+          nativeTool: nativeChainToolName(view.chain.name),
+          dependencyCount: view.chain.dependencies.length,
+        },
+      };
+    },
+    renderCall(args, theme) {
+      return new Text(
+        `${theme.fg("toolTitle", theme.bold("Save MCP Chain "))}${theme.fg("accent", args.name)}`,
+        0,
+        0,
+      );
+    },
+    renderResult(result, { expanded, isPartial }, theme, context) {
+      if (isPartial) return new Text(theme.fg("warning", "Validating chain contract..."), 0, 0);
+      const details = result.details as
+        | (CodeMcpOutputDetails & {
+            name: string;
+            nativeTool: string;
+            dependencyCount: number;
+          })
+        | undefined;
+      if (context.isError || !details) {
+        const message = getTextContent(result.content).trim();
+        if (expanded) {
+          return new Text(theme.fg("error", message || "Saved chain validation failed"), 0, 0);
+        }
+        const preview = message.split("\n", 1)[0];
+        return new Text(
+          theme.fg("error", `✗ Save failed${preview ? ` · ${truncate(preview, 120)}` : ""}`),
+          0,
+          0,
+        );
       }
-      const details = result.details as ExecuteRenderDetails | undefined;
-      if (expanded) return renderExpandedExecuteResult(result.content, details, theme);
-      const calls = details?.callsMade ?? 0;
-      const outputTokens = details?.outputTokens ?? 0;
-      let text = details?.ok
-        ? `\n${theme.fg("success", `✓ Output · ${formatMcpCalls(calls)} · ${formatTokenEstimate(outputTokens)}`)}`
-        : `\n${renderCompactFailure(details?.failureStage, calls, theme)}`;
-      for (const line of details?.preview ?? []) {
-        text += `\n${theme.fg("dim", `  ${line}`)}`;
-      }
-      if (details?.truncated) text += `\n${theme.fg("warning", "  output truncated")}`;
-      text += `\n${theme.fg("muted", keyHint("app.tools.expand", "code and full output"))}`;
-      return new Text(text, 0, 0);
+      if (expanded) return renderExpandedJson(result.content);
+      return new Text(
+        theme.fg(
+          "success",
+          `✓ ${details.name} · ${details.nativeTool} · ${details.dependencyCount} dependencies`,
+        ),
+        0,
+        0,
+      );
     },
   });
 }
@@ -202,123 +298,12 @@ function renderExpandedJson(content: readonly unknown[]): Text {
   return new Text(highlightCode(getTextContent(content), "json").join("\n"), 0, 0);
 }
 
-function renderExpandedExecuteResult(
-  content: readonly unknown[],
-  details: ExecuteRenderDetails | undefined,
-  theme: Theme,
-): Text {
-  const response = parseJsonObject(getTextContent(content));
-  const calls = details?.callsMade ?? 0;
-  if (details?.ok) {
-    const output = response ? formatJson(response.result) : getTextContent(content);
-    const highlighted = highlightCode(output, "json").join("\n");
-    return new Text(
-      `\n${theme.fg("success", theme.bold(`Output · ${formatMcpCalls(calls)}`))}\n${highlighted}`,
-      0,
-      0,
-    );
-  }
-
-  const stage = details?.failureStage ?? "runtime";
-  const error =
-    response && typeof response.error === "string" ? response.error : getTextContent(content);
-  const heading = failureHeading(stage, calls, theme);
-  const coloredError =
-    stage === "preflight" ? theme.fg("warning", error) : theme.fg("error", error);
-  return new Text(`\n${heading}\n${coloredError}`, 0, 0);
-}
-
-function renderCompactFailure(stage: string | undefined, calls: number, theme: Theme): string {
-  if (stage === "preflight") {
-    return theme.fg("warning", `✗ Preflight · code not run · ${formatMcpCalls(calls)}`);
-  }
-  if (stage === "timeout") {
-    return theme.fg("error", `✗ Timeout · stopped after ${formatMcpCalls(calls)}`);
-  }
-  if (stage === "cancelled") {
-    return theme.fg("warning", `✗ Cancelled · stopped after ${formatMcpCalls(calls)}`);
-  }
-  if (stage === "result") {
-    return theme.fg("warning", `✗ Result too large · ${formatMcpCalls(calls)} completed`);
-  }
-  return theme.fg("error", `✗ Runtime · failed after ${formatMcpCalls(calls)}`);
-}
-
-function failureHeading(stage: string, calls: number, theme: Theme): string {
-  if (stage === "preflight") {
-    return `${theme.fg("warning", theme.bold("Preflight failed"))}\n${theme.fg("muted", "Code was not executed; no upstream side effects")}`;
-  }
-  if (stage === "timeout") {
-    return `${theme.fg("error", theme.bold("Execution timed out"))}\n${theme.fg("muted", `Stopped after ${formatMcpCalls(calls)}`)}`;
-  }
-  if (stage === "cancelled") {
-    return `${theme.fg("warning", theme.bold("Execution cancelled"))}\n${theme.fg("muted", `Stopped after ${formatMcpCalls(calls)}`)}`;
-  }
-  if (stage === "result") {
-    return `${theme.fg("warning", theme.bold("Result too large"))}\n${theme.fg("muted", `Upstream calls completed (${formatMcpCalls(calls)}); return a smaller value`)}`;
-  }
-  return `${theme.fg("error", theme.bold("Runtime failed"))}\n${theme.fg("muted", `Failure occurred after ${formatMcpCalls(calls)}`)}`;
-}
-
 function outputLimits(lifecycle: CodeMcpLifecycle): { maxBytes: number; maxLines: number } {
   const settings = lifecycle.loadSettings();
   return {
     maxBytes: settings.outputLimitKiB * 1024,
     maxLines: settings.outputLineLimit,
   };
-}
-
-function formatTokenEstimate(tokens: number): string {
-  return `~${tokens.toLocaleString("en-US")} tokens`;
-}
-
-function formatMcpCalls(calls: number): string {
-  return `${calls} MCP ${calls === 1 ? "call" : "calls"}`;
-}
-
-function formatJson(value: unknown): string {
-  return JSON.stringify(value, null, 2) ?? String(value);
-}
-
-function parseJsonObject(value: string): Record<string, unknown> | undefined {
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return isRecord(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function getTextContent(content: readonly unknown[]): string {
-  return content
-    .flatMap((item) => {
-      if (!isRecord(item) || item.type !== "text" || typeof item.text !== "string") return [];
-      return [item.text];
-    })
-    .join("\n");
-}
-
-function previewValue(value: unknown): string[] {
-  if (isRecord(value)) {
-    return Object.entries(value)
-      .slice(0, 3)
-      .map(([key, entry]) => `${key}: ${summarizeValue(entry)}`);
-  }
-  if (Array.isArray(value)) {
-    return value.slice(0, 3).map((entry, index) => `[${index}]: ${summarizeValue(entry)}`);
-  }
-  if (value === null || value === undefined) return [];
-  return [summarizeValue(value)];
-}
-
-function summarizeValue(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.length} items]`;
-  if (isRecord(value)) {
-    const keys = Object.keys(value);
-    return `{${keys.slice(0, 4).join(", ")}${keys.length > 4 ? ", …" : ""}}`;
-  }
-  if (typeof value === "string") return truncate(value.replace(/\s+/g, " "), 100);
-  return String(value);
 }
 
 function truncate(value: string, maxLength: number): string {

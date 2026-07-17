@@ -10,6 +10,7 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import ValidationError
 
 from sidecar import schemas
+from sidecar.chains import ChainStore
 from sidecar.schemas import ToolCatalog, normalize_mcp_config
 
 
@@ -648,3 +649,30 @@ def test_sdk_facade_aliases_are_valid_stable_and_collision_free() -> None:
         ).facade_calls
         == catalog.facade_calls
     )
+
+
+def test_saved_chain_catalog_preserves_exact_output_contract(tmp_path: Path) -> None:
+    chain = ChainStore(tmp_path / "chains").build(
+        name="render_title",
+        description="Render one title.",
+        code='return input["title"]',
+        input_schema={
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "string"},
+        dependencies=[],
+    )
+    catalog = ToolCatalog.from_server_tools({}, saved_chains=[chain])
+    spec = catalog.tools["chain_render_title"]
+
+    assert spec.kind == "saved_chain"
+    assert spec.call == "chains.render_title"
+    assert spec.output_type_name == "ChainRenderTitleResult"
+    assert "ChainRenderTitleResult: TypeAlias = str" in catalog.type_stubs
+    assert catalog.search("render title")[0].source == "saved_chain"
+    assert catalog.validate_saved_chain_result(spec.name, "hello") == "hello"
+    with pytest.raises(ValidationError):
+        catalog.validate_saved_chain_result(spec.name, {"title": "wrong"})

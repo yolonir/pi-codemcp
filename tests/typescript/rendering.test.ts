@@ -5,11 +5,16 @@ import { createCodeMcpExtension } from "../../extensions/index.js";
 
 interface CapturedTool {
   name: string;
-  renderCall?: (args: { code: string }, theme: Theme, context: { expanded: boolean }) => Component;
+  renderCall?: (
+    args: Record<string, unknown>,
+    theme: Theme,
+    context: { expanded: boolean },
+  ) => Component;
   renderResult?: (
     result: { content: Array<{ type: "text"; text: string }>; details?: unknown },
     options: { expanded: boolean; isPartial: boolean },
     theme: Theme,
+    context?: { isError: boolean },
   ) => Component;
 }
 
@@ -20,7 +25,7 @@ const plainTheme = {
   bold: (text: string) => text,
 } as unknown as Theme;
 
-function captureExecuteTool(): CapturedTool {
+function captureTool(name: string): CapturedTool {
   const tools: CapturedTool[] = [];
   const fakePi = {
     registerTool(tool: CapturedTool) {
@@ -30,11 +35,15 @@ function captureExecuteTool(): CapturedTool {
     on() {},
   } as unknown as ExtensionAPI;
   createCodeMcpExtension()(fakePi);
-  const execute = tools.find((tool) => tool.name === "codemcp_execute");
-  if (!execute?.renderCall || !execute.renderResult) {
-    throw new Error("codemcp_execute renderers were not registered");
+  const captured = tools.find((tool) => tool.name === name);
+  if (!captured?.renderCall || !captured.renderResult) {
+    throw new Error(`${name} renderers were not registered`);
   }
-  return execute;
+  return captured;
+}
+
+function captureExecuteTool(): CapturedTool {
+  return captureTool("codemcp_execute");
 }
 
 function render(component: Component): string {
@@ -158,5 +167,31 @@ describe("codemcp_execute rendering", () => {
     expect(runtime).toContain("Runtime failed");
     expect(runtime).toContain("Failure occurred after 2 MCP calls");
     expect(runtime).toContain("upstream rejected the request");
+  });
+});
+
+describe("codemcp_save_chain rendering", () => {
+  test("renders thrown validation failures as errors", () => {
+    const tool = captureTool("codemcp_save_chain");
+    const failed = render(
+      tool.renderResult?.(
+        {
+          content: [
+            {
+              type: "text",
+              text: "Saved chain failed preflight: return value violates output schema",
+            },
+          ],
+        },
+        { expanded: false, isPartial: false },
+        plainTheme,
+        { isError: true },
+      ) as Component,
+    );
+
+    expect(failed).toContain("✗ Save failed");
+    expect(failed).toContain("violates output schema");
+    expect(failed).not.toContain("✓");
+    expect(failed).not.toContain("native tool");
   });
 });

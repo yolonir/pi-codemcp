@@ -11,6 +11,7 @@ import {
   truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
+import type { SavedChainView } from "./chains.js";
 import { summarizeError } from "./errors.js";
 import type { CodeMcpSettings, EditableSettingKey, EditableSettingValue } from "./settings.js";
 
@@ -19,6 +20,26 @@ export interface ToolModalState {
   description?: string;
   enabled: boolean;
   busy?: boolean;
+}
+
+export interface ChainModalState {
+  name: string;
+  description: string;
+  nativeTool: string;
+  code: string;
+  enabled: boolean;
+  status: "ready" | "disabled" | "stale";
+  inputSchema: Record<string, unknown>;
+  outputSchema: Record<string, unknown>;
+  dependencies: Array<{
+    kind: "mcp_tool" | "saved_chain";
+    call: string;
+    server: string;
+  }>;
+  staleDependencies: string[];
+  calledBy: string[];
+  busy?: boolean;
+  error?: string;
 }
 
 export interface ServerModalState {
@@ -41,6 +62,7 @@ interface Keybindings {
 
 interface ServerManagerOptions {
   servers: ServerModalState[];
+  chains: ChainModalState[];
   settings: CodeMcpSettings;
   onSetServerEnabled(server: ServerModalState, enabled: boolean): Promise<ServerModalState>;
   onDiscover(server: ServerModalState): Promise<ServerModalState>;
@@ -50,6 +72,9 @@ interface ServerManagerOptions {
     enabled: boolean,
   ): Promise<ServerModalState>;
   onSetSetting(key: EditableSettingKey, value: EditableSettingValue): Promise<CodeMcpSettings>;
+  onSetChainEnabled(chain: ChainModalState, enabled: boolean): Promise<ChainModalState>;
+  onRevalidateChain(chain: ChainModalState): Promise<ChainModalState>;
+  onDeleteChain(chain: ChainModalState): Promise<void>;
 }
 
 interface SettingChoice {
@@ -103,8 +128,8 @@ const SETTING_DEFINITIONS: SettingDefinition[] = [
   },
   {
     key: "maxCalls",
-    label: "Maximum MCP calls",
-    description: "Maximum upstream calls made by one sandbox execution.",
+    label: "Maximum calls",
+    description: "Maximum total upstream-tool and nested-chain calls in one execution graph.",
     choices: [10, 25, 50, 100, 200].map(numberChoice),
   },
   {
@@ -149,6 +174,26 @@ export async function showServerManagerModal(
   );
 }
 
+export function chainStatesFromViews(views: SavedChainView[]): ChainModalState[] {
+  return views.map((view) => ({
+    name: view.chain.name,
+    description: view.chain.description,
+    nativeTool: `mcp_chain_${view.chain.name}`,
+    code: view.chain.code,
+    enabled: view.chain.enabled,
+    status: view.status,
+    inputSchema: view.chain.inputSchema,
+    outputSchema: view.chain.outputSchema,
+    dependencies: view.chain.dependencies.map((dependency) => ({
+      kind: dependency.kind,
+      call: dependency.call,
+      server: dependency.server,
+    })),
+    staleDependencies: view.staleDependencies,
+    calledBy: view.calledBy,
+  }));
+}
+
 export function serverStatesFromStatus(status: Record<string, unknown>): ServerModalState[] {
   if (!Array.isArray(status.upstreams)) return [];
   return status.upstreams.flatMap((value) => {
@@ -177,10 +222,11 @@ export function serverStatesFromStatus(status: Record<string, unknown>): ServerM
 
 class ServerManagerModal implements Component, Focusable {
   private readonly search = new Input();
-  private activeTab: "servers" | "settings" = "servers";
+  private activeTab: "servers" | "chains" | "settings" = "servers";
   private activePane: "servers" | "tools" = "servers";
   private selectedServerIndex = 0;
   private selectedToolIndex = 0;
+  private selectedChainIndex = 0;
   private selectedSettingIndex = 0;
   private settingsError: string | undefined;
   private _focused = false;
@@ -199,7 +245,7 @@ class ServerManagerModal implements Component, Focusable {
 
   set focused(value: boolean) {
     this._focused = value;
-    this.search.focused = value && this.activeTab === "servers";
+    this.search.focused = value && this.activeTab !== "settings";
   }
 
   render(width: number): string[] {
@@ -209,10 +255,11 @@ class ServerManagerModal implements Component, Focusable {
       invalidate: () => {},
     });
     content.addChild({
-      render: (bodyWidth: number) =>
-        this.activeTab === "servers"
-          ? this.renderServers(bodyWidth)
-          : this.renderSettings(bodyWidth),
+      render: (bodyWidth: number) => {
+        if (this.activeTab === "servers") return this.renderServers(bodyWidth);
+        if (this.activeTab === "chains") return this.renderChains(bodyWidth);
+        return this.renderSettings(bodyWidth);
+      },
       invalidate: () => this.search.invalidate(),
     });
     content.addChild(new Text(this.theme.fg("dim", this.footer()), 0, 0));
@@ -225,7 +272,7 @@ class ServerManagerModal implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.keybindings.matches(data, "tui.select.cancel") || matchesKey(data, Key.escape)) {
-      if (this.activeTab === "servers" && this.search.getValue()) {
+      if (this.activeTab !== "settings" && this.search.getValue()) {
         this.search.setValue("");
         this.resetSelections();
         this.requestRender();
@@ -235,23 +282,25 @@ class ServerManagerModal implements Component, Focusable {
       return;
     }
     if (matchesKey(data, Key.tab)) {
-      this.activeTab = this.activeTab === "servers" ? "settings" : "servers";
+      this.activeTab =
+        this.activeTab === "servers"
+          ? "chains"
+          : this.activeTab === "chains"
+            ? "settings"
+            : "servers";
       this.search.setValue("");
-      this.search.focused = this._focused && this.activeTab === "servers";
+      this.search.focused = this._focused && this.activeTab !== "settings";
       this.requestRender();
       return;
     }
-    if (this.activeTab === "settings") {
-      this.handleSettingsInput(data);
-      this.requestRender();
-      return;
-    }
-    this.handleServerInput(data);
+    if (this.activeTab === "settings") this.handleSettingsInput(data);
+    else if (this.activeTab === "chains") this.handleChainInput(data);
+    else this.handleServerInput(data);
     this.requestRender();
   }
 
   private handleServerInput(data: string): void {
-    if (data === "D") {
+    if (data === "d") {
       this.discoverSelected();
       return;
     }
@@ -278,6 +327,42 @@ class ServerManagerModal implements Component, Focusable {
     if (sanitized) {
       this.search.handleInput(sanitized);
       this.resetSelections();
+    }
+  }
+
+  private handleChainInput(data: string): void {
+    if (this.keybindings.matches(data, "tui.select.up") || matchesKey(data, Key.up)) {
+      this.selectedChainIndex = cycleIndex(
+        this.selectedChainIndex,
+        -1,
+        this.filteredChains().length,
+      );
+      return;
+    }
+    if (this.keybindings.matches(data, "tui.select.down") || matchesKey(data, Key.down)) {
+      this.selectedChainIndex = cycleIndex(
+        this.selectedChainIndex,
+        1,
+        this.filteredChains().length,
+      );
+      return;
+    }
+    if (data === "r") {
+      this.revalidateSelectedChain();
+      return;
+    }
+    if (matchesKey(data, Key.delete)) {
+      this.deleteSelectedChain();
+      return;
+    }
+    if (matchesKey(data, Key.enter) || data === " ") {
+      this.toggleSelectedChain();
+      return;
+    }
+    const sanitized = data.replace(/ /g, "");
+    if (sanitized) {
+      this.search.handleInput(sanitized);
+      this.selectedChainIndex = 0;
     }
   }
 
@@ -309,11 +394,15 @@ class ServerManagerModal implements Component, Focusable {
       this.activeTab === "servers"
         ? this.theme.fg("accent", this.theme.bold("[Servers]"))
         : this.theme.fg("muted", "Servers");
+    const chains =
+      this.activeTab === "chains"
+        ? this.theme.fg("accent", this.theme.bold("[Chains]"))
+        : this.theme.fg("muted", "Chains");
     const settings =
       this.activeTab === "settings"
         ? this.theme.fg("accent", this.theme.bold("[Settings]"))
         : this.theme.fg("muted", "Settings");
-    const tabs = `${servers}  ${settings}`;
+    const tabs = `${servers}  ${chains}  ${settings}`;
     const title = this.theme.fg("dim", this.theme.bold("CodeMCP"));
     const gap = " ".repeat(Math.max(1, width - visibleWidth(tabs) - visibleWidth(title)));
     return truncateToWidth(`${tabs}${gap}${title}`, width);
@@ -372,7 +461,7 @@ class ServerManagerModal implements Component, Focusable {
       this.theme.fg("dim", `${server.transport}${server.auth ? ` · ${server.auth}` : ""}`),
       server.busy
         ? this.theme.fg("warning", "Working…")
-        : `${this.theme.fg("accent", "[D]")} Discover tools  ${this.theme.fg("accent", "[Space]")} ${server.enabled ? "Disable server" : "Enable server"}`,
+        : `${this.theme.fg("accent", "[d]")} Discover tools  ${this.theme.fg("accent", "[space]")} ${server.enabled ? "Disable server" : "Enable server"}`,
       ...(server.error ? [this.theme.fg("warning", `Error: ${server.error}`)] : []),
       this.theme.fg("dim", "─".repeat(Math.max(1, width))),
       this.theme.fg("dim", this.theme.bold("TOOLS")),
@@ -438,6 +527,91 @@ class ServerManagerModal implements Component, Focusable {
     return lines;
   }
 
+  private renderChains(width: number): string[] {
+    const lines = [this.theme.fg("dim", "Filter chains"), ...this.search.render(width), ""];
+    const splitHeight = Math.max(1, modalBodyRows() - lines.length);
+    const leftWidth = Math.min(38, Math.max(26, Math.floor(width * 0.36)));
+    const rightWidth = Math.max(1, width - leftWidth - 3);
+    const chains = this.filteredChains();
+    const left = [this.theme.fg("dim", this.theme.bold("SAVED CHAINS"))];
+    if (chains.length === 0) {
+      left.push(this.theme.fg("muted", "No saved chains"));
+    } else {
+      this.selectedChainIndex = clampIndex(this.selectedChainIndex, chains.length);
+      for (const chain of visibleWindow(chains, this.selectedChainIndex, splitHeight - 1)) {
+        const selected = chains.indexOf(chain) === this.selectedChainIndex;
+        const prefix = selected ? this.theme.fg("accent", "→") : " ";
+        const icon = chainIcon(chain, this.theme);
+        left.push(
+          truncateToWidth(
+            `${prefix} ${icon} ${selected ? this.theme.fg("accent", chain.name) : chain.name}`,
+            leftWidth,
+          ),
+        );
+      }
+    }
+
+    const selected = this.selectedChain();
+    const right = selected
+      ? this.renderChainDetails(selected, rightWidth)
+      : [this.theme.fg("muted", "Select a saved chain")];
+    for (let index = 0; index < splitHeight; index += 1) {
+      lines.push(
+        `${padLine(left[index] ?? "", leftWidth)} ${this.theme.fg("dim", "│")} ${truncateToWidth(right[index] ?? "", rightWidth)}`,
+      );
+    }
+    return lines;
+  }
+
+  private renderChainDetails(chain: ChainModalState, width: number): string[] {
+    const servers = [
+      ...new Set(
+        chain.dependencies
+          .filter((dependency) => dependency.kind === "mcp_tool")
+          .map((dependency) => dependency.server),
+      ),
+    ];
+    const lines = [
+      this.theme.fg("accent", this.theme.bold(chain.name)),
+      this.theme.fg("muted", `${chain.status} · ${chain.nativeTool}`),
+      chain.busy
+        ? this.theme.fg("warning", "Working…")
+        : `${this.theme.fg("accent", "[space]")} ${chain.enabled ? "Disable" : "Enable"}  ${this.theme.fg("accent", "[r]")} Revalidate  ${this.theme.fg("accent", "[del]")} Delete`,
+      ...(chain.error ? [this.theme.fg("warning", `Error: ${chain.error}`)] : []),
+      "",
+      ...wrapPlainText(chain.description, width).map((line) => this.theme.fg("muted", line)),
+      "",
+      this.theme.fg("dim", this.theme.bold("INPUT")),
+      ...schemaSummary(chain.inputSchema).map((line) => this.theme.fg("muted", line)),
+      "",
+      this.theme.fg("dim", this.theme.bold("OUTPUT")),
+      ...schemaSummary(chain.outputSchema).map((line) => this.theme.fg("muted", line)),
+      "",
+      this.theme.fg("dim", this.theme.bold("SERVERS")),
+      this.theme.fg("muted", servers.length > 0 ? servers.join(", ") : "none"),
+      "",
+      this.theme.fg("dim", this.theme.bold("DEPENDENCIES")),
+      ...(chain.dependencies.length > 0
+        ? chain.dependencies.map((dependency) => this.theme.fg("muted", dependency.call))
+        : [this.theme.fg("muted", "none")]),
+      ...(chain.calledBy.length > 0
+        ? [
+            "",
+            this.theme.fg("dim", this.theme.bold("CALLED BY")),
+            this.theme.fg("muted", chain.calledBy.join(", ")),
+          ]
+        : []),
+      ...(chain.staleDependencies.length > 0
+        ? [
+            "",
+            this.theme.fg("warning", this.theme.bold("STALE")),
+            ...chain.staleDependencies.map((dependency) => this.theme.fg("warning", dependency)),
+          ]
+        : []),
+    ];
+    return lines;
+  }
+
   private renderSettings(width: number): string[] {
     const splitHeight = Math.max(1, modalBodyRows());
     const leftWidth = Math.min(38, Math.max(28, Math.floor(width * 0.42)));
@@ -467,7 +641,7 @@ class ServerManagerModal implements Component, Focusable {
             this.theme.fg("muted", line),
           ),
           "",
-          this.theme.fg("dim", "←/→ change · Enter next"),
+          this.theme.fg("dim", "←/→ change · enter next"),
           ...(this.settingsError
             ? ["", this.theme.fg("warning", `Error: ${this.settingsError}`)]
             : []),
@@ -486,7 +660,10 @@ class ServerManagerModal implements Component, Focusable {
     if (this.activeTab === "settings") {
       return "tab servers · ↑/↓ navigate · ←/→/enter change · esc close";
     }
-    return "tab settings · ←/→ pane · ↑/↓ navigate · space toggle · esc close";
+    if (this.activeTab === "chains") {
+      return "tab settings · ↑/↓ navigate · space toggle · r revalidate · del delete · esc close";
+    }
+    return "tab chains · ←/→ pane · ↑/↓ navigate · space toggle · d discover · esc close";
   }
 
   private moveSelection(direction: -1 | 1): void {
@@ -566,6 +743,61 @@ class ServerManagerModal implements Component, Focusable {
       });
   }
 
+  private toggleSelectedChain(): void {
+    const chain = this.selectedChain();
+    if (!chain || chain.busy) return;
+    chain.busy = true;
+    delete chain.error;
+    void this.options
+      .onSetChainEnabled(chain, !chain.enabled)
+      .then((updated) => applyChainUpdate(chain, updated))
+      .catch((error: unknown) => {
+        chain.error = summarizeError(error);
+      })
+      .finally(() => {
+        chain.busy = false;
+        this.requestRender();
+      });
+  }
+
+  private revalidateSelectedChain(): void {
+    const chain = this.selectedChain();
+    if (!chain || chain.busy) return;
+    chain.busy = true;
+    delete chain.error;
+    void this.options
+      .onRevalidateChain(chain)
+      .then((updated) => applyChainUpdate(chain, updated))
+      .catch((error: unknown) => {
+        chain.error = summarizeError(error);
+      })
+      .finally(() => {
+        chain.busy = false;
+        this.requestRender();
+      });
+  }
+
+  private deleteSelectedChain(): void {
+    const chain = this.selectedChain();
+    if (!chain || chain.busy) return;
+    chain.busy = true;
+    delete chain.error;
+    void this.options
+      .onDeleteChain(chain)
+      .then(() => {
+        const index = this.options.chains.indexOf(chain);
+        if (index >= 0) this.options.chains.splice(index, 1);
+        this.selectedChainIndex = clampIndex(this.selectedChainIndex, this.options.chains.length);
+      })
+      .catch((error: unknown) => {
+        chain.error = summarizeError(error);
+      })
+      .finally(() => {
+        chain.busy = false;
+        this.requestRender();
+      });
+  }
+
   private cycleSelectedSetting(direction: -1 | 1): void {
     const definition = SETTING_DEFINITIONS[this.selectedSettingIndex];
     if (!definition) return;
@@ -607,6 +839,26 @@ class ServerManagerModal implements Component, Focusable {
       : server.tools;
   }
 
+  private filteredChains(): ChainModalState[] {
+    const query = this.search.getValue().trim();
+    return query
+      ? fuzzyFilter(this.options.chains, query, (chain) =>
+          [
+            chain.name,
+            chain.description,
+            chain.nativeTool,
+            ...chain.dependencies.map((dependency) => dependency.call),
+          ].join(" "),
+        )
+      : this.options.chains;
+  }
+
+  private selectedChain(): ChainModalState | undefined {
+    const chains = this.filteredChains();
+    this.selectedChainIndex = clampIndex(this.selectedChainIndex, chains.length);
+    return chains[this.selectedChainIndex];
+  }
+
   private selectedServer(): ServerModalState | undefined {
     const servers = this.filteredServers();
     this.selectedServerIndex = clampIndex(this.selectedServerIndex, servers.length);
@@ -616,6 +868,7 @@ class ServerManagerModal implements Component, Focusable {
   private resetSelections(): void {
     this.selectedServerIndex = 0;
     this.selectedToolIndex = 0;
+    this.selectedChainIndex = 0;
   }
 }
 
@@ -645,6 +898,50 @@ function applyServerUpdate(target: ServerModalState, updated: ServerModalState):
   target.tools = updated.tools;
   if (updated.error === undefined) delete target.error;
   else target.error = updated.error;
+}
+
+function applyChainUpdate(target: ChainModalState, updated: ChainModalState): void {
+  target.description = updated.description;
+  target.nativeTool = updated.nativeTool;
+  target.code = updated.code;
+  target.enabled = updated.enabled;
+  target.status = updated.status;
+  target.inputSchema = updated.inputSchema;
+  target.outputSchema = updated.outputSchema;
+  target.dependencies = updated.dependencies;
+  target.staleDependencies = updated.staleDependencies;
+  target.calledBy = updated.calledBy;
+  if (updated.error === undefined) delete target.error;
+  else target.error = updated.error;
+}
+
+function chainIcon(chain: ChainModalState, theme: Theme): string {
+  if (chain.busy) return theme.fg("warning", "…");
+  if (!chain.enabled) return theme.fg("dim", "○");
+  if (chain.status === "stale") return theme.fg("warning", "◌");
+  return theme.fg("success", "●");
+}
+
+function schemaSummary(schema: Record<string, unknown>): string[] {
+  const properties = isRecord(schema.properties) ? schema.properties : undefined;
+  if (!properties || Object.keys(properties).length === 0) {
+    return [typeof schema.type === "string" ? schema.type : "any JSON value"];
+  }
+  const required = new Set(
+    Array.isArray(schema.required)
+      ? schema.required.filter((value): value is string => typeof value === "string")
+      : [],
+  );
+  return Object.entries(properties).map(([name, value]) => {
+    const property = isRecord(value) ? value : {};
+    const type =
+      typeof property.type === "string"
+        ? property.type
+        : Array.isArray(property.type)
+          ? property.type.filter((item) => typeof item === "string").join(" | ")
+          : "value";
+    return `${name}${required.has(name) ? "" : "?"}: ${type}`;
+  });
 }
 
 function serverStatus(server: ServerModalState): string {

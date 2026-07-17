@@ -79,6 +79,45 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     });
     expect(execution).not.toHaveProperty("stage");
 
+    const savedChain = await client.call("save_chain", {
+      name: "increment",
+      description: "Increment one input through the alpha MCP server.",
+      code: 'return await alpha.get_number({"seed": input["seed"]})',
+      input_schema: {
+        type: "object",
+        properties: { seed: { type: "integer" } },
+        required: ["seed"],
+        additionalProperties: false,
+      },
+      output_schema: {
+        type: "object",
+        properties: { value: { type: "integer" } },
+        required: ["value"],
+        additionalProperties: false,
+      },
+    });
+    expect(savedChain).toMatchObject({
+      created: true,
+      chain: {
+        status: "ready",
+        chain: { name: "increment", enabled: true },
+      },
+    });
+    const nativeChain = await client.call("execute_chain", {
+      name: "increment",
+      arguments: { seed: 4 },
+    });
+    expect(nativeChain).toMatchObject({ ok: true, result: { value: 5 }, calls_made: 1 });
+    const composedChain = await client.call("execute", {
+      code: 'return await chains.increment({"seed": 7})',
+    });
+    expect(composedChain).toMatchObject({
+      ok: true,
+      result: { value: 8 },
+      calls_made: 1,
+      chain_calls: 1,
+    });
+
     const controller = new AbortController();
     const cancelled = client.call(
       "execute",
@@ -91,7 +130,7 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     await expect(cancelled).rejects.toThrow();
 
     const status = await client.call("status", {});
-    expect(status).toMatchObject({ connected: true, tool_count: 3 });
+    expect(status).toMatchObject({ connected: true, tool_count: 4 });
     sidecarPid = client.pid;
     expect(sidecarPid).not.toBeNull();
     upstreamPids = [

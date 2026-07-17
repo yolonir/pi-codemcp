@@ -6,7 +6,7 @@ import keyword
 import os
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from fastmcp.client.auth import OAuth
 from fastmcp.mcp_config import (
@@ -39,6 +39,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import httpx
+
+    from .chains import SavedChainManifest
 
 PI_ONLY_FIELDS = {"directTools", "lifecycle", "idleTimeout", "disabled", "enabled"}
 REMOTE_TRANSPORTS = {"http", "streamable-http", "sse"}
@@ -82,6 +84,7 @@ class NormalizedServerInfo(BaseModel):
 class ToolSchemaView(BaseModel):
     name: str
     call: str
+    source: Literal["mcp_tool", "saved_chain"]
     server: str | None = None
     description: str | None = None
     signature: str
@@ -92,6 +95,7 @@ class ToolSchemaView(BaseModel):
         values: JsonObject = {
             "name": self.name,
             "call": self.call,
+            "source": self.source,
             "signature": self.signature,
             "stub": self.stub,
         }
@@ -164,6 +168,9 @@ class ToolSpec:
     stub: str
     search_blob: str
     input_adapter: TypeAdapter[object]
+    kind: Literal["mcp_tool", "saved_chain"] = "mcp_tool"
+    chain_id: str | None = None
+    schema_fingerprint: str = ""
     output_adapter: TypeAdapter[object] | None = None
     wrapped_output_adapter: TypeAdapter[object] | None = None
     output_wrap_result: bool = False
@@ -183,10 +190,24 @@ class ToolCatalog:
         cls,
         server_tools: dict[str, list[mcp_types.Tool]],
         server_names: Iterable[str] | None = None,
+        saved_chains: Iterable[SavedChainManifest] = (),
     ) -> ToolCatalog:
         server_name_list = tuple(server_names or server_tools.keys())
-        namespace_aliases = _unique_python_aliases(server_name_list)
-        prepared: list[tuple[mcp_types.Tool, str, str, str, str]] = []
+        namespace_aliases = _unique_python_aliases(
+            server_name_list,
+            reserved={"chains"},
+        )
+        prepared: list[
+            tuple[
+                mcp_types.Tool,
+                str,
+                str,
+                str,
+                str,
+                Literal["mcp_tool", "saved_chain"],
+                str | None,
+            ]
+        ] = []
         for server in server_name_list:
             tools = sorted(server_tools.get(server, []), key=lambda item: item.name)
             method_aliases = _unique_python_aliases(tool.name for tool in tools)
@@ -198,8 +219,30 @@ class ToolCatalog:
                     server,
                     namespace_aliases[server],
                     method_aliases[tool.name],
+                    "mcp_tool",
+                    None,
                 ))
-        return cls._from_prepared(prepared, server_name_list, namespace_aliases)
+
+        chains = sorted(saved_chains, key=lambda chain: chain.name)
+        prepared.extend(
+            (
+                mcp_types.Tool(
+                    name=chain.name,
+                    description=chain.description,
+                    inputSchema=chain.input_schema,
+                    outputSchema=chain.output_schema,
+                ),
+                chain.public_name,
+                "chains",
+                "chains",
+                chain.name,
+                "saved_chain",
+                chain.id,
+            )
+            for chain in chains
+        )
+        catalog_servers = server_name_list + (("chains",) if chains else ())
+        return cls._from_prepared(prepared, catalog_servers, namespace_aliases)
 
     @classmethod
     def from_mcp_tools(
@@ -225,7 +268,17 @@ class ToolCatalog:
     @classmethod
     def _from_prepared(
         cls,
-        prepared: list[tuple[mcp_types.Tool, str, str, str, str]],
+        prepared: list[
+            tuple[
+                mcp_types.Tool,
+                str,
+                str,
+                str,
+                str,
+                Literal["mcp_tool", "saved_chain"],
+                str | None,
+            ]
+        ],
         server_names: tuple[str, ...],
         server_aliases: dict[str, str],
     ) -> ToolCatalog:
@@ -235,11 +288,13 @@ class ToolCatalog:
                 "backendName": tool.name,
                 "server": server,
                 "call": f"{namespace}.{method}",
+                "kind": kind,
+                "chainId": chain_id,
                 "description": tool.description,
                 "inputSchema": tool.inputSchema,
                 "outputSchema": tool.outputSchema,
             }
-            for tool, public_name, server, namespace, method in prepared
+            for tool, public_name, server, namespace, method, kind, chain_id in prepared
         ]
         fingerprint = hashlib.sha256(
             json.dumps(fingerprint_source, sort_keys=True, default=str).encode()
@@ -251,7 +306,7 @@ class ToolCatalog:
         facade_classes: dict[str, str] = {}
         facade_calls: dict[tuple[str, str], str] = {}
 
-        for tool, public_name, server, namespace, method in prepared:
+        for tool, public_name, server, namespace, method, kind, chain_id in prepared:
             if public_name in specs:
                 raise ValueError(f"Duplicate MCP tool name after namespacing: {public_name}")
             input_schema = JSON_OBJECT_ADAPTER.validate_python(tool.inputSchema)
@@ -260,11 +315,18 @@ class ToolCatalog:
                 if tool.outputSchema is not None
                 else None
             )
-            builder = StubBuilder(public_name, input_schema, output_schema)
+            builder = StubBuilder(
+                public_name,
+                input_schema,
+                output_schema,
+                normalize_json_string_output=kind == "mcp_tool",
+            )
             input_type, output_type, tool_definitions = builder.build()
             call = f"{namespace}.{method}"
             signature = f"await {call}(arguments: {input_type}) -> {output_type}"
-            wrap_output = bool(output_schema and output_schema.get("x-fastmcp-wrap-result"))
+            wrap_output = bool(
+                kind == "mcp_tool" and output_schema and output_schema.get("x-fastmcp-wrap-result")
+            )
             adapter_schema: JsonSchema | None = output_schema
             wrapped_schema: JsonSchema | None = None
             if output_schema:
@@ -300,6 +362,12 @@ class ToolCatalog:
                     input_schema,
                 ),
                 input_adapter=_schema_adapter(input_schema),
+                kind=kind,
+                chain_id=chain_id,
+                schema_fingerprint=_schema_fingerprint({
+                    "input_schema": input_schema,
+                    "output_schema": output_schema,
+                }),
                 output_adapter=(
                     _schema_adapter(adapter_schema) if adapter_schema is not None else None
                 ),
@@ -366,6 +434,7 @@ class ToolCatalog:
             ToolSchemaView(
                 name=self.tools[name].name,
                 call=self.tools[name].call,
+                source=self.tools[name].kind,
                 server=self.tools[name].server,
                 description=_short_description(self.tools[name].description),
                 signature=self.tools[name].signature,
@@ -397,6 +466,15 @@ class ToolCatalog:
         if not isinstance(projected, dict):
             raise TypeError(f"{tool_name}: arguments did not normalize as an object")
         return projected
+
+    def validate_saved_chain_result(self, tool_name: str, result: JsonValue) -> JsonValue:
+        spec = self.tools[tool_name]
+        if spec.kind != "saved_chain" or spec.output_adapter is None:
+            raise TypeError(f"{tool_name} is not a saved chain with an output contract")
+        validated = spec.output_adapter.validate_python(result)
+        return JSON_VALUE_ADAPTER.validate_python(
+            spec.output_adapter.dump_python(validated, mode="json")
+        )
 
     def normalize_result(self, tool_name: str, result: mcp_types.CallToolResult) -> JsonValue:
         spec = self.tools[tool_name]
@@ -716,10 +794,13 @@ class StubBuilder:
         tool_name: str,
         input_schema: JsonObject,
         output_schema: JsonObject | None,
+        *,
+        normalize_json_string_output: bool = True,
     ) -> None:
         self.tool_name = tool_name
         self.input_schema = input_schema
         self.output_schema = output_schema
+        self.normalize_json_string_output = normalize_json_string_output
         self._definitions: list[str] = []
         self._seen: dict[tuple[str, str], str] = {}
         self._active_refs: set[str] = set()
@@ -731,9 +812,17 @@ class StubBuilder:
             self.input_schema,
         )
         output_schema: JsonSchema = self.output_schema or True
-        if self.output_schema and self.output_schema.get("x-fastmcp-wrap-result"):
+        if (
+            self.normalize_json_string_output
+            and self.output_schema
+            and self.output_schema.get("x-fastmcp-wrap-result")
+        ):
             output_schema = _as_schema(_object_property(self.output_schema, "result"))
-        if isinstance(output_schema, dict) and output_schema.get("type") == "string":
+        if (
+            self.normalize_json_string_output
+            and isinstance(output_schema, dict)
+            and output_schema.get("type") == "string"
+        ):
             # Runtime normalization promotes JSON object/array text to native values.
             # A plain `str` annotation would therefore be a false guarantee.
             output_schema = True
@@ -964,10 +1053,14 @@ def _extract_server_name(tool_name: str, server_names: Iterable[str]) -> str | N
     return None
 
 
-def _unique_python_aliases(values: Iterable[str]) -> dict[str, str]:
+def _unique_python_aliases(
+    values: Iterable[str],
+    *,
+    reserved: set[str] | None = None,
+) -> dict[str, str]:
     originals = list(values)
     aliases: dict[str, str] = {}
-    used: set[str] = set()
+    used: set[str] = set(reserved or ())
     for original in sorted(originals):
         base = _python_identifier(original)
         alias = base

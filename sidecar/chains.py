@@ -1,0 +1,197 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import time
+from contextlib import suppress
+from pathlib import Path  # noqa: TC003 - Pydantic resolves this annotation at runtime.
+from typing import Literal
+from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from .json_types import JsonObject  # noqa: TC001 - Pydantic resolves this field type.
+
+CHAIN_NAME_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
+CHAIN_STORE_VERSION: Literal[1] = 1
+
+
+class ChainDependency(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["mcp_tool", "saved_chain"]
+    name: str
+    call: str
+    server: str
+    schema_fingerprint: str
+
+
+class SavedChainManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = CHAIN_STORE_VERSION
+    id: str
+    name: str = Field(pattern=CHAIN_NAME_PATTERN)
+    description: str = Field(min_length=1, max_length=1000)
+    code: str = Field(min_length=1)
+    input_schema: JsonObject
+    output_schema: JsonObject
+    enabled: bool = True
+    dependencies: list[ChainDependency] = Field(default_factory=list)
+    schema_fingerprint: str
+    created_at: float
+    updated_at: float
+    validated_at: float
+
+    @field_validator("code")
+    @classmethod
+    def code_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("code must not be blank")
+        return value
+
+    @field_validator("input_schema")
+    @classmethod
+    def input_schema_must_be_object(cls, value: JsonObject) -> JsonObject:
+        if value.get("type") != "object":
+            raise ValueError("input_schema.type must be object")
+        return value
+
+    @property
+    def public_name(self) -> str:
+        return f"chain_{self.name}"
+
+    @property
+    def call(self) -> str:
+        return f"chains.{self.name}"
+
+    @property
+    def native_tool(self) -> str:
+        return f"mcp_chain_{self.name}"
+
+
+class ChainStatusView(BaseModel):
+    chain: SavedChainManifest
+    status: Literal["ready", "disabled", "stale"]
+    stale_dependencies: list[str] = Field(default_factory=list)
+    called_by: list[str] = Field(default_factory=list)
+
+
+class ChainListResponse(BaseModel):
+    chains: list[ChainStatusView]
+
+
+class SaveChainResponse(BaseModel):
+    chain: ChainStatusView
+    created: bool
+
+
+class ChainStore:
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+
+    def load_all(self) -> list[SavedChainManifest]:
+        if not self.directory.exists():
+            return []
+        manifests: list[SavedChainManifest] = []
+        for path in sorted(self.directory.glob("*.json")):
+            try:
+                manifests.append(
+                    SavedChainManifest.model_validate_json(path.read_text(encoding="utf-8"))
+                )
+            except (OSError, ValueError) as error:
+                raise ValueError(f"Invalid saved chain manifest {path}: {error}") from error
+        return manifests
+
+    def enabled(self) -> list[SavedChainManifest]:
+        return [chain for chain in self.load_all() if chain.enabled]
+
+    def get(self, name: str) -> SavedChainManifest:
+        self._validate_name(name)
+        path = self._path(name)
+        try:
+            return SavedChainManifest.model_validate_json(path.read_text(encoding="utf-8"))
+        except FileNotFoundError as error:
+            raise ValueError(f"Unknown saved chain: {name}") from error
+        except (OSError, ValueError) as error:
+            raise ValueError(f"Invalid saved chain manifest {path}: {error}") from error
+
+    @staticmethod
+    def build(
+        *,
+        name: str,
+        description: str,
+        code: str,
+        input_schema: JsonObject,
+        output_schema: JsonObject,
+        dependencies: list[ChainDependency],
+        previous: SavedChainManifest | None = None,
+    ) -> SavedChainManifest:
+        now = time.time()
+        schema_fingerprint = _fingerprint({
+            "input_schema": input_schema,
+            "output_schema": output_schema,
+        })
+        return SavedChainManifest(
+            id=previous.id if previous is not None else uuid4().hex,
+            name=name,
+            description=description,
+            code=code,
+            input_schema=input_schema,
+            output_schema=output_schema,
+            enabled=previous.enabled if previous is not None else True,
+            dependencies=dependencies,
+            schema_fingerprint=schema_fingerprint,
+            created_at=previous.created_at if previous is not None else now,
+            updated_at=now,
+            validated_at=now,
+        )
+
+    def save(self, chain: SavedChainManifest) -> None:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        with suppress(OSError):
+            self.directory.chmod(0o700)
+        path = self._path(chain.name)
+        temporary = self.directory / f".{chain.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        temporary.write_text(
+            f"{chain.model_dump_json(indent=2)}\n",
+            encoding="utf-8",
+        )
+        temporary.chmod(0o600)
+        temporary.replace(path)
+
+    def set_enabled(self, name: str, enabled: bool) -> SavedChainManifest:
+        current = self.get(name)
+        updated = current.model_copy(update={"enabled": enabled, "updated_at": time.time()})
+        self.save(updated)
+        return updated
+
+    def delete(self, name: str) -> None:
+        self._validate_name(name)
+        try:
+            self._path(name).unlink()
+        except FileNotFoundError as error:
+            raise ValueError(f"Unknown saved chain: {name}") from error
+
+    def _path(self, name: str) -> Path:
+        self._validate_name(name)
+        return self.directory / f"{name}.json"
+
+    @staticmethod
+    def _validate_name(name: str) -> None:
+        if re.fullmatch(CHAIN_NAME_PATTERN, name) is None:
+            raise ValueError(
+                "Saved chain name must start with a lowercase letter and contain only "
+                "lowercase letters, digits, and underscores (maximum 64 characters)"
+            )
+
+
+def schema_fingerprint(input_schema: JsonObject, output_schema: JsonObject) -> str:
+    return _fingerprint({"input_schema": input_schema, "output_schema": output_schema})
+
+
+def _fingerprint(value: JsonObject) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

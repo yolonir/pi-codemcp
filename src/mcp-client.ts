@@ -17,6 +17,26 @@ import { loadCodeMcpSettings } from "./settings.js";
 
 type JsonObject = Record<string, unknown>;
 
+export type SidecarToolName =
+  | "search"
+  | "discover"
+  | "reload_settings"
+  | "execute"
+  | "save_chain"
+  | "list_chains"
+  | "execute_chain"
+  | "set_chain_enabled"
+  | "revalidate_chain"
+  | "delete_chain"
+  | "status";
+
+const LONG_RUNNING_TOOLS = new Set<SidecarToolName>([
+  "execute",
+  "save_chain",
+  "execute_chain",
+  "revalidate_chain",
+]);
+
 export interface SidecarClientOptions {
   packageRoot?: string;
   agentDir?: string;
@@ -56,6 +76,10 @@ export class SidecarClient {
     return join(this.agentDir, "pi-codemcp", "settings.json");
   }
 
+  get chainsPath(): string {
+    return join(this.agentDir, "pi-codemcp", "chains");
+  }
+
   get pid(): number | null {
     return this.transport?.pid ?? null;
   }
@@ -64,18 +88,13 @@ export class SidecarClient {
     return this.client !== undefined && this.transport?.pid !== null;
   }
 
-  async call(
-    name: "search" | "discover" | "reload_settings" | "execute" | "status",
-    args: JsonObject,
-    signal?: AbortSignal,
-  ): Promise<JsonObject> {
+  async call(name: SidecarToolName, args: JsonObject, signal?: AbortSignal): Promise<JsonObject> {
     await this.ensureStarted(signal);
     const client = this.client;
     if (!client) throw new Error("Sidecar client failed to initialize");
-    const timeout =
-      name === "execute"
-        ? loadCodeMcpSettings(this.settingsPath).executionTimeoutSeconds * 1_000 + 5_000
-        : 30_000;
+    const timeout = LONG_RUNNING_TOOLS.has(name)
+      ? loadCodeMcpSettings(this.settingsPath).executionTimeoutSeconds * 1_000 + 5_000
+      : 30_000;
     const result = await client.callTool({ name, arguments: args }, undefined, {
       timeout,
       ...(signal === undefined ? {} : { signal }),

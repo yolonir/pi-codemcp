@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import {
+  type ChainModalState,
   type ServerModalState,
   serverStatesFromStatus,
   showServerManagerModal,
@@ -101,12 +102,40 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
       tools: [],
     },
   ];
+  const chains: ChainModalState[] = [
+    {
+      name: "weekly_digest",
+      description: "Collect Linear issues and post a weekly digest to Slack.",
+      nativeTool: "mcp_chain_weekly_digest",
+      code: "return {}",
+      enabled: true,
+      status: "ready",
+      inputSchema: {
+        type: "object",
+        properties: { assignee: { type: "string" } },
+        required: ["assignee"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: { posted: { type: "boolean" } },
+        required: ["posted"],
+      },
+      dependencies: [
+        { kind: "mcp_tool", call: "linear.list_issues", server: "linear" },
+        { kind: "mcp_tool", call: "slack.post_message", server: "slack" },
+      ],
+      staleDependencies: [],
+      calledBy: ["monthly_digest"],
+    },
+  ];
   let component: Component | undefined;
   let overlayOptions: Record<string, unknown> | undefined;
   const toggles: Array<{ name: string; enabled: boolean }> = [];
   const toolToggles: Array<{ name: string; enabled: boolean }> = [];
   const settingChanges: Array<{ key: string; value: boolean | number }> = [];
   const discoveries: string[] = [];
+  const chainToggles: boolean[] = [];
+  const revalidated: string[] = [];
 
   const ctx = {
     mode: "tui",
@@ -126,6 +155,7 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
 
   await showServerManagerModal(ctx, {
     servers,
+    chains,
     settings: { ...DEFAULT_CODEMCP_SETTINGS, disabledTools: {} },
     async onSetServerEnabled(server, enabled) {
       toggles.push({ name: server.name, enabled });
@@ -161,6 +191,15 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
       settingChanges.push({ key, value });
       return { ...DEFAULT_CODEMCP_SETTINGS, [key]: value, disabledTools: {} };
     },
+    async onSetChainEnabled(chain, enabled) {
+      chainToggles.push(enabled);
+      return { ...chain, enabled, status: enabled ? "ready" : "disabled" };
+    },
+    async onRevalidateChain(chain) {
+      revalidated.push(chain.name);
+      return chain;
+    },
+    async onDeleteChain() {},
   });
 
   expect(overlayOptions).toEqual({
@@ -175,9 +214,9 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   const header = lines.find((line) => line.includes("[Servers]"));
   expect(header).toContain("CodeMCP");
   expect(lines.join("\n")).toContain("grafana");
-  expect(lines.join("\n")).toContain("[D] Discover tools");
+  expect(lines.join("\n")).toContain("[d] Discover tools");
 
-  component?.handleInput?.("D");
+  component?.handleInput?.("d");
   await Bun.sleep(0);
   expect(discoveries).toEqual(["grafana"]);
   expect(servers[0]?.tools[0]).toMatchObject({ name: "query", enabled: true });
@@ -188,7 +227,7 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   expect(wideLines.join("\n")).toContain("Run a query and return");
   expect(wideLines[cardTop]?.match(/│/g)).toHaveLength(3);
   const narrowLines = renderWithRows(component, 90, 60);
-  const narrowFooter = narrowLines.findIndex((line) => line.includes("tab settings"));
+  const narrowFooter = narrowLines.findIndex((line) => line.includes("tab chains"));
   expect(narrowLines[narrowFooter - 1]).toContain("╰──");
 
   component?.handleInput?.("\u001b[C");
@@ -202,6 +241,30 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   await Bun.sleep(0);
   expect(toggles).toEqual([{ name: "grafana", enabled: false }]);
   expect(servers[0]?.enabled).toBe(false);
+
+  component?.handleInput?.("\t");
+  const renderedChainLines = renderWithRows(component, 120, 60);
+  const chainLines = renderedChainLines.join("\n");
+  expect(chainLines).toContain("[Chains]");
+  expect(chainLines).toContain("weekly_digest");
+  expect(chainLines).toContain("mcp_chain_weekly_digest");
+  expect(chainLines).toContain("linear.list_issues");
+  expect(chainLines).toContain("assignee: string");
+  const inputSection = renderedChainLines.findIndex((line) => line.includes("INPUT"));
+  const outputSection = renderedChainLines.findIndex((line) => line.includes("OUTPUT"));
+  const serversSection = renderedChainLines.findIndex((line) => line.includes("SERVERS"));
+  const dependenciesSection = renderedChainLines.findIndex((line) => line.includes("DEPENDENCIES"));
+  const calledBySection = renderedChainLines.findIndex((line) => line.includes("CALLED BY"));
+  expect(outputSection).toBe(inputSection + 3);
+  expect(serversSection).toBe(outputSection + 3);
+  expect(dependenciesSection).toBe(serversSection + 3);
+  expect(calledBySection).toBe(dependenciesSection + 4);
+  component?.handleInput?.("r");
+  await Bun.sleep(0);
+  expect(revalidated).toEqual(["weekly_digest"]);
+  component?.handleInput?.(" ");
+  await Bun.sleep(0);
+  expect(chainToggles).toEqual([false]);
 
   component?.handleInput?.("\t");
   expect((component?.render(90) ?? []).join("\n")).toContain("[Settings]");

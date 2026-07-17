@@ -184,7 +184,19 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
     client = Client(gateway.mcp)
     async with client:
         exposed = {tool.name for tool in await client.list_tools()}
-        assert exposed == {"search", "discover", "reload_settings", "execute", "status"}
+        assert exposed == {
+            "search",
+            "discover",
+            "reload_settings",
+            "execute",
+            "save_chain",
+            "list_chains",
+            "execute_chain",
+            "set_chain_enabled",
+            "revalidate_chain",
+            "delete_chain",
+            "status",
+        }
 
         initial_status = await client.call_tool("status", {})
         initial_data = structured_data(initial_status.structured_content)
@@ -360,3 +372,113 @@ async def test_catalog_cache_invalidates_only_changed_server(
         assert not beta_pid.exists()
         changed_pid = int(alpha_pid.read_text())
     await wait_for_process_exit(changed_pid)
+
+
+@pytest.mark.asyncio
+async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(
+        json.dumps({"mcpServers": {"unused": {"command": "unused", "disabled": True}}})
+    )
+    runtime = gateway.GatewayRuntime.create(
+        config_path,
+        tmp_path / "oauth",
+        tmp_path / "catalog",
+    )
+    integer_input = {
+        "type": "object",
+        "properties": {"count": {"type": "integer", "minimum": 0}},
+        "required": ["count"],
+        "additionalProperties": False,
+    }
+    integer_output = {
+        "type": "object",
+        "properties": {"value": {"type": "integer"}},
+        "required": ["value"],
+        "additionalProperties": False,
+    }
+
+    try:
+        saved = await runtime.save_chain(
+            name="countdown",
+            description="Recursively count down to zero and rebuild the total.",
+            code="""
+            if input["count"] == 0:
+                return {"value": 0}
+            previous = await chains.countdown({"count": input["count"] - 1})
+            return {"value": previous["value"] + 1}
+            """,
+            input_schema=integer_input,
+            output_schema=integer_output,
+        )
+        assert saved.created is True
+        assert saved.chain.status == "ready"
+        assert saved.chain.chain.native_tool == "mcp_chain_countdown"
+        assert [dependency.call for dependency in saved.chain.chain.dependencies] == [
+            "chains.countdown"
+        ]
+
+        native = await runtime.execute_chain("countdown", {"count": 3})
+        assert native.ok is True
+        assert native.result == {"value": 3}
+        assert native.calls_made == 0
+        assert native.chain_calls == 3
+
+        composed = await runtime.execute(
+            'result = await chains.countdown({"count": 2})\nreturn result["value"]'
+        )
+        assert composed.ok is True
+        assert composed.result == 2
+        assert composed.chain_calls == 3
+
+        runtime.executor.settings.max_chain_depth = 4
+        too_deep = await runtime.execute_chain("countdown", {"count": 5})
+        assert too_deep.ok is False
+        assert too_deep.failure_stage == "runtime"
+        assert too_deep.error and "recursion depth exceeded 4" in too_deep.error
+        runtime.executor.settings.max_chain_depth = 16
+
+        await runtime.save_chain(
+            name="double_countdown",
+            description="Compose the countdown chain twice.",
+            code="""
+            first = await chains.countdown({"count": input["count"]})
+            second = await chains.countdown({"count": input["count"]})
+            return {"value": first["value"] + second["value"]}
+            """,
+            input_schema=integer_input,
+            output_schema=integer_output,
+        )
+        chained = await runtime.execute_chain("double_countdown", {"count": 2})
+        assert chained.ok is True
+        assert chained.result == {"value": 4}
+        assert chained.chain_calls == 6
+
+        matches = await runtime.search("countdown")
+        assert {summary.name: summary.tool_count for summary in matches.servers} == {
+            "chains": 2
+        }
+        assert {match.call for match in matches.results} == {
+            "chains.countdown",
+            "chains.double_countdown",
+        }
+        assert all(match.source == "saved_chain" for match in matches.results)
+
+        with pytest.raises(ValueError, match="used by: double_countdown"):
+            await runtime.delete_chain("countdown")
+
+        disabled = await runtime.set_chain_enabled("countdown", False)
+        assert disabled.status == "disabled"
+        blocked = await runtime.execute_chain("countdown", {"count": 1})
+        assert blocked.ok is False
+        assert blocked.failure_stage == "preflight"
+        dependent = next(
+            view
+            for view in runtime.list_chains().chains
+            if view.chain.name == "double_countdown"
+        )
+        assert dependent.status == "stale"
+    finally:
+        await runtime.close()

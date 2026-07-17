@@ -1,4 +1,4 @@
-import { SidecarClient, type SidecarClientOptions } from "./mcp-client.js";
+import { SidecarClient, type SidecarClientOptions, type SidecarToolName } from "./mcp-client.js";
 import { type CodeMcpSettings, loadCodeMcpSettings } from "./settings.js";
 
 export class CodeMcpLifecycle {
@@ -17,12 +17,16 @@ export class CodeMcpLifecycle {
     return this.sidecar.settingsPath;
   }
 
+  get chainsPath(): string {
+    return this.sidecar.chainsPath;
+  }
+
   loadSettings(): CodeMcpSettings {
     return loadCodeMcpSettings(this.settingsPath);
   }
 
   async request(
-    name: "search" | "discover" | "reload_settings" | "execute" | "status",
+    name: SidecarToolName,
     args: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
