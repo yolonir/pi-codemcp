@@ -51,15 +51,25 @@ lint-python:
     uv run --project sidecar ruff check sidecar tests/python tests/fixtures
 
 typecheck-python:
-    uv run --project sidecar mypy sidecar
-    uv run --project sidecar ty check sidecar
+    uv run --project sidecar mypy \
+        sidecar tests/python/test_executor.py tests/python/test_settings.py
+    uv run --project sidecar ty check \
+        sidecar tests/python/test_executor.py tests/python/test_settings.py
 
 test-python:
     uv run --project sidecar pytest tests/python -q
 
 check-python: format-check-python lint-python typecheck-python test-python
 
-check: check-locks check-typescript check-python
+check-type-suppressions:
+    @if git grep -n -E \
+        'type:[[:space:]]*ignore|pyright:[[:space:]]*ignore|@ts-(ignore|expect-error|nocheck)|noqa:.*TC[0-9]+' \
+        -- '*.py' '*.ts' '*.tsx'; then \
+        printf '%s\n' 'Type-check suppression comments are not allowed.' >&2; \
+        exit 1; \
+    fi
+
+check: check-locks check-typescript check-python check-type-suppressions
 
 release-check:
     #!/usr/bin/env bash

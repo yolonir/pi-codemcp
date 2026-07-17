@@ -9,9 +9,31 @@ from mcp import types as mcp_types
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import ValidationError
 
-from sidecar import schemas
+from sidecar import tool_catalog
 from sidecar.chains import ChainStore
-from sidecar.schemas import ToolCatalog, normalize_mcp_config
+from sidecar.mcp_config import normalize_mcp_config
+from sidecar.models import NormalizedServerInfo
+from sidecar.tool_catalog import ToolCatalog
+
+
+def test_normalized_server_info_rejects_unknown_transport_and_fields() -> None:
+    with pytest.raises(ValidationError, match="transport"):
+        NormalizedServerInfo.model_validate(
+            {
+                "name": "example",
+                "transport": "websocket",
+                "config_fingerprint": "fingerprint",
+            }
+        )
+    with pytest.raises(ValidationError, match="unexpected"):
+        NormalizedServerInfo.model_validate(
+            {
+                "name": "example",
+                "transport": "http",
+                "config_fingerprint": "fingerprint",
+                "unexpected": True,
+            }
+        )
 
 
 def make_tool(
@@ -517,14 +539,14 @@ def test_catalog_search_prefilters_server_candidates_exactly(
     representative_search_catalog: ToolCatalog,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original_extract = schemas.process.extract
+    original_extract = tool_catalog.process.extract
     captured_candidates: list[str] = []
 
     def capture_extract(query: str, choices: dict[str, str], **kwargs: object) -> list:
         captured_candidates.extend(choices)
         return original_extract(query, choices, **kwargs)
 
-    monkeypatch.setattr(schemas.process, "extract", capture_extract)
+    monkeypatch.setattr(tool_catalog.process, "extract", capture_extract)
 
     matches = representative_search_catalog.search("dashboards", server="grafana")
 

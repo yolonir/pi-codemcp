@@ -6,20 +6,20 @@ import os
 import re
 import time
 from contextlib import suppress
-from pathlib import Path  # noqa: TC003 - Pydantic resolves this annotation at runtime.
+from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .json_types import JsonObject  # noqa: TC001 - Pydantic resolves this field type.
+from .json_types import JSON_OBJECT_ADAPTER, JsonObject
 
 CHAIN_NAME_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
 CHAIN_STORE_VERSION: Literal[1] = 1
 
 
 class ChainDependency(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     kind: Literal["mcp_tool", "saved_chain"]
     name: str
@@ -29,7 +29,7 @@ class ChainDependency(BaseModel):
 
 
 class SavedChainManifest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     version: Literal[1] = CHAIN_STORE_VERSION
     id: str
@@ -73,6 +73,8 @@ class SavedChainManifest(BaseModel):
 
 
 class ChainStatusView(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     chain: SavedChainManifest
     status: Literal["ready", "disabled", "stale"]
     stale_dependencies: list[str] = Field(default_factory=list)
@@ -80,17 +82,21 @@ class ChainStatusView(BaseModel):
 
 
 class ChainListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     chains: list[ChainStatusView]
 
 
 class SaveChainResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     chain: ChainStatusView
     created: bool
 
 
 class ChainStore:
     def __init__(self, directory: Path) -> None:
-        self.directory = directory
+        self.directory = Path(directory)
 
     def load_all(self) -> list[SavedChainManifest]:
         if not self.directory.exists():
@@ -130,17 +136,19 @@ class ChainStore:
         previous: SavedChainManifest | None = None,
     ) -> SavedChainManifest:
         now = time.time()
+        validated_input_schema = JSON_OBJECT_ADAPTER.validate_python(input_schema)
+        validated_output_schema = JSON_OBJECT_ADAPTER.validate_python(output_schema)
         schema_fingerprint = _fingerprint({
-            "input_schema": input_schema,
-            "output_schema": output_schema,
+            "input_schema": validated_input_schema,
+            "output_schema": validated_output_schema,
         })
         return SavedChainManifest(
             id=previous.id if previous is not None else uuid4().hex,
             name=name,
             description=description,
             code=code,
-            input_schema=input_schema,
-            output_schema=output_schema,
+            input_schema=validated_input_schema,
+            output_schema=validated_output_schema,
             enabled=previous.enabled if previous is not None else True,
             dependencies=dependencies,
             schema_fingerprint=schema_fingerprint,

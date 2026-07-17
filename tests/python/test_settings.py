@@ -47,3 +47,7 @@ def test_settings_reject_unknown_or_unsafe_values(tmp_path: Path) -> None:
     path.write_text(json.dumps({"maxCalls": 0}))
     with pytest.raises(ValidationError, match="maxCalls"):
         load_settings(path)
+
+    path.write_text(json.dumps({"maxCalls": "1"}))
+    with pytest.raises(ValidationError, match="maxCalls"):
+        load_settings(path)

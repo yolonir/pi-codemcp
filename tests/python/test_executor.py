@@ -1,23 +1,33 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 import pytest
 from mcp import types as mcp_types
+from pydantic import ValidationError
 
-from sidecar.executor import ExecutionSettings, MontyExecutor
-from sidecar.schemas import ToolCatalog
+from sidecar.executor import ExecutionResponse, ExecutionSettings, MontyExecutor
+from sidecar.json_types import JsonObject, JsonValue
+from sidecar.tool_catalog import ToolCatalog
 
 
 OBJECT = {"type": "object", "properties": {}, "additionalProperties": False}
 
 
+def test_execution_models_reject_invalid_states_and_limits() -> None:
+    with pytest.raises(ValidationError, match="max_calls"):
+        ExecutionSettings(max_calls=0)
+    with pytest.raises(ValidationError, match="successful execution"):
+        ExecutionResponse(ok=True, error="unexpected")
+    with pytest.raises(ValidationError, match="requires a failure stage"):
+        ExecutionResponse(ok=False)
+
+
 def tool(
     name: str,
-    properties: dict[str, dict[str, Any]],
+    properties: JsonObject,
     required: list[str],
-    output: dict[str, Any] | None,
+    output: JsonObject | None,
 ) -> mcp_types.Tool:
     return mcp_types.Tool(
         name=name,
@@ -77,9 +87,9 @@ def catalog() -> ToolCatalog:
 
 @pytest.mark.asyncio
 async def test_valid_three_call_cross_server_chain_and_mutation() -> None:
-    seen: list[tuple[str, dict[str, Any]]] = []
+    seen: list[tuple[str, JsonObject]] = []
 
-    async def call(name: str, arguments: dict[str, Any]) -> Any:
+    async def call(name: str, arguments: JsonObject) -> JsonValue:
         seen.append((name, arguments))
         if name == "alpha_get":
             return {"value": 2}
@@ -126,7 +136,7 @@ async def test_valid_three_call_cross_server_chain_and_mutation() -> None:
 async def test_preflight_errors_make_zero_calls(code: str) -> None:
     calls = 0
 
-    async def call(_: str, __: dict[str, Any]) -> Any:
+    async def call(_: str, __: JsonObject) -> JsonValue:
         nonlocal calls
         calls += 1
         return {}
@@ -144,7 +154,7 @@ async def test_preflight_errors_make_zero_calls(code: str) -> None:
 async def test_untyped_output_must_be_narrowed_before_typed_use() -> None:
     calls = 0
 
-    async def call(_: str, __: dict[str, Any]) -> Any:
+    async def call(_: str, __: JsonObject) -> JsonValue:
         nonlocal calls
         calls += 1
         return {"value": "not-an-integer"}
@@ -167,7 +177,7 @@ async def test_untyped_output_must_be_narrowed_before_typed_use() -> None:
 async def test_call_limit_stops_before_extra_dispatch() -> None:
     seen: list[str] = []
 
-    async def call(name: str, _: dict[str, Any]) -> Any:
+    async def call(name: str, _: JsonObject) -> JsonValue:
         seen.append(name)
         return {"value": 1}
 
@@ -191,7 +201,7 @@ async def test_call_limit_stops_before_extra_dispatch() -> None:
 async def test_oversized_result_fails_with_shape_without_retry() -> None:
     calls = 0
 
-    async def call(_: str, __: dict[str, Any]) -> Any:
+    async def call(_: str, __: JsonObject) -> JsonValue:
         nonlocal calls
         calls += 1
         return {"summary": {"title": "large"}, "panels": ["x" * 100]}
@@ -214,7 +224,7 @@ async def test_timeout_stops_infinite_sandbox_loop() -> None:
         settings=ExecutionSettings(timeout_seconds=0.01),
     )
 
-    async def call(_: str, __: dict[str, Any]) -> Any:
+    async def call(_: str, __: JsonObject) -> JsonValue:
         raise AssertionError("no tool call expected")
 
     response = await executor.execute("while True:\n    pass", call)
@@ -229,7 +239,7 @@ async def test_cancellation_propagates_without_retry() -> None:
     blocker = asyncio.Event()
     calls = 0
 
-    async def call(_: str, __: dict[str, Any]) -> Any:
+    async def call(_: str, __: JsonObject) -> JsonValue:
         nonlocal calls
         calls += 1
         started.set()
@@ -254,13 +264,15 @@ async def test_loops_conditions_and_per_session_serialization() -> None:
     active = 0
     max_active = 0
 
-    async def call(_: str, arguments: dict[str, Any]) -> Any:
+    async def call(_: str, arguments: JsonObject) -> JsonValue:
         nonlocal active, max_active
         active += 1
         max_active = max(max_active, active)
         await asyncio.sleep(0.01)
         active -= 1
-        return {"value": int(arguments["id"])}
+        raw_id = arguments["id"]
+        assert isinstance(raw_id, str)
+        return {"value": int(raw_id)}
 
     executor = MontyExecutor(catalog())
     code = """
@@ -294,7 +306,7 @@ async def test_loops_conditions_and_per_session_serialization() -> None:
 async def test_sandbox_denies_host_capabilities(code: str) -> None:
     calls = 0
 
-    async def call(_: str, __: dict[str, Any]) -> Any:
+    async def call(_: str, __: JsonObject) -> JsonValue:
         nonlocal calls
         calls += 1
         return {}
@@ -426,7 +438,7 @@ async def test_normalized_json_string_output_is_usable_through_sdk_facade() -> N
         }
     )
 
-    async def call(_: str, __: dict[str, Any]) -> Any:
+    async def call(_: str, __: JsonObject) -> JsonValue:
         return {"columns": ["1"], "rows": [[1]]}
 
     response = await MontyExecutor(sdk_catalog).execute(

@@ -6,35 +6,48 @@ import hashlib
 import textwrap
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Self
 
 import pydantic_monty
-from pydantic import BaseModel, ValidationError, model_serializer
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_serializer,
+    model_validator,
+)
 from pydantic_core import to_json
 
 from .json_types import JSON_VALUE_ADAPTER, JsonObject, JsonValue
 
 if TYPE_CHECKING:
     from .chains import SavedChainManifest
-    from .schemas import ToolCatalog, ToolSpec
+    from .tool_catalog import ToolCatalog, ToolSpec
 
 RESULT_BYTE_LIMIT = 16 * 1024
 SHAPE_FIELD_LIMIT = 20
 CHAIN_INPUT_EXTERNAL = "__codemcp_saved_chain_input"
 
 
-@dataclass(slots=True)
 class ExecutionContext:
-    catalog: ToolCatalog
-    call_tool: ContextToolCall
-    settings: ExecutionSettings
-    deadline: float
-    calls_made: int = 0
-    chain_calls: int = 0
-    chain_stack: ContextVar[tuple[str, ...]] = field(
-        default_factory=lambda: ContextVar("codemcp_chain_stack", default=())
-    )
+    def __init__(
+        self,
+        catalog: ToolCatalog,
+        call_tool: ContextToolCall,
+        settings: ExecutionSettings,
+        deadline: float,
+    ) -> None:
+        self.catalog = catalog
+        self.call_tool = call_tool
+        self.settings = settings
+        self.deadline = deadline
+        self.calls_made = 0
+        self.chain_calls = 0
+        self.chain_stack: ContextVar[tuple[str, ...]] = ContextVar(
+            "codemcp_chain_stack",
+            default=(),
+        )
 
     @property
     def total_calls(self) -> int:
@@ -49,14 +62,64 @@ ContextToolCall = Callable[[str, JsonObject, ExecutionContext], Awaitable[JsonVa
 ExternalFunction = Callable[..., Awaitable[JsonValue]]
 
 
+type FailureStage = Literal["preflight", "runtime", "timeout", "cancelled", "result"]
+
+
 class ExecutionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     ok: bool
-    failure_stage: Literal["preflight", "runtime", "timeout", "cancelled", "result"] | None = None
+    failure_stage: FailureStage | None = None
     result: JsonValue = None
     error: str | None = None
     shape: JsonObject | None = None
-    calls_made: int = 0
-    chain_calls: int = 0
+    calls_made: int = Field(default=0, ge=0)
+    chain_calls: int = Field(default=0, ge=0)
+
+    @classmethod
+    def success(
+        cls,
+        result: JsonValue,
+        *,
+        calls_made: int = 0,
+        chain_calls: int = 0,
+    ) -> Self:
+        return cls(
+            ok=True,
+            result=result,
+            calls_made=calls_made,
+            chain_calls=chain_calls,
+        )
+
+    @classmethod
+    def failure(
+        cls,
+        *,
+        failure_stage: FailureStage,
+        error: str,
+        calls_made: int = 0,
+        chain_calls: int = 0,
+        shape: JsonObject | None = None,
+    ) -> Self:
+        return cls(
+            ok=False,
+            failure_stage=failure_stage,
+            error=error,
+            calls_made=calls_made,
+            chain_calls=chain_calls,
+            shape=shape,
+        )
+
+    @model_validator(mode="after")
+    def validate_state(self) -> Self:
+        if self.ok:
+            if self.failure_stage is not None or self.error is not None or self.shape is not None:
+                raise ValueError("successful execution cannot contain failure details")
+        elif self.failure_stage is None or self.error is None:
+            raise ValueError("failed execution requires a failure stage and error")
+        elif self.result is not None:
+            raise ValueError("failed execution cannot contain a result")
+        return self
 
     @model_serializer(mode="plain")
     def serialize_compact(self) -> JsonObject:
@@ -80,14 +143,15 @@ class ExecutionResponse(BaseModel):
         return response
 
 
-@dataclass(slots=True)
-class ExecutionSettings:
-    timeout_seconds: float = 30.0
-    max_memory_bytes: int = 100 * 1024 * 1024
-    max_calls: int = 50
-    tool_timeout_seconds: float = 30.0
-    result_byte_limit: int = RESULT_BYTE_LIMIT
-    max_chain_depth: int = 16
+class ExecutionSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    timeout_seconds: float = Field(default=30.0, gt=0)
+    max_memory_bytes: int = Field(default=100 * 1024 * 1024, gt=0)
+    max_calls: int = Field(default=50, gt=0)
+    tool_timeout_seconds: float = Field(default=30.0, gt=0)
+    result_byte_limit: int = Field(default=RESULT_BYTE_LIMIT, gt=0)
+    max_chain_depth: int = Field(default=16, gt=0)
 
 
 class MontyExecutor:
@@ -138,8 +202,7 @@ class MontyExecutor:
             try:
                 validated = catalog.validate_arguments(spec.name, arguments)
             except (TypeError, ValidationError, ValueError) as error:
-                return ExecutionResponse(
-                    ok=False,
+                return ExecutionResponse.failure(
                     failure_stage="preflight",
                     error=f"{chain.call}: invalid arguments: {error}",
                 )
@@ -375,8 +438,7 @@ class MontyExecutor:
         if enforce_result_limit:
             result_bytes = len(to_json(result))
             if result_bytes >= context.settings.result_byte_limit:
-                return ExecutionResponse(
-                    ok=False,
+                return ExecutionResponse.failure(
                     failure_stage="result",
                     error=(
                         f"Returned value is {result_bytes} bytes; reduce it below "
@@ -386,8 +448,7 @@ class MontyExecutor:
                     calls_made=context.calls_made,
                     chain_calls=context.chain_calls,
                 )
-        return ExecutionResponse(
-            ok=True,
+        return ExecutionResponse.success(
             result=result,
             calls_made=context.calls_made,
             chain_calls=context.chain_calls,
@@ -425,8 +486,7 @@ class MontyExecutor:
         stage: Literal["preflight", "runtime", "timeout", "cancelled", "result"],
         error: str,
     ) -> ExecutionResponse:
-        return ExecutionResponse(
-            ok=False,
+        return ExecutionResponse.failure(
             failure_stage=stage,
             error=error,
             calls_made=context.calls_made,

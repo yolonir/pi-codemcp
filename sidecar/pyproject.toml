@@ -95,7 +95,11 @@ docstring-code-line-length = 100
 python_version = "3.12"
 plugins = ["pydantic.mypy"]
 strict = true
-files = ["sidecar"]
+files = [
+  "sidecar",
+  "tests/python/test_executor.py",
+  "tests/python/test_settings.py",
+]
 pretty = true
 show_error_codes = true
 show_error_code_links = true

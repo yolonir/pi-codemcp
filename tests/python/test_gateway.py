@@ -5,17 +5,17 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 from fastmcp import Client
 
 from sidecar import gateway
+from sidecar.json_types import JSON_OBJECT_ADAPTER, JsonObject
 
 
-def structured_data(structured: dict[str, Any] | None) -> dict[str, Any]:
+def structured_data(structured: dict[str, object] | None) -> JsonObject:
     assert structured is not None
-    return structured
+    return JSON_OBJECT_ADAPTER.validate_python(structured)
 
 
 async def wait_for_process_exit(pid: int) -> None:
@@ -401,7 +401,7 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
     }
 
     try:
-        saved = await runtime.save_chain(
+        saved = await runtime.chains.save(
             name="countdown",
             description="Recursively count down to zero and rebuild the total.",
             code="""
@@ -420,7 +420,7 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
             "chains.countdown"
         ]
 
-        native = await runtime.execute_chain("countdown", {"count": 3})
+        native = await runtime.chains.execute("countdown", {"count": 3})
         assert native.ok is True
         assert native.result == {"value": 3}
         assert native.calls_made == 0
@@ -434,13 +434,13 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
         assert composed.chain_calls == 3
 
         runtime.executor.settings.max_chain_depth = 4
-        too_deep = await runtime.execute_chain("countdown", {"count": 5})
+        too_deep = await runtime.chains.execute("countdown", {"count": 5})
         assert too_deep.ok is False
         assert too_deep.failure_stage == "runtime"
         assert too_deep.error and "recursion depth exceeded 4" in too_deep.error
         runtime.executor.settings.max_chain_depth = 16
 
-        await runtime.save_chain(
+        await runtime.chains.save(
             name="double_countdown",
             description="Compose the countdown chain twice.",
             code="""
@@ -451,7 +451,7 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
             input_schema=integer_input,
             output_schema=integer_output,
         )
-        chained = await runtime.execute_chain("double_countdown", {"count": 2})
+        chained = await runtime.chains.execute("double_countdown", {"count": 2})
         assert chained.ok is True
         assert chained.result == {"value": 4}
         assert chained.chain_calls == 6
@@ -467,16 +467,16 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
         assert all(match.source == "saved_chain" for match in matches.results)
 
         with pytest.raises(ValueError, match="used by: double_countdown"):
-            await runtime.delete_chain("countdown")
+            await runtime.chains.delete("countdown")
 
-        disabled = await runtime.set_chain_enabled("countdown", False)
+        disabled = await runtime.chains.set_enabled("countdown", False)
         assert disabled.status == "disabled"
-        blocked = await runtime.execute_chain("countdown", {"count": 1})
+        blocked = await runtime.chains.execute("countdown", {"count": 1})
         assert blocked.ok is False
         assert blocked.failure_stage == "preflight"
         dependent = next(
             view
-            for view in runtime.list_chains().chains
+            for view in runtime.chains.list().chains
             if view.chain.name == "double_countdown"
         )
         assert dependent.status == "stale"

@@ -6,7 +6,7 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Literal
 
 from mcp import types as mcp_types
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .json_types import JSON_OBJECT_ADAPTER, JsonObject
 
@@ -18,6 +18,8 @@ DEFAULT_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
 class CachedServerCatalog(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     version: Literal[1] = CACHE_VERSION
     server_name: str
     config_fingerprint: str

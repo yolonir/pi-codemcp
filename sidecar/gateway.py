@@ -6,14 +6,14 @@ import os
 import textwrap
 import time
 from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 
 import pydantic_monty
 from fastmcp import Client, FastMCP
 from fastmcp.mcp_config import RemoteMCPServer, StdioMCPServer
 
+from . import json_types
 from .catalog_cache import CatalogCache
 from .chains import (
     ChainDependency,
@@ -24,23 +24,20 @@ from .chains import (
     SavedChainManifest,
 )
 from .executor import ExecutionContext, ExecutionResponse, MontyExecutor
-from .json_types import JsonObject, JsonValue  # noqa: TC001 - FastMCP resolves these.
-from .schemas import (
-    NormalizedConfig,
+from .mcp_config import NormalizedConfig, load_mcp_json, normalize_mcp_config
+from .models import (
     NormalizedServerInfo,
     SearchResponse,
     ServerToolSummary,
     StatusResponse,
-    ToolCatalog,
     UpstreamStatus,
     UpstreamToolStatus,
-    load_mcp_json,
-    normalize_mcp_config,
 )
 from .settings import CodeMcpSettings, load_settings
+from .tool_catalog import ToolCatalog
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 
     from fastmcp.client.transports import ClientTransport
     from mcp import types as mcp_types
@@ -49,17 +46,32 @@ DEFAULT_AGENT_DIR = Path.home() / ".pi" / "agent"
 CODEMCP_AGENT_DIR_ENV = "PI_CODEMCP_AGENT_DIR"
 PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR"
 type ServerConfig = StdioMCPServer | RemoteMCPServer
+type JsonObject = json_types.JsonObject
+type JsonValue = json_types.JsonValue
 
 
-@dataclass(slots=True)
 class ServerHandle:
-    info: NormalizedServerInfo
-    server_config: ServerConfig
-    cache: CatalogCache
-    tools: list[mcp_types.Tool] | None = None
-    client: Client[ClientTransport] | None = None
-    _exit_stack: AsyncExitStack | None = None
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    def __init__(
+        self,
+        info: NormalizedServerInfo,
+        server_config: ServerConfig,
+        cache: CatalogCache,
+    ) -> None:
+        self.info = info
+        self.server_config = server_config
+        self.cache = cache
+        self._tools: list[mcp_types.Tool] | None = None
+        self._client: Client[ClientTransport] | None = None
+        self._exit_stack: AsyncExitStack | None = None
+        self._lock = asyncio.Lock()
+
+    @property
+    def tools(self) -> list[mcp_types.Tool] | None:
+        return self._tools
+
+    @property
+    def client(self) -> Client[ClientTransport] | None:
+        return self._client
 
     @classmethod
     def create(
@@ -68,22 +80,23 @@ class ServerHandle:
         server_config: ServerConfig,
         cache: CatalogCache,
     ) -> ServerHandle:
-        return cls(
+        handle = cls(
             info=info,
             server_config=server_config,
             cache=cache,
-            tools=cache.load(info.name, info.config_fingerprint),
         )
+        handle._tools = cache.load(info.name, info.config_fingerprint)
+        return handle
 
     async def discover(self, *, force: bool = False) -> list[mcp_types.Tool]:
         async with self._lock:
-            if self.tools is not None and not force:
-                return self.tools
-            was_connected = self.client is not None
+            if self._tools is not None and not force:
+                return self._tools
+            was_connected = self._client is not None
             client = await self._connect_locked()
             try:
                 tools = await client.list_tools()
-                self.tools = tools
+                self._tools = tools
                 await asyncio.to_thread(
                     self.cache.save,
                     self.info.name,
@@ -111,8 +124,8 @@ class ServerHandle:
             await self._disconnect_locked()
 
     async def _connect_locked(self) -> Client[ClientTransport]:
-        if self.client is not None:
-            return self.client
+        if self._client is not None:
+            return self._client
         exit_stack = AsyncExitStack()
         try:
             client = await exit_stack.enter_async_context(
@@ -125,27 +138,106 @@ class ServerHandle:
             await exit_stack.aclose()
             raise
         self._exit_stack = exit_stack
-        self.client = client
+        self._client = client
         return client
 
     async def _disconnect_locked(self) -> None:
         exit_stack, self._exit_stack = self._exit_stack, None
-        self.client = None
+        self._client = None
         if exit_stack is not None:
             await exit_stack.aclose()
 
 
-@dataclass(slots=True)  # noqa: PLR0904 - Cohesive sidecar RPC surface.
+class SaveChainHandler(Protocol):
+    async def __call__(
+        self,
+        *,
+        name: str,
+        description: str,
+        code: str,
+        input_schema: JsonObject,
+        output_schema: JsonObject,
+    ) -> SaveChainResponse: ...
+
+
+class SavedChainHandlers(NamedTuple):
+    execute: Callable[[str, JsonObject], Awaitable[ExecutionResponse]]
+    save: SaveChainHandler
+    list: Callable[[], ChainListResponse]
+    set_enabled: Callable[[str, bool], Awaitable[ChainStatusView]]
+    revalidate: Callable[[str], Awaitable[ChainStatusView]]
+    delete: Callable[[str], Awaitable[ChainListResponse]]
+
+
+class SavedChainRuntime:
+    def __init__(self, handlers: SavedChainHandlers) -> None:
+        self.handlers = handlers
+
+    async def execute(self, name: str, arguments: JsonObject) -> ExecutionResponse:
+        return await self.handlers.execute(name, arguments)
+
+    async def save(
+        self,
+        *,
+        name: str,
+        description: str,
+        code: str,
+        input_schema: JsonObject,
+        output_schema: JsonObject,
+    ) -> SaveChainResponse:
+        return await self.handlers.save(
+            name=name,
+            description=description,
+            code=code,
+            input_schema=input_schema,
+            output_schema=output_schema,
+        )
+
+    def list(self) -> ChainListResponse:
+        return self.handlers.list()
+
+    async def set_enabled(self, name: str, enabled: bool) -> ChainStatusView:
+        return await self.handlers.set_enabled(name, enabled)
+
+    async def revalidate(self, name: str) -> ChainStatusView:
+        return await self.handlers.revalidate(name)
+
+    async def delete(self, name: str) -> ChainListResponse:
+        return await self.handlers.delete(name)
+
+
 class GatewayRuntime:
-    config_path: Path
-    settings_path: Path
-    settings: CodeMcpSettings
-    normalized: NormalizedConfig
-    handles: dict[str, ServerHandle]
-    chain_store: ChainStore
-    catalog: ToolCatalog
-    executor: MontyExecutor
-    _catalog_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    def __init__(
+        self,
+        *,
+        config_path: Path,
+        settings_path: Path,
+        settings: CodeMcpSettings,
+        normalized: NormalizedConfig,
+        handles: dict[str, ServerHandle],
+        chain_store: ChainStore,
+        catalog: ToolCatalog,
+        executor: MontyExecutor,
+    ) -> None:
+        self.config_path = config_path
+        self.settings_path = settings_path
+        self.settings = settings
+        self.normalized = normalized
+        self.handles = handles
+        self.chain_store = chain_store
+        self.catalog = catalog
+        self.executor = executor
+        self.chains = SavedChainRuntime(
+            SavedChainHandlers(
+                execute=self._execute_chain,
+                save=self._save_chain,
+                list=self._list_chains,
+                set_enabled=self._set_chain_enabled,
+                revalidate=self._revalidate_chain,
+                delete=self._delete_chain,
+            )
+        )
+        self._catalog_lock = asyncio.Lock()
 
     @classmethod
     def create(
@@ -229,7 +321,7 @@ class GatewayRuntime:
         self.executor.update_catalog(self.catalog)
         return await self.executor.execute_graph(code, self._dispatch)
 
-    async def execute_chain(self, name: str, arguments: JsonObject) -> ExecutionResponse:
+    async def _execute_chain(self, name: str, arguments: JsonObject) -> ExecutionResponse:
         chain = self.chain_store.get(name)
         if not chain.enabled:
             return ExecutionResponse(
@@ -241,7 +333,7 @@ class GatewayRuntime:
         self.executor.update_catalog(self.catalog)
         return await self.executor.execute_saved_chain(chain, arguments, self._dispatch)
 
-    async def save_chain(
+    async def _save_chain(
         self,
         *,
         name: str,
@@ -293,15 +385,15 @@ class GatewayRuntime:
             created=previous is None,
         )
 
-    def list_chains(self) -> ChainListResponse:
+    def _list_chains(self) -> ChainListResponse:
         return ChainListResponse(chains=self._chain_views())
 
-    async def set_chain_enabled(self, name: str, enabled: bool) -> ChainStatusView:
+    async def _set_chain_enabled(self, name: str, enabled: bool) -> ChainStatusView:
         self.chain_store.set_enabled(name, enabled)
         await self._rebuild_catalog()
         return self._chain_view(name)
 
-    async def revalidate_chain(self, name: str) -> ChainStatusView:
+    async def _revalidate_chain(self, name: str) -> ChainStatusView:
         current = self.chain_store.get(name)
         await self._ensure_servers_discovered(self._referenced_servers(current.code))
         chains = [chain for chain in self.chain_store.enabled() if chain.name != name]
@@ -326,7 +418,7 @@ class GatewayRuntime:
         await self._rebuild_catalog()
         return self._chain_view(name)
 
-    async def delete_chain(self, name: str) -> ChainListResponse:
+    async def _delete_chain(self, name: str) -> ChainListResponse:
         called_by = self._called_by().get(name, [])
         if called_by:
             raise ValueError(
@@ -334,7 +426,7 @@ class GatewayRuntime:
             )
         self.chain_store.delete(name)
         await self._rebuild_catalog()
-        return self.list_chains()
+        return self._list_chains()
 
     async def _dispatch(
         self,
@@ -590,9 +682,9 @@ def _compact_description(description: str | None, limit: int = 160) -> str | Non
     return compact if len(compact) <= limit else f"{compact[: limit - 1].rstrip()}…"
 
 
-@dataclass(slots=True)
 class RuntimeState:
-    runtime: GatewayRuntime | None = None
+    def __init__(self) -> None:
+        self.runtime: GatewayRuntime | None = None
 
 
 _runtime_state = RuntimeState()
@@ -679,43 +771,44 @@ async def save_chain(
     output_schema: JsonObject,
 ) -> SaveChainResponse:
     """Validate and persist one reusable typed MCP chain."""
-    return await _require_runtime().save_chain(
+    return await _require_runtime().chains.save(
         name=name,
         description=description,
         code=code,
-        input_schema=input_schema,
-        output_schema=output_schema,
+        input_schema=json_types.JSON_OBJECT_ADAPTER.validate_python(input_schema),
+        output_schema=json_types.JSON_OBJECT_ADAPTER.validate_python(output_schema),
     )
 
 
 @mcp.tool
 def list_chains() -> ChainListResponse:
     """List saved chains and their dependency state."""
-    return _require_runtime().list_chains()
+    return _require_runtime().chains.list()
 
 
 @mcp.tool
 async def execute_chain(name: str, arguments: JsonObject) -> ExecutionResponse:
     """Execute one saved chain through its typed input contract."""
-    return await _require_runtime().execute_chain(name, arguments)
+    validated_arguments = json_types.JSON_OBJECT_ADAPTER.validate_python(arguments)
+    return await _require_runtime().chains.execute(name, validated_arguments)
 
 
 @mcp.tool
 async def set_chain_enabled(name: str, enabled: bool) -> ChainStatusView:
     """Enable or disable one saved chain."""
-    return await _require_runtime().set_chain_enabled(name, enabled)
+    return await _require_runtime().chains.set_enabled(name, enabled)
 
 
 @mcp.tool
 async def revalidate_chain(name: str) -> ChainStatusView:
     """Revalidate one saved chain against the current callable catalog."""
-    return await _require_runtime().revalidate_chain(name)
+    return await _require_runtime().chains.revalidate(name)
 
 
 @mcp.tool
 async def delete_chain(name: str) -> ChainListResponse:
     """Delete an unused saved chain."""
-    return await _require_runtime().delete_chain(name)
+    return await _require_runtime().chains.delete(name)
 
 
 @mcp.tool

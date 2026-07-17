@@ -17,7 +17,12 @@ def _camel_case(name: str) -> str:
 
 
 class CodeMcpSettings(BaseModel):
-    model_config = ConfigDict(alias_generator=_camel_case, populate_by_name=True, extra="forbid")
+    model_config = ConfigDict(
+        alias_generator=_camel_case,
+        populate_by_name=True,
+        extra="forbid",
+        strict=True,
+    )
 
     version: Literal[1] = 1
     background_warmup: bool = True
