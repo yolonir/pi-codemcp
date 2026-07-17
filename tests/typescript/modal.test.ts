@@ -161,7 +161,8 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   expect(lines[0]).toBe(`╭${"─".repeat(88)}╮`);
   expect(lines.at(-1)).toBe(`╰${"─".repeat(88)}╯`);
   expect(lines.length).toBeLessThanOrEqual(Math.floor(24 * 0.85));
-  expect(lines.join("\n")).toContain("[Servers]");
+  const header = lines.find((line) => line.includes("[Servers]"));
+  expect(header).toContain("CodeMCP");
   expect(lines.join("\n")).toContain("grafana");
   expect(lines.join("\n")).toContain("[D] Discover tools");
 
@@ -169,9 +170,24 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   await Bun.sleep(0);
   expect(discoveries).toEqual(["grafana"]);
   expect(servers[0]?.tools[0]).toMatchObject({ name: "query", enabled: true });
-  const wide = (component?.render(140) ?? []).join("\n");
-  expect(wide).toContain("╭─ Tool");
-  expect(wide).toContain("Run a query and return");
+  const originalRows = process.stdout.rows;
+  Object.defineProperty(process.stdout, "rows", { value: 60, configurable: true });
+  try {
+    const wideLines = component?.render(140) ?? [];
+    const cardTop = wideLines.findIndex((line) => line.includes("╭─ query"));
+    const toolsHeading = wideLines.findIndex((line) => line.includes("TOOLS"));
+    expect(cardTop).toBe(toolsHeading + 1);
+    expect(wideLines.join("\n")).toContain("Run a query and return");
+    expect(wideLines[cardTop]?.match(/│/g)).toHaveLength(3);
+    const narrowLines = component?.render(90) ?? [];
+    const narrowFooter = narrowLines.findIndex((line) => line.includes("tab settings"));
+    expect(narrowLines[narrowFooter - 1]).toContain("╰──");
+  } finally {
+    Object.defineProperty(process.stdout, "rows", {
+      value: originalRows,
+      configurable: true,
+    });
+  }
 
   component?.handleInput?.("\u001b[C");
   component?.handleInput?.("\r");

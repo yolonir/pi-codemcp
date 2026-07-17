@@ -204,8 +204,10 @@ class ServerManagerModal implements Component, Focusable {
 
   render(width: number): string[] {
     const content = new Box(2, 1);
-    content.addChild(new Text(this.theme.fg("accent", this.theme.bold("CodeMCP")), 0, 0));
-    content.addChild(new Text(this.renderTabs(), 0, 0));
+    content.addChild({
+      render: (contentWidth: number) => [this.renderHeader(contentWidth)],
+      invalidate: () => {},
+    });
     content.addChild({
       render: (bodyWidth: number) =>
         this.activeTab === "servers"
@@ -302,7 +304,7 @@ class ServerManagerModal implements Component, Focusable {
     }
   }
 
-  private renderTabs(): string {
+  private renderHeader(width: number): string {
     const servers =
       this.activeTab === "servers"
         ? this.theme.fg("accent", this.theme.bold("[Servers]"))
@@ -311,7 +313,10 @@ class ServerManagerModal implements Component, Focusable {
       this.activeTab === "settings"
         ? this.theme.fg("accent", this.theme.bold("[Settings]"))
         : this.theme.fg("muted", "Settings");
-    return `${servers}  ${settings}`;
+    const tabs = `${servers}  ${settings}`;
+    const title = this.theme.fg("dim", this.theme.bold("CodeMCP"));
+    const gap = " ".repeat(Math.max(1, width - visibleWidth(tabs) - visibleWidth(title)));
+    return truncateToWidth(`${tabs}${gap}${title}`, width);
   }
 
   private renderServers(width: number): string[] {
@@ -386,20 +391,26 @@ class ServerManagerModal implements Component, Focusable {
     const available = Math.max(1, height - lines.length);
     if (selectedTool && width >= 72 && available >= 6) {
       const cardWidth = Math.min(42, Math.max(28, Math.floor(width * 0.42)));
-      const listWidth = Math.max(1, width - cardWidth - 3);
+      const gapWidth = 2;
+      const listWidth = Math.max(1, width - cardWidth - gapWidth);
       const list = this.renderToolList(tools, listWidth, available);
-      const card = renderToolCard(selectedTool, cardWidth, Math.min(available, 12), this.theme);
+      const cardHeight = Math.min(available, 12);
+      const card = renderToolCard(selectedTool, cardWidth, cardHeight, this.theme);
       for (let index = 0; index < available; index += 1) {
         lines.push(
-          `${padLine(list[index] ?? "", listWidth)} ${this.theme.fg("dim", "│")} ${card[index] ?? ""}`,
+          `${padLine(list[index] ?? "", listWidth)}${" ".repeat(gapWidth)}${card[index] ?? ""}`,
         );
       }
       return lines;
     }
 
-    const cardHeight = selectedTool ? Math.min(9, Math.max(5, Math.floor(available * 0.35))) : 0;
-    const listHeight = Math.max(1, available - cardHeight);
-    lines.push(...this.renderToolList(tools, width, listHeight));
+    const cardHeight =
+      selectedTool && available >= 5
+        ? Math.min(9, available - 1, Math.max(4, Math.floor(available * 0.35)))
+        : 0;
+    const listHeight = available - cardHeight;
+    const list = listHeight > 0 ? this.renderToolList(tools, width, listHeight) : [];
+    lines.push(...list, ...Array.from({ length: listHeight - list.length }, () => ""));
     if (selectedTool && cardHeight >= 4) {
       lines.push(...renderToolCard(selectedTool, width, cardHeight, this.theme));
     }
@@ -475,7 +486,7 @@ class ServerManagerModal implements Component, Focusable {
     if (this.activeTab === "settings") {
       return "tab servers · ↑/↓ navigate · ←/→/enter change · esc close";
     }
-    return "tab settings · ←/→ pane · ↑/↓ navigate · space toggle · D discover · esc close";
+    return "tab settings · ←/→ pane · ↑/↓ navigate · space toggle · esc close";
   }
 
   private moveSelection(direction: -1 | 1): void {
@@ -699,7 +710,8 @@ function wrapPlainText(text: string, width: number): string[] {
 
 function modalBodyRows(): number {
   const overlayRows = Math.floor((process.stdout.rows ?? 24) * 0.85);
-  // Border, Box vertical padding, title, tabs, and footer consume seven rows.
+  // Frame, Box padding, header, and footer consume six rows; keep one row as
+  // safety because Pi clips overlays at maxHeight before the final border.
   return Math.max(1, overlayRows - 7);
 }
 
@@ -712,14 +724,15 @@ function renderToolCard(
   const cardWidth = Math.max(8, width);
   const cardHeight = Math.max(3, height);
   const innerWidth = Math.max(1, cardWidth - 2);
-  const label = "─ Tool ";
-  const top = theme.fg("dim", `╭${label}${"─".repeat(Math.max(0, cardWidth - label.length - 2))}╮`);
+  const title = truncateToWidth(tool.name, Math.max(1, cardWidth - 5), "…");
+  const top = [
+    theme.fg("dim", "╭─ "),
+    theme.fg("accent", theme.bold(title)),
+    theme.fg("dim", ` ${"─".repeat(Math.max(0, cardWidth - visibleWidth(title) - 5))}╮`),
+  ].join("");
   const bottom = theme.fg("dim", `╰${"─".repeat(Math.max(0, cardWidth - 2))}╯`);
   const description = tool.description ?? "No description provided.";
-  const content = [
-    theme.fg("accent", theme.bold(truncateToWidth(tool.name, innerWidth, "…"))),
-    ...wrapPlainText(description, innerWidth).map((line) => theme.fg("muted", line)),
-  ];
+  const content = wrapPlainText(description, innerWidth).map((line) => theme.fg("muted", line));
   const body: string[] = [];
   for (let index = 0; index < cardHeight - 2; index += 1) {
     body.push(
