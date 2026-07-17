@@ -43,14 +43,16 @@ jobs:
       - name: Sync locked environments
         run: just sync
 
-      - name: Run repository hooks
+      - name: Run repository hygiene hooks
         uses: j178/prek-action@v2.0.1
         env:
-          # CI validates pushed main commits; the local hook is what blocks creating them.
-          SKIP: no-commit-to-branch
+          # CI validates pushed main commits; quality streams in the next step.
+          SKIP: no-commit-to-branch,quality
         with:
           prek-version: "0.4.8"
 
+      - name: Run quality gate
+        run: just check
 
   package:
     name: Package smoke (${{ matrix.os }})
