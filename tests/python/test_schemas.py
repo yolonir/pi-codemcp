@@ -264,7 +264,7 @@ def test_recursive_json_schema_refs_stop_at_json_value() -> None:
     }
     catalog = ToolCatalog.from_server_tools(
         {
-            "dune": [
+            "docs": [
                 make_tool(
                     "search_docs",
                     {
@@ -288,7 +288,7 @@ def test_recursive_json_schema_refs_stop_at_json_value() -> None:
         }
     )
 
-    stub = catalog.tools["dune_search_docs"].stub
+    stub = catalog.tools["docs_search_docs"].stub
     assert (
         "results: list[str | float | bool | None | dict[str, JsonValue] | list[JsonValue]]"
         in stub
