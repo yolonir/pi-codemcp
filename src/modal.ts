@@ -317,7 +317,7 @@ class ServerManagerModal implements Component, Focusable {
   private renderServers(width: number): string[] {
     const filterLabel = this.activePane === "servers" ? "Filter servers" : "Filter tools";
     const lines = [this.theme.fg("dim", filterLabel), ...this.search.render(width), ""];
-    const splitHeight = Math.max(8, Math.floor((process.stdout.rows ?? 24) * 0.85) - 9);
+    const splitHeight = Math.max(1, modalBodyRows() - lines.length);
     const leftWidth = Math.min(36, Math.max(24, Math.floor(width * 0.32)));
     const rightWidth = Math.max(1, width - leftWidth - 3);
     const left = this.renderServerList(leftWidth, splitHeight);
@@ -382,9 +382,33 @@ class ServerManagerModal implements Component, Focusable {
       return lines;
     }
     this.selectedToolIndex = clampIndex(this.selectedToolIndex, tools.length);
-    const descriptionRows = 2;
-    const available = Math.max(1, height - lines.length - descriptionRows);
-    for (const tool of visibleWindow(tools, this.selectedToolIndex, available)) {
+    const selectedTool = tools[this.selectedToolIndex];
+    const available = Math.max(1, height - lines.length);
+    if (selectedTool && width >= 72 && available >= 6) {
+      const cardWidth = Math.min(42, Math.max(28, Math.floor(width * 0.42)));
+      const listWidth = Math.max(1, width - cardWidth - 3);
+      const list = this.renderToolList(tools, listWidth, available);
+      const card = renderToolCard(selectedTool, cardWidth, Math.min(available, 12), this.theme);
+      for (let index = 0; index < available; index += 1) {
+        lines.push(
+          `${padLine(list[index] ?? "", listWidth)} ${this.theme.fg("dim", "│")} ${card[index] ?? ""}`,
+        );
+      }
+      return lines;
+    }
+
+    const cardHeight = selectedTool ? Math.min(9, Math.max(5, Math.floor(available * 0.35))) : 0;
+    const listHeight = Math.max(1, available - cardHeight);
+    lines.push(...this.renderToolList(tools, width, listHeight));
+    if (selectedTool && cardHeight >= 4) {
+      lines.push(...renderToolCard(selectedTool, width, cardHeight, this.theme));
+    }
+    return lines;
+  }
+
+  private renderToolList(tools: ToolModalState[], width: number, height: number): string[] {
+    const lines: string[] = [];
+    for (const tool of visibleWindow(tools, this.selectedToolIndex, height)) {
       const selected =
         this.activePane === "tools" && tools.indexOf(tool) === this.selectedToolIndex;
       const prefix = selected ? this.theme.fg("accent", "→") : " ";
@@ -400,15 +424,11 @@ class ServerManagerModal implements Component, Focusable {
         ),
       );
     }
-    const selectedTool = tools[this.selectedToolIndex];
-    if (selectedTool?.description) {
-      lines.push("", this.theme.fg("dim", truncateToWidth(selectedTool.description, width)));
-    }
     return lines;
   }
 
   private renderSettings(width: number): string[] {
-    const splitHeight = Math.max(10, Math.floor((process.stdout.rows ?? 24) * 0.85) - 7);
+    const splitHeight = Math.max(1, modalBodyRows());
     const leftWidth = Math.min(38, Math.max(28, Math.floor(width * 0.42)));
     const rightWidth = Math.max(1, width - leftWidth - 3);
     const left = [this.theme.fg("dim", this.theme.bold("SETTINGS"))];
@@ -675,6 +695,38 @@ function wrapPlainText(text: string, width: number): string[] {
   }
   if (line) lines.push(line);
   return lines;
+}
+
+function modalBodyRows(): number {
+  const overlayRows = Math.floor((process.stdout.rows ?? 24) * 0.85);
+  // Border, Box vertical padding, title, tabs, and footer consume seven rows.
+  return Math.max(1, overlayRows - 7);
+}
+
+function renderToolCard(
+  tool: ToolModalState,
+  width: number,
+  height: number,
+  theme: Theme,
+): string[] {
+  const cardWidth = Math.max(8, width);
+  const cardHeight = Math.max(3, height);
+  const innerWidth = Math.max(1, cardWidth - 2);
+  const label = "─ Tool ";
+  const top = theme.fg("dim", `╭${label}${"─".repeat(Math.max(0, cardWidth - label.length - 2))}╮`);
+  const bottom = theme.fg("dim", `╰${"─".repeat(Math.max(0, cardWidth - 2))}╯`);
+  const description = tool.description ?? "No description provided.";
+  const content = [
+    theme.fg("accent", theme.bold(truncateToWidth(tool.name, innerWidth, "…"))),
+    ...wrapPlainText(description, innerWidth).map((line) => theme.fg("muted", line)),
+  ];
+  const body: string[] = [];
+  for (let index = 0; index < cardHeight - 2; index += 1) {
+    body.push(
+      `${theme.fg("dim", "│")}${padLine(content[index] ?? "", innerWidth)}${theme.fg("dim", "│")}`,
+    );
+  }
+  return [top, ...body, bottom];
 }
 
 function padLine(line: string, width: number): string {

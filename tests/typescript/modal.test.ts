@@ -127,7 +127,13 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
         discovered: true,
         toolCount: 1,
         totalToolCount: 1,
-        tools: [{ name: "query", enabled: true }],
+        tools: [
+          {
+            name: "query",
+            enabled: true,
+            description: "Run a query and return the selected rows from the upstream database.",
+          },
+        ],
       };
     },
     async onSetToolEnabled(server, tool, enabled) {
@@ -153,6 +159,8 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   expect(component).toBeDefined();
   const lines = component?.render(90) ?? [];
   expect(lines[0]).toBe(`╭${"─".repeat(88)}╮`);
+  expect(lines.at(-1)).toBe(`╰${"─".repeat(88)}╯`);
+  expect(lines.length).toBeLessThanOrEqual(Math.floor(24 * 0.85));
   expect(lines.join("\n")).toContain("[Servers]");
   expect(lines.join("\n")).toContain("grafana");
   expect(lines.join("\n")).toContain("[D] Discover tools");
@@ -160,7 +168,10 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   component?.handleInput?.("D");
   await Bun.sleep(0);
   expect(discoveries).toEqual(["grafana"]);
-  expect(servers[0]?.tools).toEqual([{ name: "query", enabled: true }]);
+  expect(servers[0]?.tools[0]).toMatchObject({ name: "query", enabled: true });
+  const wide = (component?.render(140) ?? []).join("\n");
+  expect(wide).toContain("╭─ Tool");
+  expect(wide).toContain("Run a query and return");
 
   component?.handleInput?.("\u001b[C");
   component?.handleInput?.("\r");

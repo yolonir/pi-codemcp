@@ -120,7 +120,7 @@ Every enabled upstream tool is available by default, including mutations. Indivi
 /codemcp
 ```
 
-Opens a split dashboard with **Servers** and **Settings** tabs. The Servers tab keeps the compact server list on the left and selected-server details, actions, and per-tool toggles on the right. Enabling a server immediately discovers its catalog. Press uppercase `D` to force-refresh it later. Server changes are saved atomically to Pi's existing `mcp.json`; per-tool policy and settings are saved under `<agent-dir>/pi-codemcp/settings.json`.
+Opens a split dashboard with **Servers** and **Settings** tabs. The Servers tab keeps the compact server list on the left and selected-server details, actions, and per-tool toggles on the right. Wide terminals also show the selected tool's name and wrapped description in a separate card. Enabling a server immediately discovers its catalog. Press uppercase `D` to force-refresh it later. Server changes are saved atomically to Pi's existing `mcp.json`; per-tool policy and settings are saved under `<agent-dir>/pi-codemcp/settings.json`.
 
 The Settings tab controls background warmup, catalog TTL, execution and per-tool timeouts, maximum calls, final-result KiB, and agent-visible output KiB/line limits. Internal bootstrap and IPC safety timeouts and the sandbox memory ceiling are intentionally not user-configurable.
 
