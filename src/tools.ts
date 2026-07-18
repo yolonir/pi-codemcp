@@ -497,14 +497,21 @@ export function registerCodeMcpTools(
         0,
       );
     },
-    renderResult(result, { expanded, isPartial }, theme) {
+    renderResult(result, { expanded, isPartial }, theme, context) {
       if (isPartial) return new Text(theme.fg("warning", "Managing saved chains..."), 0, 0);
-      if (expanded) return renderExpandedJson(result.content);
       const details = result.details as
         | (CodeMcpOutputDetails & { action: string; chainCount: number })
         | undefined;
+      if (context.isError || !details) {
+        return new Text(
+          theme.fg("error", getTextContent(result.content).trim() || "Chain management failed"),
+          0,
+          0,
+        );
+      }
+      if (expanded) return renderExpandedJson(result.content);
       return new Text(
-        theme.fg("success", `${details?.action ?? "list"} · ${details?.chainCount ?? 0} chains`),
+        theme.fg("success", `${details.action} · ${details.chainCount} chains`),
         0,
         0,
       );

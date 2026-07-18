@@ -168,6 +168,23 @@ describe("codemcp_execute rendering", () => {
   });
 });
 
+describe("codemcp_manage_chains rendering", () => {
+  test("renders manager failures explicitly", () => {
+    const tool = captureTool("codemcp_manage_chains");
+    const failed = render(
+      tool.renderResult?.(
+        { content: [{ type: "text", text: "delete requires confirmedByUser=true" }] },
+        { expanded: false, isPartial: false },
+        plainTheme,
+        { isError: true },
+      ) as Component,
+    );
+
+    expect(failed).toContain("confirmedByUser=true");
+    expect(failed).not.toContain("0 chains");
+  });
+});
+
 describe("codemcp_save_chain rendering", () => {
   test("renders thrown validation failures as errors", () => {
     const tool = captureTool("codemcp_save_chain");
