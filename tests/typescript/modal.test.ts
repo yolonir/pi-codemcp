@@ -239,10 +239,10 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
     stats: statsStateFromSnapshot({
       updated_at: 100,
       lifetime: {
-        count: 5,
-        success: 4,
-        failure: 1,
-        calls: 8,
+        count: 100_000,
+        success: 90_000,
+        failure: 10_000,
+        calls: 200_000,
         chain_calls: 2,
         input_bytes: 100,
         output_bytes: 200,
@@ -386,6 +386,10 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   expect(statsLines).toContain("Withheld");
   expect(statsLines).toContain("runtime");
   expect(statsLines).toContain("typecheck");
+  expect(statsLines).toContain("100,000 runs");
+  const renderStarted = performance.now();
+  for (let index = 0; index < 100; index += 1) component?.render(100);
+  expect(performance.now() - renderStarted).toBeLessThan(500);
 
   component?.handleInput?.("\t");
   expect((component?.render(90) ?? []).join("\n")).toContain("[Settings]");
