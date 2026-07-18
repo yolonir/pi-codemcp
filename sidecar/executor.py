@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 RESULT_BYTE_LIMIT = 16 * 1024
 SHAPE_FIELD_LIMIT = 20
-INSPECT_SAMPLE_LIMIT = 5
+INSPECT_SAMPLE_LIMIT = 3
 INSPECT_DEPTH_LIMIT = 6
 INSPECT_COLLECTION_LIMIT = 10
 INSPECT_STRING_LIMIT = 200
@@ -401,8 +401,8 @@ class MontyExecutor:
                 raise TypeError("inspect_json samples must be an integer")
             if not isinstance(max_depth, int) or isinstance(max_depth, bool):
                 raise TypeError("inspect_json max_depth must be an integer")
-            if not 0 <= samples <= INSPECT_SAMPLE_LIMIT:
-                raise ValueError(f"inspect_json samples must be from 0 to {INSPECT_SAMPLE_LIMIT}")
+            if not 1 <= samples <= INSPECT_SAMPLE_LIMIT:
+                raise ValueError(f"inspect_json samples must be from 1 to {INSPECT_SAMPLE_LIMIT}")
             if not 1 <= max_depth <= INSPECT_DEPTH_LIMIT:
                 raise ValueError(f"inspect_json max_depth must be from 1 to {INSPECT_DEPTH_LIMIT}")
             return _inspect_json(value, samples=samples, max_depth=max_depth)
@@ -598,6 +598,17 @@ def _inspect_json(value: JsonValue, *, samples: int, max_depth: int) -> JsonObje
         summary["field_sizes"] = [
             {"path": f"$.{key}", "bytes": size} for key, size in ranked_fields[:SHAPE_FIELD_LIMIT]
         ]
+    scalar_types: dict[str, set[str]] = {}
+    _collect_scalar_types(
+        value,
+        path="$",
+        depth=0,
+        max_depth=max_depth,
+        result=scalar_types,
+    )
+    summary["scalar_types"] = JSON_VALUE_ADAPTER.validate_python({
+        path: sorted(types) for path, types in sorted(scalar_types.items())
+    })
     if isinstance(value, list):
         object_items = [item for item in value if isinstance(item, dict)]
         if object_items:
@@ -620,6 +631,41 @@ def _inspect_json(value: JsonValue, *, samples: int, max_depth: int) -> JsonObje
             _bounded_sample(item, depth=0, max_depth=max_depth) for item in raw_samples
         ]
     return summary
+
+
+def _collect_scalar_types(
+    value: JsonValue,
+    *,
+    path: str,
+    depth: int,
+    max_depth: int,
+    result: dict[str, set[str]],
+) -> None:
+    if len(result) >= SHAPE_FIELD_LIMIT:
+        return
+    if depth >= max_depth and isinstance(value, (dict, list)):
+        return
+    if isinstance(value, dict):
+        for key, item in list(value.items())[:INSPECT_COLLECTION_LIMIT]:
+            _collect_scalar_types(
+                item,
+                path=f"{path}.{key}",
+                depth=depth + 1,
+                max_depth=max_depth,
+                result=result,
+            )
+        return
+    if isinstance(value, list):
+        for item in value[:INSPECT_COLLECTION_LIMIT]:
+            _collect_scalar_types(
+                item,
+                path=f"{path}[]",
+                depth=depth + 1,
+                max_depth=max_depth,
+                result=result,
+            )
+        return
+    result.setdefault(path, set()).add(_shape_label(value))
 
 
 def _describe_shape(value: JsonValue, *, depth: int, max_depth: int) -> JsonValue:

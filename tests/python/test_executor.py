@@ -293,6 +293,11 @@ async def test_inspect_json_reports_bounded_runtime_shape_and_samples() -> None:
     assert response.result["type"] == "array[3]"
     assert response.result["cardinality"] == 3
     assert response.result["common_keys"] == ["id", "labels", "message"]
+    assert response.result["scalar_types"] == {
+        "$[].id": ["integer"],
+        "$[].labels.service": ["string"],
+        "$[].message": ["string"],
+    }
     result_samples = response.result["samples"]
     assert isinstance(result_samples, list) and len(result_samples) == 2
     result_first = result_samples[0]
@@ -306,7 +311,8 @@ async def test_inspect_json_reports_bounded_runtime_shape_and_samples() -> None:
 @pytest.mark.parametrize(
     "code, message",
     [
-        ("return inspect_json([], samples=6)", "samples must be from"),
+        ("return inspect_json([], samples=0)", "samples must be from"),
+        ("return inspect_json([], samples=4)", "samples must be from"),
         ("return inspect_json([], max_depth=0)", "max_depth must be from"),
     ],
 )
