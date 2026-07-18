@@ -4,14 +4,11 @@ export interface CodeMcpOutputDetails {
   truncated: boolean;
   outputBytes: number;
   totalBytes: number;
-  outputLines: number;
-  totalLines: number;
   outputTokens: number;
 }
 
 export interface CodeMcpOutputLimits {
   maxBytes?: number;
-  maxLines?: number;
 }
 
 export function formatCodeMcpOutput(
@@ -39,8 +36,6 @@ export function formatCodeMcpOutput(
       truncated,
       outputBytes,
       totalBytes,
-      outputLines: content ? 1 : 0,
-      totalLines: 1,
       outputTokens: Math.ceil(text.length / 4),
     },
   };

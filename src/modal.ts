@@ -209,12 +209,6 @@ const SETTING_DEFINITIONS: SettingDefinition[] = [
     description: "Maximum CodeMCP tool-result text placed into the agent context.",
     choices: [10, 25, 50, 100, 200, 512].map(kibChoice),
   },
-  {
-    key: "outputLineLimit",
-    label: "Agent line limit",
-    description: "Maximum CodeMCP tool-result lines placed into the agent context.",
-    choices: [500, 1_000, 2_000, 5_000, 10_000].map(numberChoice),
-  },
 ];
 
 export async function showServerManagerModal(

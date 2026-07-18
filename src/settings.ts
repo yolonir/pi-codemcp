@@ -9,7 +9,6 @@ export interface CodeMcpSettings {
   maxCalls: number;
   resultLimitKiB: number;
   outputLimitKiB: number;
-  outputLineLimit: number;
   disabledTools: Record<string, string[]>;
 }
 
@@ -24,7 +23,6 @@ export const DEFAULT_CODEMCP_SETTINGS: Readonly<CodeMcpSettings> = {
   maxCalls: 50,
   resultLimitKiB: 16,
   outputLimitKiB: 50,
-  outputLineLimit: 2_000,
   disabledTools: {},
 };
 
@@ -37,36 +35,40 @@ const ALLOWED_KEYS = new Set([
   "maxCalls",
   "resultLimitKiB",
   "outputLimitKiB",
-  "outputLineLimit",
   "disabledTools",
 ]);
 
 export function loadCodeMcpSettings(path: string): CodeMcpSettings {
   if (!existsSync(path)) return cloneDefaults();
   const root = readJsonObject(path, "CodeMCP settings");
-  const unknown = Object.keys(root).filter((key) => !ALLOWED_KEYS.has(key));
+  const version = root.version ?? 1;
+  if (version !== 1 && version !== 2) {
+    throw new Error(`Unsupported CodeMCP settings version: ${String(version)}`);
+  }
+  const migrated =
+    version === 1
+      ? Object.fromEntries(Object.entries(root).filter(([key]) => key !== "outputLineLimit"))
+      : root;
+  const unknown = Object.keys(migrated).filter((key) => !ALLOWED_KEYS.has(key));
   if (unknown.length > 0) {
     throw new Error(`Unknown CodeMCP settings: ${unknown.join(", ")}`);
   }
-  const version = root.version ?? 1;
-  if (version !== 1) throw new Error(`Unsupported CodeMCP settings version: ${String(version)}`);
 
   return {
-    backgroundWarmup: booleanSetting(root, "backgroundWarmup"),
-    cacheTtlHours: integerSetting(root, "cacheTtlHours", 0, 720),
-    executionTimeoutSeconds: integerSetting(root, "executionTimeoutSeconds", 1, 300),
-    toolTimeoutSeconds: integerSetting(root, "toolTimeoutSeconds", 1, 300),
-    maxCalls: integerSetting(root, "maxCalls", 1, 200),
-    resultLimitKiB: integerSetting(root, "resultLimitKiB", 1, 1_024),
-    outputLimitKiB: integerSetting(root, "outputLimitKiB", 1, 1_024),
-    outputLineLimit: integerSetting(root, "outputLineLimit", 1, 10_000),
-    disabledTools: disabledToolSetting(root.disabledTools),
+    backgroundWarmup: booleanSetting(migrated, "backgroundWarmup"),
+    cacheTtlHours: integerSetting(migrated, "cacheTtlHours", 0, 720),
+    executionTimeoutSeconds: integerSetting(migrated, "executionTimeoutSeconds", 1, 300),
+    toolTimeoutSeconds: integerSetting(migrated, "toolTimeoutSeconds", 1, 300),
+    maxCalls: integerSetting(migrated, "maxCalls", 1, 200),
+    resultLimitKiB: integerSetting(migrated, "resultLimitKiB", 1, 1_024),
+    outputLimitKiB: integerSetting(migrated, "outputLimitKiB", 1, 1_024),
+    disabledTools: disabledToolSetting(migrated.disabledTools),
   };
 }
 
 export function saveCodeMcpSettings(path: string, settings: CodeMcpSettings): void {
   writeJsonObjectAtomically(path, {
-    version: 1,
+    version: 2,
     backgroundWarmup: settings.backgroundWarmup,
     cacheTtlHours: settings.cacheTtlHours,
     executionTimeoutSeconds: settings.executionTimeoutSeconds,
@@ -74,7 +76,6 @@ export function saveCodeMcpSettings(path: string, settings: CodeMcpSettings): vo
     maxCalls: settings.maxCalls,
     resultLimitKiB: settings.resultLimitKiB,
     outputLimitKiB: settings.outputLimitKiB,
-    outputLineLimit: settings.outputLineLimit,
     disabledTools: settings.disabledTools,
   });
 }

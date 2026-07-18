@@ -545,12 +545,9 @@ function renderExpandedJson(content: readonly unknown[]): Text {
   return new Text(highlightCode(formatted, "json").join("\n"), 0, 0);
 }
 
-function outputLimits(lifecycle: CodeMcpLifecycle): { maxBytes: number; maxLines: number } {
+function outputLimits(lifecycle: CodeMcpLifecycle): { maxBytes: number } {
   const settings = lifecycle.loadSettings();
-  return {
-    maxBytes: settings.outputLimitKiB * 1024,
-    maxLines: settings.outputLineLimit,
-  };
+  return { maxBytes: settings.outputLimitKiB * 1024 };
 }
 
 function truncate(value: string, maxLength: number): string {
