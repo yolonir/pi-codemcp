@@ -412,6 +412,21 @@ class GatewayRuntime:
         next_cursor = (
             bounded_cursor + len(results) if bounded_cursor + len(results) < total_matches else None
         )
+        include_prelude = detail == "full"
+        if mode == "search" and detail == "signatures" and results:
+            inspected = {
+                item.call: item.stub
+                for item in self.catalog.inspect([
+                    result.call for result in results[: min(3, len(results))]
+                ])
+            }
+            results = [
+                result.model_copy(update={"stub": inspected[result.call]})
+                if result.call in inspected
+                else result
+                for result in results
+            ]
+            include_prelude = True
         return SearchResponse(
             mode=mode,
             detail=detail,
@@ -423,7 +438,7 @@ class GatewayRuntime:
             has_more=next_cursor is not None,
             project_scope_available=self.chain_store.project_store is not None,
             execution_limits=self._execution_limits_view(),
-            prelude=self.catalog.stub_prelude if detail == "full" else None,
+            prelude=self.catalog.stub_prelude if include_prelude else None,
             results=results,
         )
 

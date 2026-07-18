@@ -154,7 +154,7 @@ export function registerCodeMcpTools(
     name: "codemcp_search",
     label: "MCP Search",
     description:
-      "Search configured MCP capabilities or page through compact inventory. Returns names, signatures, ranking evidence, pagination, scope, and execution limits; invalid server names fail with suggestions. Exact stubs are available through codemcp_inspect.",
+      "Search configured MCP capabilities or page through compact inventory. Default signature search includes exact stubs for up to three top matches plus compact alternatives; codemcp_inspect loads other selected stubs. Returns ranking evidence, pagination, scope, and execution limits; invalid server names fail with suggestions.",
     promptSnippet: "Discover compact MCP capabilities or inventory",
     promptGuidelines: [...SEARCH_PROMPT_GUIDELINES],
     parameters: SearchParameters,

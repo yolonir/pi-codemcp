@@ -299,7 +299,10 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
         alpha_pid.unlink()
         beta_pid.unlink()
 
-        assert all("stub" not in item for item in search_data["results"])
+        assert "JsonValue: TypeAlias" in search_data["prelude"]
+        assert "BetaSaveNumberArgs" in search_data["results"][0]["stub"]
+        assert all("stub" in item for item in search_data["results"][:3])
+        assert all("stub" not in item for item in search_data["results"][3:])
         inspected = await client.call_tool("inspect", {"calls": ["alpha.get_number"]})
         inspected_data = structured_data(inspected.structured_content)
         assert "JsonValue: TypeAlias" in inspected_data["prelude"]
