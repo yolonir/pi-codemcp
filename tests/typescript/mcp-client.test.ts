@@ -62,10 +62,8 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     const matches = search.results as Array<{ name: string; signature: string; stub?: string }>;
     expect(matches[0]?.name).toBe("beta_save_number");
     expect(matches[0]?.signature).toContain("BetaSaveNumberArgs");
-    expect(matches[0]).not.toHaveProperty("stub");
-    const inspected = await client.call("inspect", { calls: ["beta.save_number"] });
-    expect(inspected.prelude).toContain("JsonValue: TypeAlias");
-    expect((inspected.results as Array<{ stub: string }>)[0]?.stub).toContain("BetaSaveNumberArgs");
+    expect(matches[0]?.stub).toContain("BetaSaveNumberArgs");
+    expect(search.prelude).toContain("JsonValue: TypeAlias");
     expect(initialStatus).toMatchObject({ connected: true, tool_count: 0 });
     expect(
       await readFile(join(temporary, "pi-codemcp", "runtime", "venv", "pyvenv.cfg"), "utf8"),
@@ -90,7 +88,6 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
       version: 1,
       operations: {
         search: { count: 1, success: 1 },
-        inspect: { count: 1, success: 1 },
         execute: { count: 1, success: 1, calls: 2 },
       },
     });

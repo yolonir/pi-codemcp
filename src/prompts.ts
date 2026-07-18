@@ -1,17 +1,11 @@
 export const SEARCH_PROMPT_GUIDELINES = [
-  "Use search when the exact current SDK signature is missing; reuse a signature already present in context.",
-  "Use capability search for ranked discovery and inventory mode for enumeration, then inspect only selected calls that need exact stubs.",
-] as const;
-
-export const INSPECT_PROMPT_GUIDELINES = [
-  "Inspect only call identifiers selected from search when their exact argument or result types are needed.",
+  "Use codemcp_search before codemcp_execute; every upstream or saved-chain match includes the complete typed SDK stub needed to write the execution.",
 ] as const;
 
 export const EXECUTE_PROMPT_GUIDELINES = [
-  "Use programmatic execution for a bounded workflow when code can deterministically filter, join, aggregate, deduplicate, validate, or reduce intermediate results.",
-  "Keep a model turn between calls when an intermediate result changes the semantic decision or user approval is required.",
-  "Return the smallest result that answers the request; oversized results fail explicitly with bounded structural inspection data.",
-  "Sandbox modules are not preloaded; import an allowed module before referencing it.",
+  "Use codemcp_execute if you know tool schemas; call the returned server.method facade and use top-level return for the compact final value.",
+  "It is always better to execute multiple MCP calls in one codemcp_execute call rather than multiple single-call invocations.",
+  "You can compose upstream SDK calls and saved chains.* calls, running independent work with asyncio.gather or dependent work sequentially.",
 ] as const;
 
 export const SAVE_CHAIN_PROMPT_GUIDELINES = [

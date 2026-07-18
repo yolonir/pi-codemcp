@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import httpx
@@ -211,7 +210,7 @@ def test_catalog_namespaces_single_server_and_searches_compactly() -> None:
 
     assert list(catalog.tools) == ["linear_get_issue"]
     assert catalog.tools["linear_get_issue"].backend_name == "get_issue"
-    matches = catalog.search("work id", detail="full")
+    matches = catalog.search("work id")
     assert [match.name for match in matches] == ["linear_get_issue"]
     assert matches[0].call == "linear.get_issue"
     assert matches[0].signature.startswith("await linear.get_issue(")
@@ -507,8 +506,6 @@ def test_catalog_search_replay_queries_have_complete_top_five_recall(
         names = {match.name for match in matches}
         assert expected <= names, query
         assert all(match.server == "grafana" for match in matches), query
-        assert all(match.score is not None for match in matches)
-        assert all(match.matched_fields for match in matches)
 
 
 def test_catalog_search_sanitized_replay_top_three_recall_exceeds_target(
@@ -548,29 +545,6 @@ def test_catalog_search_sanitized_replay_top_three_recall_exceeds_target(
     assert zero_results == 0
 
 
-def test_progressive_discovery_reduces_repeated_schema_payload_by_sixty_percent(
-    representative_search_catalog: ToolCatalog,
-) -> None:
-    query = "dashboard metrics query"
-    full = representative_search_catalog.search(query, limit=5, detail="full")
-    compact = representative_search_catalog.search(query, limit=5, detail="signatures")
-    old_results = []
-    for match in full:
-        serialized = match.model_dump(mode="json")
-        serialized["stub"] = (
-            f"{representative_search_catalog.stub_prelude}\n\n{match.stub}"
-        )
-        old_results.append(serialized)
-    old_search = {"results": old_results}
-    progressive_search = {
-        "results": [match.model_dump(mode="json") for match in compact],
-    }
-    old_payload = 2 * len(json.dumps(old_search))
-    progressive_payload = 2 * len(json.dumps(progressive_search))
-
-    assert progressive_payload <= old_payload * 0.4
-
-
 def test_catalog_search_normalizes_queries_and_retrieves_exact_identifiers(
     representative_search_catalog: ToolCatalog,
 ) -> None:
@@ -605,30 +579,17 @@ def test_catalog_search_prefilters_server_candidates_exactly(
     assert all(not match.name.startswith("linear_") for match in matches)
 
 
-def test_catalog_progressively_discloses_and_paginates_inventory(
+def test_catalog_search_returns_full_stubs(
     representative_search_catalog: ToolCatalog,
 ) -> None:
-    names = representative_search_catalog.inventory(detail="names", limit=2)
-    assert len(names) == 2
-    assert all(match.signature is None and match.stub is None for match in names)
+    matches = representative_search_catalog.search("dashboard query", limit=2)
 
-    signatures = representative_search_catalog.search(
-        "dashboard query", detail="signatures", limit=2
+    assert len(matches) == 2
+    assert all(
+        match.signature and match.stub and "Args" in match.stub for match in matches
     )
-    assert all(match.signature and match.stub is None for match in signatures)
-
-    calls = [match.call for match in signatures]
-    inspected = representative_search_catalog.inspect(calls)
-    assert [match.call for match in inspected] == calls
-    assert all(match.stub and "Args" in match.stub for match in inspected)
     assert "JsonValue: TypeAlias" in representative_search_catalog.stub_prelude
-    assert "JsonValue: TypeAlias" not in inspected[0].stub
-
-    first_page = representative_search_catalog.inventory(limit=3, offset=0)
-    second_page = representative_search_catalog.inventory(limit=3, offset=3)
-    assert {match.call for match in first_page}.isdisjoint(
-        match.call for match in second_page
-    )
+    assert "JsonValue: TypeAlias" not in matches[0].stub
 
 
 def test_catalog_selective_type_stubs_include_only_referenced_facades(
@@ -674,13 +635,6 @@ def test_selective_type_stubs_remain_small_with_260_tools() -> None:
     assert "async def tool_136" not in selected
     assert "async def tool_138" not in selected
     assert len(selected) < len(large_catalog.type_stubs) * 0.02
-
-
-def test_catalog_inspect_rejects_unknown_calls_with_suggestions(
-    representative_search_catalog: ToolCatalog,
-) -> None:
-    with pytest.raises(ValueError, match="suggestions"):
-        representative_search_catalog.inspect(["grafana.get_dashbord_summary"])
 
 
 def test_catalog_search_indexes_input_property_names_in_isolation() -> None:

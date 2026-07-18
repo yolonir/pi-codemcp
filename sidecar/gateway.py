@@ -33,10 +33,7 @@ from .executor import ExecutionContext, ExecutionResponse, MontyExecutor
 from .mcp_config import NormalizedConfig, load_mcp_json, normalize_mcp_config
 from .models import (
     ExecutionLimitsView,
-    InspectResponse,
     NormalizedServerInfo,
-    SearchDetail,
-    SearchMode,
     SearchResponse,
     ServerToolSummary,
     StatusResponse,
@@ -54,7 +51,6 @@ if TYPE_CHECKING:
     from mcp import types as mcp_types
 
 DEFAULT_AGENT_DIR = Path.home() / ".pi" / "agent"
-MAX_INSPECT_CALLS = 20
 CODEMCP_AGENT_DIR_ENV = "PI_CODEMCP_AGENT_DIR"
 CODEMCP_PROJECT_CHAINS_DIR_ENV = "PI_CODEMCP_PROJECT_CHAINS_DIR"
 PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR"
@@ -320,26 +316,14 @@ class GatewayRuntime:
 
     async def search(
         self,
-        query: str | None = None,
+        query: str,
         limit: int = 5,
         server: str | None = None,
-        detail: SearchDetail = "signatures",
-        mode: SearchMode = "search",
-        cursor: int = 0,
     ) -> SearchResponse:
         started = time.perf_counter()
-        input_bytes = len(
-            to_json({
-                "query": query,
-                "limit": limit,
-                "server": server,
-                "detail": detail,
-                "mode": mode,
-                "cursor": cursor,
-            })
-        )
+        input_bytes = len(to_json({"query": query, "limit": limit, "server": server}))
         try:
-            response = await self._search_impl(query, limit, server, detail, mode, cursor)
+            response = await self._search_impl(query, limit, server)
         except BaseException:
             self.stats_store.record_operation(
                 "search",
@@ -360,19 +344,18 @@ class GatewayRuntime:
 
     async def _search_impl(
         self,
-        query: str | None,
+        query: str,
         limit: int,
         server: str | None,
-        detail: SearchDetail,
-        mode: SearchMode,
-        cursor: int,
     ) -> SearchResponse:
         discovery_started = time.perf_counter()
         await self._ensure_catalog_complete()
         self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
         self._validate_search_server(server)
+        clean_query = query.strip()
+        if not clean_query:
+            raise ValueError("query is required")
         bounded_limit = min(max(limit, 1), 20)
-        bounded_cursor = max(cursor, 0)
         counts = self.catalog.counts_by_server()
         servers = [
             ServerToolSummary(name=server_info.name, tool_count=counts[server_info.name])
@@ -381,80 +364,17 @@ class GatewayRuntime:
         ]
         if counts.get("chains", 0) > 0:
             servers.append(ServerToolSummary(name="chains", tool_count=counts["chains"]))
-        filtered_count = counts.get(server, 0) if server is not None else len(self.catalog.tools)
-        if mode == "inventory":
-            results = self.catalog.inventory(
-                server=server,
-                detail=detail,
-                offset=bounded_cursor,
-                limit=bounded_limit,
-            )
-            total_matches = filtered_count
-        else:
-            clean_query = (query or "").strip()
-            if not clean_query:
-                raise ValueError("query is required in search mode")
-            all_matches = self.catalog.search(
-                clean_query,
-                filtered_count,
-                server=server,
-                detail=detail,
-            )
-            total_matches = len(all_matches)
-            results = all_matches[bounded_cursor : bounded_cursor + bounded_limit]
-        next_cursor = (
-            bounded_cursor + len(results) if bounded_cursor + len(results) < total_matches else None
-        )
         return SearchResponse(
-            mode=mode,
-            detail=detail,
             total_tool_count=len(self.catalog.tools),
-            filtered_tool_count=filtered_count,
             servers=servers,
-            cursor=bounded_cursor,
-            next_cursor=next_cursor,
-            has_more=next_cursor is not None,
             project_scope_available=self.chain_store.project_store is not None,
             execution_limits=self._execution_limits_view(),
-            prelude=self.catalog.stub_prelude if detail == "full" else None,
-            results=results,
-        )
-
-    async def inspect(self, calls: list[str]) -> InspectResponse:
-        started = time.perf_counter()
-        try:
-            response = await self._inspect_impl(calls)
-        except BaseException:
-            self.stats_store.record_operation(
-                "inspect",
-                duration_ms=_elapsed_ms(started),
-                success=False,
-                failure_stage="error",
-                input_bytes=len(to_json(calls)),
-            )
-            raise
-        self.stats_store.record_operation(
-            "inspect",
-            duration_ms=_elapsed_ms(started),
-            success=True,
-            input_bytes=len(to_json(calls)),
-            output_bytes=len(to_json(response.model_dump(mode="json"))),
-        )
-        return response
-
-    async def _inspect_impl(self, calls: list[str]) -> InspectResponse:
-        discovery_started = time.perf_counter()
-        await self._ensure_catalog_complete()
-        self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
-        if not calls:
-            raise ValueError("calls must contain at least one MCP call")
-        if len(calls) > MAX_INSPECT_CALLS:
-            raise ValueError(f"calls must contain at most {MAX_INSPECT_CALLS} MCP calls")
-        return InspectResponse(
             prelude=self.catalog.stub_prelude,
-            project_scope_available=self.chain_store.project_store is not None,
-            execution_limits=self._execution_limits_view(),
-            results=self.catalog.inspect(calls),
+            results=self.catalog.search(
+                clean_query,
+                bounded_limit,
+                server=server,
+            ),
         )
 
     def _validate_search_server(self, server: str | None) -> None:
@@ -1135,21 +1055,12 @@ mcp = FastMCP(
 
 @mcp.tool
 async def search(
-    query: str | None = None,
+    query: str,
     limit: int = 5,
     server: str | None = None,
-    detail: SearchDetail = "signatures",
-    mode: SearchMode = "search",
-    cursor: int = 0,
 ) -> SearchResponse:
-    """Search or page through configured upstream MCP tools and saved chains."""
-    return await _require_runtime().search(query, limit, server, detail, mode, cursor)
-
-
-@mcp.tool
-async def inspect(calls: list[str]) -> InspectResponse:
-    """Return exact typed SDK stubs for selected call identifiers."""
-    return await _require_runtime().inspect(calls)
+    """Search configured upstream MCP tools and saved chains with exact stubs."""
+    return await _require_runtime().search(query, limit, server)
 
 
 @mcp.tool

@@ -6,8 +6,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 type ServerTransport = Literal["stdio", "http", "sse"]
 type ServerAuth = Literal["oauth", "bearer"]
-type SearchDetail = Literal["names", "signatures", "full"]
-type SearchMode = Literal["search", "inventory"]
 
 
 class NormalizedServerInfo(BaseModel):
@@ -29,10 +27,8 @@ class ToolSchemaView(BaseModel):
     source: Literal["mcp_tool", "saved_chain"]
     server: str | None = None
     description: str | None = None
-    signature: str | None = None
-    stub: str | None = None
-    score: float | None = None
-    matched_fields: list[str] = Field(default_factory=list)
+    signature: str
+    stub: str
 
     @model_serializer(mode="plain")
     def serialize_compact(self) -> dict[str, object]:
@@ -45,14 +41,8 @@ class ToolSchemaView(BaseModel):
             values["server"] = self.server
         if self.description is not None:
             values["description"] = self.description
-        if self.signature is not None:
-            values["signature"] = self.signature
-        if self.stub is not None:
-            values["stub"] = self.stub
-        if self.score is not None:
-            values["score"] = round(self.score, 2)
-        if self.matched_fields:
-            values["matched_fields"] = self.matched_fields
+        values["signature"] = self.signature
+        values["stub"] = self.stub
         return values
 
 
@@ -75,26 +65,11 @@ class ExecutionLimitsView(BaseModel):
 class SearchResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    mode: SearchMode
-    detail: SearchDetail
     total_tool_count: int
-    filtered_tool_count: int
     servers: list[ServerToolSummary]
-    cursor: int
-    next_cursor: int | None = None
-    has_more: bool = False
     project_scope_available: bool
     execution_limits: ExecutionLimitsView
-    prelude: str | None = None
-    results: list[ToolSchemaView]
-
-
-class InspectResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
     prelude: str
-    project_scope_available: bool
-    execution_limits: ExecutionLimitsView
     results: list[ToolSchemaView]
 
 

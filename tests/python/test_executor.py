@@ -372,6 +372,28 @@ async def test_cancellation_propagates_without_retry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_asyncio_gather_example_uses_predeclared_sdk_facade() -> None:
+    async def call(_: str, arguments: JsonObject) -> JsonValue:
+        return {"value": len(str(arguments["id"]))}
+
+    response = await MontyExecutor(catalog()).execute(
+        """
+        import asyncio
+        first, second = await asyncio.gather(
+            alpha.get({"id": "one"}),
+            alpha.get({"id": "three"}),
+        )
+        return {"total": first["value"] + second["value"]}
+        """,
+        call,
+    )
+
+    assert response.ok is True
+    assert response.result == {"total": 8}
+    assert response.calls_made == 2
+
+
+@pytest.mark.asyncio
 async def test_loops_conditions_and_per_session_serialization() -> None:
     active = 0
     max_active = 0
