@@ -17,6 +17,7 @@ import {
   type ServerModalState,
   serverStatesFromStatus,
   showServerManagerModal,
+  statsStateFromSnapshot,
 } from "../src/modal.js";
 import { type CodeMcpSettings, saveCodeMcpSettings } from "../src/settings.js";
 import { registerCodeMcpTools } from "../src/tools.js";
@@ -32,10 +33,11 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
       handler: async (_args, ctx) => {
         try {
           bindProjectChainScope(ctx, lifecycle, chains);
-          const [status, savedChains, settings] = await Promise.all([
+          const [status, savedChains, settings, stats] = await Promise.all([
             lifecycle.request("status", {}),
             chains.list(),
             Promise.resolve(lifecycle.loadSettings()),
+            lifecycle.request("stats", {}),
           ]);
           const servers = serverStatesFromStatus(status);
           if (ctx.mode !== "tui") {
@@ -47,6 +49,7 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
             servers,
             chains: chainStatesFromViews(savedChains),
             settings,
+            stats: statsStateFromSnapshot(stats),
             onDiscover: async (server) =>
               requireServerStatus(
                 await lifecycle.request("discover", { server: server.name }),

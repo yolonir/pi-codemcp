@@ -204,6 +204,7 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
             "execute_chain",
             "revalidate_chain",
             "delete_chain",
+            "stats",
             "status",
         }
 

@@ -4,6 +4,7 @@ import ast
 import asyncio
 import hashlib
 import textwrap
+import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
@@ -36,6 +37,15 @@ CHAIN_INPUT_EXTERNAL = "__codemcp_saved_chain_input"
 INSPECT_JSON_EXTERNAL = "__codemcp_inspect_json"
 
 
+class ExecutionMetrics(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    typecheck_ms: float = Field(default=0.0, ge=0)
+    runtime_ms: float = Field(default=0.0, ge=0)
+    serialization_ms: float = Field(default=0.0, ge=0)
+    result_bytes: int = Field(default=0, ge=0)
+
+
 class ExecutionContext:
     def __init__(
         self,
@@ -50,6 +60,7 @@ class ExecutionContext:
         self.deadline = deadline
         self.calls_made = 0
         self.chain_calls = 0
+        self.metrics = ExecutionMetrics()
         self.chain_stack: ContextVar[tuple[str, ...]] = ContextVar(
             "codemcp_chain_stack",
             default=(),
@@ -81,6 +92,7 @@ class ExecutionResponse(BaseModel):
     shape: JsonObject | None = None
     calls_made: int = Field(default=0, ge=0)
     chain_calls: int = Field(default=0, ge=0)
+    metrics: ExecutionMetrics = Field(default_factory=ExecutionMetrics, exclude=True)
 
     @classmethod
     def success(
@@ -314,22 +326,27 @@ class MontyExecutor:
             if input_type is not None
             else context.catalog.type_stubs
         )
+        typecheck_started = time.perf_counter()
         try:
             await self._type_check(typed_code, context.catalog, type_stubs)
         except pydantic_monty.MontyTypingError as error:
+            context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
             return self._failure(
                 context,
                 "preflight",
                 error.display("concise", color=False).strip(),
             )
         except pydantic_monty.MontySyntaxError as error:
+            context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
             return self._failure(context, "preflight", error.display("type-msg").strip())
         except RuntimeError as error:
+            context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
             return self._failure(
                 context,
                 "preflight",
                 f"Type-check setup failed: {error}",
             )
+        context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
 
         runtime_wrapped = _wrap_code(code, typed=False, has_input=has_input)
         runtime_code = _rewrite_sdk_calls(runtime_wrapped, context.catalog)
@@ -418,6 +435,7 @@ class MontyExecutor:
             "max_duration_secs": remaining,
             "max_memory": context.settings.max_memory_bytes,
         }
+        runtime_started = time.perf_counter()
         try:
             async with asyncio.timeout(remaining + 0.1):
                 result = JSON_VALUE_ADAPTER.validate_python(
@@ -429,18 +447,21 @@ class MontyExecutor:
         except asyncio.CancelledError:
             raise
         except TimeoutError:
+            context.metrics.runtime_ms += _elapsed_ms(runtime_started)
             return self._failure(
                 context,
                 "timeout",
                 f"Execution timed out after {context.settings.timeout_seconds:g}s",
             )
         except ValidationError as error:
+            context.metrics.runtime_ms += _elapsed_ms(runtime_started)
             return self._failure(
                 context,
                 "result",
                 f"Returned value is not JSON-compatible: {error.errors()[0]['msg']}",
             )
         except pydantic_monty.MontyRuntimeError as error:
+            context.metrics.runtime_ms += _elapsed_ms(runtime_started)
             message = error.display("type-msg").strip()
             lowered = message.lower()
             stage: Literal["runtime", "timeout"] = (
@@ -449,6 +470,7 @@ class MontyExecutor:
                 else "runtime"
             )
             return self._failure(context, stage, message)
+        context.metrics.runtime_ms += _elapsed_ms(runtime_started)
 
         if output_spec_name is not None:
             try:
@@ -460,24 +482,30 @@ class MontyExecutor:
                     f"Saved chain result violates its output schema: {error}",
                 )
 
-        if enforce_result_limit:
-            result_bytes = len(to_json(result))
-            if result_bytes >= context.settings.result_byte_limit:
-                return ExecutionResponse.failure(
-                    failure_stage="result",
-                    error=(
-                        f"Returned value is {result_bytes} bytes; reduce it below "
-                        f"{context.settings.result_byte_limit} bytes"
-                    ),
-                    shape=_inspect_json(result, samples=2, max_depth=3),
-                    calls_made=context.calls_made,
-                    chain_calls=context.chain_calls,
-                )
-        return ExecutionResponse.success(
+        serialization_started = time.perf_counter()
+        result_bytes = len(to_json(result))
+        context.metrics.serialization_ms += _elapsed_ms(serialization_started)
+        context.metrics.result_bytes = result_bytes
+        if enforce_result_limit and result_bytes >= context.settings.result_byte_limit:
+            response = ExecutionResponse.failure(
+                failure_stage="result",
+                error=(
+                    f"Returned value is {result_bytes} bytes; reduce it below "
+                    f"{context.settings.result_byte_limit} bytes"
+                ),
+                shape=_inspect_json(result, samples=2, max_depth=3),
+                calls_made=context.calls_made,
+                chain_calls=context.chain_calls,
+            )
+            response.metrics = context.metrics.model_copy()
+            return response
+        response = ExecutionResponse.success(
             result=result,
             calls_made=context.calls_made,
             chain_calls=context.chain_calls,
         )
+        response.metrics = context.metrics.model_copy()
+        return response
 
     async def _type_check(
         self,
@@ -511,12 +539,18 @@ class MontyExecutor:
         stage: Literal["preflight", "runtime", "timeout", "cancelled", "result"],
         error: str,
     ) -> ExecutionResponse:
-        return ExecutionResponse.failure(
+        response = ExecutionResponse.failure(
             failure_stage=stage,
             error=error,
             calls_made=context.calls_made,
             chain_calls=context.chain_calls,
         )
+        response.metrics = context.metrics.model_copy()
+        return response
+
+
+def _elapsed_ms(started: float) -> float:
+    return (time.perf_counter() - started) * 1_000
 
 
 def _chain_type_stubs(catalog: ToolCatalog, _input_type: str) -> str:

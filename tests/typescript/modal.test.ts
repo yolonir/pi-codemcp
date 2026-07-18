@@ -8,6 +8,7 @@ import {
   type ServerModalState,
   serverStatesFromStatus,
   showServerManagerModal,
+  statsStateFromSnapshot,
 } from "../../src/modal.js";
 import { type CodeMcpSettings, DEFAULT_CODEMCP_SETTINGS } from "../../src/settings.js";
 
@@ -90,7 +91,50 @@ test("server status parser preserves server and tool policy state", () => {
   ]);
 });
 
-test("server manager renders split tabs, discovers, and toggles", async () => {
+test("stats parser converts bounded rollups for the modal", () => {
+  expect(
+    statsStateFromSnapshot({
+      updated_at: 100,
+      lifetime: {
+        count: 5,
+        success: 4,
+        failure: 1,
+        input_bytes: 100,
+        output_bytes: 200,
+        calls: 8,
+        chain_calls: 2,
+        duration_ms: { average: 12.5, max: 30 },
+      },
+      recent: [
+        {
+          count: 2,
+          success: 2,
+          failure: 0,
+          duration_ms: { average: 10, max: 15 },
+        },
+      ],
+      operations: {
+        execute: { count: 5, success: 4, failure: 1, duration_ms: { average: 12.5, max: 30 } },
+      },
+      phases: { typecheck: { count: 5, average: 4, max: 9 } },
+      servers: { grafana: {} },
+      tools: { "grafana.query": {} },
+      cache: { hits: 3, misses: 1 },
+    }),
+  ).toMatchObject({
+    updatedAt: 100,
+    lifetime: { count: 5, success: 4, failure: 1, calls: 8, chainCalls: 2 },
+    recent: { count: 2, success: 2 },
+    operations: [{ name: "execute", rollup: { count: 5 } }],
+    phases: [{ name: "typecheck", count: 5, averageMs: 4, maxMs: 9 }],
+    cacheHits: 3,
+    cacheMisses: 1,
+    serverCount: 1,
+    toolCount: 1,
+  });
+});
+
+test("server manager renders split tabs, stats, discovers, and toggles", async () => {
   const servers: ServerModalState[] = [
     {
       name: "grafana",
@@ -161,6 +205,24 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
     servers,
     chains,
     settings: { ...DEFAULT_CODEMCP_SETTINGS, disabledTools: {} },
+    stats: statsStateFromSnapshot({
+      updated_at: 100,
+      lifetime: {
+        count: 5,
+        success: 4,
+        failure: 1,
+        calls: 8,
+        chain_calls: 2,
+        input_bytes: 100,
+        output_bytes: 200,
+        duration_ms: { average: 12.5, max: 30 },
+      },
+      operations: {
+        execute: { count: 5, success: 4, failure: 1, duration_ms: { average: 12.5, max: 30 } },
+      },
+      phases: { typecheck: { count: 5, average: 4, max: 9 } },
+      cache: { hits: 3, misses: 1 },
+    }),
     async onDiscover(server) {
       discoveries.push(server.name);
       return {
@@ -279,6 +341,13 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   expect((component?.render(120) ?? []).join("\n")).toContain(
     "Save this chain change before revalidation",
   );
+
+  component?.handleInput?.("\t");
+  const statsLines = renderWithRows(component, 100, 60).join("\n");
+  expect(statsLines).toContain("[Stats]");
+  expect(statsLines).toContain("LOCAL TELEMETRY");
+  expect(statsLines).toContain("execute");
+  expect(statsLines).toContain("typecheck");
 
   component?.handleInput?.("\t");
   expect((component?.render(90) ?? []).join("\n")).toContain("[Settings]");

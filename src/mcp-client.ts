@@ -29,6 +29,7 @@ export type SidecarToolName =
   | "execute_chain"
   | "revalidate_chain"
   | "delete_chain"
+  | "stats"
   | "status";
 
 const LONG_RUNNING_TOOLS = new Set<SidecarToolName>([

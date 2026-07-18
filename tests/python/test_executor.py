@@ -113,6 +113,11 @@ async def test_valid_three_call_cross_server_chain_and_mutation() -> None:
     assert response.ok is True
     assert response.result == {"saved": True, "issue": "LIN-1"}
     assert response.calls_made == 3
+    assert response.metrics.typecheck_ms >= 0
+    assert response.metrics.runtime_ms > 0
+    assert response.metrics.serialization_ms >= 0
+    assert response.metrics.result_bytes > 0
+    assert "metrics" not in response.model_dump(mode="json")
     assert [name for name, _ in seen] == [
         "alpha_get",
         "beta_put",

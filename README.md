@@ -41,6 +41,7 @@ pi-codemcp is deliberately opinionated about operational quality:
 - Time, memory, call count, and output size are bounded.
 - Failures are explicit; there are no silent retries or compatibility fallbacks.
 - Tool output is compact by default and expands with Pi's normal `Ctrl+O` UI.
+- Bounded local telemetry uses fixed rollups rather than session event logs and appears in the `/codemcp` Stats tab.
 
 There is always room to make it faster and more reliable. If something is not working well, please report it rather than silently giving up on the extension.
 
@@ -96,7 +97,7 @@ Incomplete upstream schemas become recursive `JsonValue`, not `Any`; unknown val
 
 FastMCP owns MCP transports, runtime validation, and OAuth. [Pydantic Monty](https://github.com/pydantic/monty) type-checks and executes agent-written Python without host filesystem, environment, network, or subprocess access.
 
-`/codemcp` configures servers, saved chains, per-tool policy, timeouts, call limits, output limits, cache TTL, and warmup. Server, chain, tool-policy, and setting toggles stay local and instantaneous until one `Ctrl+S` batch save/reload. Discovery, revalidation, and deletion remain explicit immediate actions. The sandbox also has a fixed memory ceiling; executions are serialized per Pi session. There are no automatic retries or cross-service rollback.
+`/codemcp` configures servers, saved chains, per-tool policy, timeouts, call limits, output limits, cache TTL, and warmup, and shows bounded lifetime/recent telemetry in its Stats tab. Server, chain, tool-policy, and setting toggles stay local and instantaneous until one `Ctrl+S` batch save/reload. Discovery, revalidation, and deletion remain explicit immediate actions. The sandbox also has a fixed memory ceiling; executions are serialized per Pi session. There are no automatic retries or cross-service rollback.
 
 Enabled tools retain their upstream permissions. Saved chains never bypass server or per-tool policy and are checked against the current enabled catalog whenever they run.
 

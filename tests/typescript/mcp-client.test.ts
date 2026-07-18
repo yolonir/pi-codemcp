@@ -85,6 +85,16 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     });
     expect(execution).not.toHaveProperty("stage");
 
+    const stats = await client.call("stats", {});
+    expect(stats).toMatchObject({
+      version: 1,
+      operations: {
+        search: { count: 1, success: 1 },
+        inspect: { count: 1, success: 1 },
+        execute: { count: 1, success: 1, calls: 2 },
+      },
+    });
+
     const savedChain = await client.call("save_chain", {
       scope: "project",
       name: "increment",
