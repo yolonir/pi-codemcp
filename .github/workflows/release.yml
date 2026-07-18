@@ -30,7 +30,7 @@ jobs:
     steps:
       - name: Update release pull request or create release
         id: release
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@v5
         with:
           target-branch: main
           config-file: release-please-config.json
@@ -58,12 +58,12 @@ jobs:
 
     steps:
       - name: Check out release tag
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.release_please.outputs.tag_name }}
 
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22.19.0
           registry-url: https://registry.npmjs.org
@@ -84,7 +84,7 @@ jobs:
           cache-dependency-glob: sidecar/uv.lock
 
       - name: Install just
-        uses: extractions/setup-just@v3
+        uses: extractions/setup-just@v4
 
       - name: Install Python
         run: uv python install 3.13

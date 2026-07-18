@@ -21,7 +21,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
@@ -36,7 +36,7 @@ jobs:
           cache-dependency-glob: sidecar/uv.lock
 
       - name: Install just
-        uses: extractions/setup-just@v3
+        uses: extractions/setup-just@v4
 
       - name: Install Python
         run: uv python install 3.13
@@ -45,7 +45,7 @@ jobs:
         run: just sync
 
       - name: Run repository hygiene hooks
-        uses: j178/prek-action@v2.0.1
+        uses: j178/prek-action@v2.0.5
         env:
           # CI validates pushed main commits; quality streams in the next step.
           SKIP: no-commit-to-branch,quality
@@ -66,10 +66,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22.19.0
 
@@ -79,7 +79,7 @@ jobs:
           bun-version: 1.3.10
 
       - name: Install just
-        uses: extractions/setup-just@v3
+        uses: extractions/setup-just@v4
 
       - name: Sync TypeScript environment
         run: just sync-typescript
