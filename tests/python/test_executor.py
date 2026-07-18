@@ -241,20 +241,20 @@ async def test_oversized_result_fails_with_shape_without_retry() -> None:
     async def call(_: str, __: JsonObject) -> JsonValue:
         nonlocal calls
         calls += 1
-        return {"summary": {"title": "large"}, "panels": ["x" * 100]}
+        return {"summary": {"title": "large"}, "panels": ["x" * 2_000]}
 
     response = await MontyExecutor(
-        catalog(), settings=ExecutionSettings(result_byte_limit=64)
+        catalog(), settings=ExecutionSettings(result_byte_limit=1_024)
     ).execute("return await alpha.dynamic({})", call)
 
     assert response.ok is False
     assert response.failure_stage == "result"
-    assert response.error and "reduce it below 64 bytes" in response.error
+    assert response.error and "reduce it below 1024 bytes" in response.error
     shape = response.shape
     assert shape is not None
     assert shape["type"] == "object"
     serialized_bytes = shape["serialized_bytes"]
-    assert isinstance(serialized_bytes, int) and serialized_bytes > 64
+    assert isinstance(serialized_bytes, int) and serialized_bytes > 1_024
     assert shape["cardinality"] == 2
     assert shape["shape"] == {
         "summary": {"title": "string"},
@@ -269,8 +269,29 @@ async def test_oversized_result_fails_with_shape_without_retry() -> None:
     first_sample = samples[0]
     assert isinstance(first_sample, dict)
     panels = first_sample["panels"]
-    assert isinstance(panels, list) and panels[0] == "x" * 100
+    assert isinstance(panels, list)
+    assert isinstance(panels[0], str) and panels[0].endswith("…")
+    assert len(response.model_dump_json().encode()) < 1_024
     assert response.calls_made == calls == 1
+
+
+@pytest.mark.asyncio
+async def test_oversized_diagnostic_truncates_unbounded_json_keys() -> None:
+    huge_key = "k" * 100_000
+
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        return {huge_key: 1}
+
+    response = await MontyExecutor(
+        catalog(), settings=ExecutionSettings(result_byte_limit=1_024)
+    ).execute("return await alpha.dynamic({})", call)
+
+    assert response.ok is False
+    assert response.failure_stage == "result"
+    assert response.shape is not None
+    assert response.shape["truncated"] is True
+    assert huge_key not in response.model_dump_json()
+    assert len(response.model_dump_json().encode()) < 1_024
 
 
 @pytest.mark.asyncio

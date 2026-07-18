@@ -3,11 +3,13 @@ from __future__ import annotations
 import ast
 import asyncio
 import hashlib
+import heapq
 import textwrap
 import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
+from itertools import islice
 from typing import TYPE_CHECKING, Literal, Self
 
 import pydantic_monty
@@ -34,6 +36,8 @@ INSPECT_SAMPLE_LIMIT = 3
 INSPECT_DEPTH_LIMIT = 6
 INSPECT_COLLECTION_LIMIT = 10
 INSPECT_STRING_LIMIT = 200
+INSPECT_KEY_LIMIT = 120
+INSPECT_BYTE_LIMIT = 8 * 1024
 CHAIN_INPUT_EXTERNAL = "__codemcp_saved_chain_input"
 INSPECT_JSON_EXTERNAL = "__codemcp_inspect_json"
 
@@ -411,7 +415,12 @@ class MontyExecutor:
                 raise ValueError(f"inspect_json samples must be from 1 to {INSPECT_SAMPLE_LIMIT}")
             if not 1 <= max_depth <= INSPECT_DEPTH_LIMIT:
                 raise ValueError(f"inspect_json max_depth must be from 1 to {INSPECT_DEPTH_LIMIT}")
-            return _inspect_json(value, samples=samples, max_depth=max_depth)
+            return _inspect_json(
+                value,
+                samples=samples,
+                max_depth=max_depth,
+                byte_limit=_inspection_byte_limit(context.settings.result_byte_limit),
+            )
 
         external_functions[INSPECT_JSON_EXTERNAL] = inspect_json_external
         for spec in context.catalog.tools.values():
@@ -502,7 +511,12 @@ class MontyExecutor:
                     f"Returned value is {result_bytes} bytes; reduce it below "
                     f"{context.settings.result_byte_limit} bytes"
                 ),
-                shape=_inspect_json(result, samples=2, max_depth=3),
+                shape=_inspect_json(
+                    result,
+                    samples=2,
+                    max_depth=3,
+                    byte_limit=_inspection_byte_limit(context.settings.result_byte_limit),
+                ),
                 calls_made=context.calls_made,
                 chain_calls=context.chain_calls,
             )
@@ -586,7 +600,17 @@ def _elapsed_ms(started: float) -> float:
     return (time.perf_counter() - started) * 1_000
 
 
-def _inspect_json(value: JsonValue, *, samples: int, max_depth: int) -> JsonObject:
+def _inspection_byte_limit(result_byte_limit: int) -> int:
+    return max(256, min(INSPECT_BYTE_LIMIT, result_byte_limit * 3 // 4))
+
+
+def _inspect_json(
+    value: JsonValue,
+    *,
+    samples: int,
+    max_depth: int,
+    byte_limit: int,
+) -> JsonObject:
     summary: JsonObject = {
         "type": _shape_label(value),
         "serialized_bytes": len(to_json(value)),
@@ -597,12 +621,14 @@ def _inspect_json(value: JsonValue, *, samples: int, max_depth: int) -> JsonObje
     if cardinality is not None:
         summary["cardinality"] = cardinality
     if isinstance(value, dict):
-        ranked_fields = sorted(
+        ranked_fields = heapq.nsmallest(
+            SHAPE_FIELD_LIMIT,
             ((str(key), len(to_json(item))) for key, item in value.items()),
             key=lambda item: (-item[1], item[0]),
         )
         summary["field_sizes"] = [
-            {"path": f"$.{key}", "bytes": size} for key, size in ranked_fields[:SHAPE_FIELD_LIMIT]
+            {"path": f"$.{_bounded_key(key, index)}", "bytes": size}
+            for index, (key, size) in enumerate(ranked_fields)
         ]
     scalar_types: dict[str, set[str]] = {}
     _collect_scalar_types(
@@ -616,27 +642,61 @@ def _inspect_json(value: JsonValue, *, samples: int, max_depth: int) -> JsonObje
         path: sorted(types) for path, types in sorted(scalar_types.items())
     })
     if isinstance(value, list):
-        object_items = [item for item in value if isinstance(item, dict)]
+        sampled_items = list(islice(value, INSPECT_COLLECTION_LIMIT))
+        object_items = [item for item in sampled_items if isinstance(item, dict)]
         if object_items:
-            key_counts = Counter(key for item in object_items for key in item)
+            key_counts = Counter(
+                str(key) for item in object_items for key in islice(item, SHAPE_FIELD_LIMIT)
+            )
             summary["common_keys"] = JSON_VALUE_ADAPTER.validate_python(
                 [
-                    key
-                    for key, count in sorted(
-                        key_counts.items(), key=lambda item: (-item[1], item[0])
+                    _bounded_key(key, index)
+                    for index, (key, count) in enumerate(
+                        sorted(key_counts.items(), key=lambda item: (-item[1], item[0]))
                     )
                     if count == len(object_items)
                 ][:SHAPE_FIELD_LIMIT]
             )
         summary["item_types"] = JSON_VALUE_ADAPTER.validate_python(
-            sorted({_shape_label(item) for item in value})
+            sorted({_shape_label(item) for item in sampled_items})
         )
     if samples > 0:
         raw_samples = value[:samples] if isinstance(value, list) else [value]
         summary["samples"] = [
             _bounded_sample(item, depth=0, max_depth=max_depth) for item in raw_samples
         ]
-    return summary
+    return _fit_inspection_budget(summary, byte_limit)
+
+
+def _fit_inspection_budget(summary: JsonObject, byte_limit: int) -> JsonObject:
+    candidates = [
+        summary,
+        {**summary, "samples": [], "diagnostic_truncated": True},
+        {
+            key: value
+            for key, value in summary.items()
+            if key not in {"samples", "field_sizes", "scalar_types", "common_keys"}
+        }
+        | {"diagnostic_truncated": True},
+        {
+            "type": summary["type"],
+            "serialized_bytes": summary["serialized_bytes"],
+            "shape": summary["type"],
+            "truncated": True,
+            "diagnostic_truncated": True,
+        },
+    ]
+    for candidate in candidates:
+        if len(to_json(candidate)) <= byte_limit:
+            return candidate
+    raise ValueError(f"inspection byte limit must be at least {len(to_json(candidates[-1]))}")
+
+
+def _bounded_key(value: str, index: int) -> str:
+    if len(value) <= INSPECT_KEY_LIMIT:
+        return value
+    suffix = f"…[{index}]"
+    return f"{value[: INSPECT_KEY_LIMIT - len(suffix)]}{suffix}"
 
 
 def _collect_scalar_types(
@@ -652,17 +712,17 @@ def _collect_scalar_types(
     if depth >= max_depth and isinstance(value, (dict, list)):
         return
     if isinstance(value, dict):
-        for key, item in list(value.items())[:INSPECT_COLLECTION_LIMIT]:
+        for index, (key, item) in enumerate(islice(value.items(), INSPECT_COLLECTION_LIMIT)):
             _collect_scalar_types(
                 item,
-                path=f"{path}.{key}",
+                path=f"{path}.{_bounded_key(str(key), index)}",
                 depth=depth + 1,
                 max_depth=max_depth,
                 result=result,
             )
         return
     if isinstance(value, list):
-        for item in value[:INSPECT_COLLECTION_LIMIT]:
+        for item in islice(value, INSPECT_COLLECTION_LIMIT):
             _collect_scalar_types(
                 item,
                 path=f"{path}[]",
@@ -678,18 +738,21 @@ def _describe_shape(value: JsonValue, *, depth: int, max_depth: int) -> JsonValu
     if depth >= max_depth:
         return _shape_label(value)
     if isinstance(value, dict):
-        fields: JsonObject = {
-            str(key): _describe_shape(item, depth=depth + 1, max_depth=max_depth)
-            for key, item in list(value.items())[:SHAPE_FIELD_LIMIT]
-        }
-        remaining = len(value) - len(fields)
+        fields: JsonObject = {}
+        for index, (key, item) in enumerate(islice(value.items(), SHAPE_FIELD_LIMIT)):
+            fields[_bounded_key(str(key), index)] = _describe_shape(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
+        remaining = len(value) - min(len(value), SHAPE_FIELD_LIMIT)
         if remaining > 0:
             fields["<remaining>"] = f"{remaining} more fields"
         return fields
     if isinstance(value, list):
         shapes: list[JsonValue] = []
         seen: set[str] = set()
-        for item in value[:INSPECT_COLLECTION_LIMIT]:
+        for item in islice(value, INSPECT_COLLECTION_LIMIT):
             shape = _describe_shape(item, depth=depth + 1, max_depth=max_depth)
             fingerprint = to_json(shape).decode()
             if fingerprint in seen:
@@ -706,17 +769,20 @@ def _bounded_sample(value: JsonValue, *, depth: int, max_depth: int) -> JsonValu
     if isinstance(value, str):
         return value if len(value) <= INSPECT_STRING_LIMIT else f"{value[:INSPECT_STRING_LIMIT]}…"
     if isinstance(value, dict):
-        object_sample: JsonObject = {
-            str(key): _bounded_sample(item, depth=depth + 1, max_depth=max_depth)
-            for key, item in list(value.items())[:INSPECT_COLLECTION_LIMIT]
-        }
+        object_sample: JsonObject = {}
+        for index, (key, item) in enumerate(islice(value.items(), INSPECT_COLLECTION_LIMIT)):
+            object_sample[_bounded_key(str(key), index)] = _bounded_sample(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
         if len(value) > INSPECT_COLLECTION_LIMIT:
             object_sample["<remaining>"] = len(value) - INSPECT_COLLECTION_LIMIT
         return object_sample
     if isinstance(value, list):
         list_sample: list[JsonValue] = [
             _bounded_sample(item, depth=depth + 1, max_depth=max_depth)
-            for item in value[:INSPECT_COLLECTION_LIMIT]
+            for item in islice(value, INSPECT_COLLECTION_LIMIT)
         ]
         if len(value) > INSPECT_COLLECTION_LIMIT:
             list_sample.append(f"<{len(value) - INSPECT_COLLECTION_LIMIT} more items>")
@@ -729,13 +795,14 @@ def _inspection_is_truncated(value: JsonValue, *, depth: int, max_depth: int) ->
         return True
     if isinstance(value, dict):
         return len(value) > SHAPE_FIELD_LIMIT or any(
-            _inspection_is_truncated(item, depth=depth + 1, max_depth=max_depth)
-            for item in list(value.values())[:SHAPE_FIELD_LIMIT]
+            len(str(key)) > INSPECT_KEY_LIMIT
+            or _inspection_is_truncated(item, depth=depth + 1, max_depth=max_depth)
+            for key, item in islice(value.items(), SHAPE_FIELD_LIMIT)
         )
     if isinstance(value, list):
         return len(value) > INSPECT_COLLECTION_LIMIT or any(
             _inspection_is_truncated(item, depth=depth + 1, max_depth=max_depth)
-            for item in value[:INSPECT_COLLECTION_LIMIT]
+            for item in islice(value, INSPECT_COLLECTION_LIMIT)
         )
     if isinstance(value, str):
         return len(value) > INSPECT_STRING_LIMIT
