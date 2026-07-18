@@ -71,8 +71,9 @@ New manifests default to project scope under `<project>/.pi/pi-codemcp/chains`; 
 ## Install
 
 ```bash
-pi install npm:pi-codemcp
+pi install git:github.com/yolonir/pi-codemcp
 ```
+Extension is currently in feedback collection phase, I'll roll it to npm once I'm comfortable with it
 
 It reads Pi's existing `<agent-dir>/mcp.json` and supports stdio, Streamable HTTP, SSE, bearer authentication, and FastMCP-managed OAuth. Open `/codemcp` to manage servers, per-tool policy, saved chains, cache, and execution limits.
 
