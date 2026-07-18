@@ -134,7 +134,7 @@ pi -ne -e . --no-session
 
 Release Please derives versions and release notes from Conventional Commit titles on `main`: `fix:` publishes a patch, `feat:` publishes a minor, and a `!` or `BREAKING CHANGE:` publishes a major. It maintains the release PR, `CHANGELOG.md`, `package.json`, version tag, and GitHub Release.
 
-Merging a release PR publishes the verified package to npm from `.github/workflows/release.yml` using npm trusted publishing and provenance. The publish job checks out the release tag and runs the package's full prepublish and clean-install gates before uploading it.
+Merging a release PR publishes the verified package to npm from `.github/workflows/release.yml` using trusted publishing and provenance. Quality gates the exact merge commit on Linux, macOS, and Windows; the publish job checks out its release tag, packs it with Bun, and uses npm only for the final OIDC-authenticated upload.
 
 ## Credits
 
