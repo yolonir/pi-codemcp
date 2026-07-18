@@ -71,9 +71,8 @@ New manifests default to project scope under `<project>/.pi/pi-codemcp/chains`; 
 ## Install
 
 ```bash
-pi install git:github.com/yolonir/pi-codemcp
+pi install npm:pi-codemcp
 ```
-Extension is currently in feedback collection phase, I'll roll it to npm once I'm comfortable with it
 
 It reads Pi's existing `<agent-dir>/mcp.json` and supports stdio, Streamable HTTP, SSE, bearer authentication, and FastMCP-managed OAuth. Open `/codemcp` to manage servers, per-tool policy, saved chains, cache, and execution limits.
 
@@ -130,6 +129,12 @@ pi -ne -e . --no-session
 ```
 
 `just check` runs lockfile checks, TypeScript, Biome, Bun tests, Ruff, mypy, ty, and pytest. `just release-check` additionally packs the npm artifact, installs it into a clean consumer directory, and runs the packaged sidecar without a system uv on `PATH`.
+
+## Releases
+
+Release Please derives versions and release notes from Conventional Commit titles on `main`: `fix:` publishes a patch, `feat:` publishes a minor, and a `!` or `BREAKING CHANGE:` publishes a major. It maintains the release PR, `CHANGELOG.md`, `package.json`, version tag, and GitHub Release.
+
+Merging a release PR publishes the verified package to npm from `.github/workflows/release.yml` using npm trusted publishing and provenance. The publish job checks out the release tag and runs the package's full prepublish and clean-install gates before uploading it.
 
 ## Credits
 
