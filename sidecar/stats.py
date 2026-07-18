@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 HISTOGRAM_BOUNDS_MS = (1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000)
+HISTOGRAM_BOUNDS_BYTES = (64, 256, 1_024, 4_096, 16_384, 65_536, 262_144, 1_048_576)
 RECENT_BUCKET_SECONDS = 60 * 60
 RECENT_BUCKET_COUNT = 24
 FLUSH_DELAY_SECONDS = 5.0
@@ -60,8 +61,13 @@ class Histogram:
         }
 
     @classmethod
-    def from_snapshot(cls, value: object) -> Histogram:
-        histogram = cls()
+    def from_snapshot(
+        cls,
+        value: object,
+        *,
+        bounds: tuple[int, ...] = HISTOGRAM_BOUNDS_MS,
+    ) -> Histogram:
+        histogram = cls(bounds=bounds, counts=[0] * (len(bounds) + 1))
         if not isinstance(value, dict):
             return histogram
         histogram.count = _integer(value.get("count"))
@@ -86,6 +92,18 @@ class Rollup:
     calls: int = 0
     chain_calls: int = 0
     duration_ms: Histogram = field(default_factory=Histogram)
+    input_size_bytes: Histogram = field(
+        default_factory=lambda: Histogram(
+            bounds=HISTOGRAM_BOUNDS_BYTES,
+            counts=[0] * (len(HISTOGRAM_BOUNDS_BYTES) + 1),
+        )
+    )
+    output_size_bytes: Histogram = field(
+        default_factory=lambda: Histogram(
+            bounds=HISTOGRAM_BOUNDS_BYTES,
+            counts=[0] * (len(HISTOGRAM_BOUNDS_BYTES) + 1),
+        )
+    )
 
     def observe(
         self,
@@ -107,9 +125,11 @@ class Rollup:
         self.calls += max(0, calls)
         self.chain_calls += max(0, chain_calls)
         self.duration_ms.observe(duration_ms)
+        self.input_size_bytes.observe(float(max(0, input_bytes)))
+        self.output_size_bytes.observe(float(max(0, output_bytes)))
 
-    def snapshot(self) -> JsonObject:
-        return {
+    def snapshot(self, *, include_distributions: bool = True) -> JsonObject:
+        values: JsonObject = {
             "count": self.count,
             "success": self.success,
             "failure": self.failure,
@@ -117,8 +137,12 @@ class Rollup:
             "output_bytes": self.output_bytes,
             "calls": self.calls,
             "chain_calls": self.chain_calls,
-            "duration_ms": self.duration_ms.snapshot(),
         }
+        if include_distributions:
+            values["duration_ms"] = self.duration_ms.snapshot()
+            values["input_size_bytes"] = self.input_size_bytes.snapshot()
+            values["output_size_bytes"] = self.output_size_bytes.snapshot()
+        return values
 
     @classmethod
     def from_snapshot(cls, value: object) -> Rollup:
@@ -133,6 +157,12 @@ class Rollup:
             calls=_integer(value.get("calls")),
             chain_calls=_integer(value.get("chain_calls")),
             duration_ms=Histogram.from_snapshot(value.get("duration_ms")),
+            input_size_bytes=Histogram.from_snapshot(
+                value.get("input_size_bytes"), bounds=HISTOGRAM_BOUNDS_BYTES
+            ),
+            output_size_bytes=Histogram.from_snapshot(
+                value.get("output_size_bytes"), bounds=HISTOGRAM_BOUNDS_BYTES
+            ),
         )
 
 
@@ -229,7 +259,7 @@ class StatsStore:
 
     def snapshot(self) -> JsonObject:
         recent = [
-            {"bucket_start": timestamp, **rollup.snapshot()}
+            {"bucket_start": timestamp, **rollup.snapshot(include_distributions=False)}
             for timestamp, rollup in sorted(self.recent.items())
         ]
         return JSON_OBJECT_ADAPTER.validate_python({
@@ -240,7 +270,7 @@ class StatsStore:
             "operations": _snapshot_mapping(self.operations),
             "phases": _snapshot_mapping(self.phases),
             "servers": _snapshot_mapping(self.servers),
-            "tools": _snapshot_mapping(self.tools),
+            "tools": _snapshot_mapping(self.tools, include_distributions=False),
             "failures": dict(sorted(self.failures.items())),
             "cache": {"hits": self.cache_hits, "misses": self.cache_misses},
         })
@@ -346,8 +376,19 @@ class StatsStore:
                     self.recent[timestamp] = Rollup.from_snapshot(item)
 
 
-def _snapshot_mapping(values: Mapping[str, Rollup | Histogram]) -> JsonObject:
-    return {key: value.snapshot() for key, value in sorted(values.items())}
+def _snapshot_mapping(
+    values: Mapping[str, Rollup | Histogram],
+    *,
+    include_distributions: bool = True,
+) -> JsonObject:
+    return {
+        key: (
+            value.snapshot(include_distributions=include_distributions)
+            if isinstance(value, Rollup)
+            else value.snapshot()
+        )
+        for key, value in sorted(values.items())
+    }
 
 
 def _load_rollups(value: object, limit: int) -> dict[str, Rollup]:

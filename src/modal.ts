@@ -58,7 +58,11 @@ export interface StatsRollupState {
   calls: number;
   chainCalls: number;
   averageMs: number;
+  p50Ms: number;
+  p95Ms: number;
   maxMs: number;
+  p50OutputBytes: number;
+  p95OutputBytes: number;
 }
 
 export interface StatsModalState {
@@ -66,7 +70,16 @@ export interface StatsModalState {
   lifetime: StatsRollupState;
   recent: StatsRollupState;
   operations: Array<{ name: string; rollup: StatsRollupState }>;
-  phases: Array<{ name: string; count: number; averageMs: number; maxMs: number }>;
+  phases: Array<{
+    name: string;
+    count: number;
+    averageMs: number;
+    p50Ms: number;
+    p95Ms: number;
+    maxMs: number;
+  }>;
+  failures: Array<{ stage: string; count: number }>;
+  upstreamOutputBytes: number;
   cacheHits: number;
   cacheMisses: number;
   serverCount: number;
@@ -263,12 +276,25 @@ export function statsStateFromSnapshot(snapshot: Record<string, unknown>): Stats
         name,
         count: numberField(value, "count"),
         averageMs: numberField(value, "average"),
+        p50Ms: histogramPercentile(value, 0.5),
+        p95Ms: histogramPercentile(value, 0.95),
         maxMs: numberField(value, "max"),
       },
     ];
   });
+  const rawFailures = isRecord(snapshot.failures) ? snapshot.failures : {};
+  const failures = Object.entries(rawFailures)
+    .flatMap(([stage, count]) =>
+      typeof count === "number" && count >= 0 ? [{ stage, count }] : [],
+    )
+    .sort((left, right) => right.count - left.count || left.stage.localeCompare(right.stage));
+  const rawServers = isRecord(snapshot.servers) ? snapshot.servers : {};
+  const upstreamOutputBytes = Object.values(rawServers).reduce<number>(
+    (total, value) => total + (isRecord(value) ? numberField(value, "output_bytes") : 0),
+    0,
+  );
   const cache = isRecord(snapshot.cache) ? snapshot.cache : {};
-  const servers = isRecord(snapshot.servers) ? Object.keys(snapshot.servers).length : 0;
+  const servers = Object.keys(rawServers).length;
   const tools = isRecord(snapshot.tools) ? Object.keys(snapshot.tools).length : 0;
   return {
     updatedAt: numberField(snapshot, "updated_at"),
@@ -276,6 +302,8 @@ export function statsStateFromSnapshot(snapshot: Record<string, unknown>): Stats
     recent,
     operations,
     phases,
+    failures,
+    upstreamOutputBytes,
     cacheHits: numberField(cache, "hits"),
     cacheMisses: numberField(cache, "misses"),
     serverCount: servers,
@@ -744,7 +772,9 @@ class ServerManagerModal implements Component, Focusable {
       `${this.theme.fg("dim", "Lifetime")}  ${lifetime.count.toLocaleString()} runs · ${lifetime.success.toLocaleString()} ok · ${lifetime.failure.toLocaleString()} failed`,
       `${this.theme.fg("dim", "Calls")}     ${lifetime.calls.toLocaleString()} MCP · ${lifetime.chainCalls.toLocaleString()} nested chains`,
       `${this.theme.fg("dim", "Bytes")}     ${formatBytes(lifetime.inputBytes)} in · ${formatBytes(lifetime.outputBytes)} out`,
-      `${this.theme.fg("dim", "Latency")}   ${formatMilliseconds(lifetime.averageMs)} avg · ${formatMilliseconds(lifetime.maxMs)} max`,
+      `${this.theme.fg("dim", "Latency")}   ${formatMilliseconds(lifetime.p50Ms)} p50 · ${formatMilliseconds(lifetime.p95Ms)} p95 · ${formatMilliseconds(lifetime.maxMs)} max`,
+      `${this.theme.fg("dim", "Results")}   ${formatBytes(lifetime.p50OutputBytes)} p50 · ${formatBytes(lifetime.p95OutputBytes)} p95`,
+      `${this.theme.fg("dim", "Withheld")}  ${formatBytes(Math.max(0, stats.upstreamOutputBytes - lifetime.outputBytes))} upstream bytes kept out of final results`,
       `${this.theme.fg("dim", "Recent")}    ${recent.count.toLocaleString()} runs in retained hourly buckets`,
       `${this.theme.fg("dim", "Observed")}  ${stats.serverCount} servers · ${stats.toolCount} tools · ${cacheRate} cache hit`,
       "",
@@ -759,12 +789,17 @@ class ServerManagerModal implements Component, Focusable {
         ),
       );
     }
+    lines.push("", this.theme.fg("dim", this.theme.bold("FAILURE STAGES")));
+    if (stats.failures.length === 0) lines.push(this.theme.fg("muted", "No failures yet"));
+    for (const failure of stats.failures) {
+      lines.push(`${failure.stage.padEnd(18)} ${failure.count.toLocaleString().padStart(8)}`);
+    }
     lines.push("", this.theme.fg("dim", this.theme.bold("PHASES")));
     if (stats.phases.length === 0) lines.push(this.theme.fg("muted", "No phase timings yet"));
     for (const phase of stats.phases) {
       lines.push(
         truncateToWidth(
-          `${phase.name.padEnd(18)} ${phase.count.toLocaleString().padStart(8)} · ${formatMilliseconds(phase.averageMs)} avg · ${formatMilliseconds(phase.maxMs)} max`,
+          `${phase.name.padEnd(18)} ${phase.count.toLocaleString().padStart(8)} · ${formatMilliseconds(phase.p50Ms)} p50 · ${formatMilliseconds(phase.p95Ms)} p95 · ${formatMilliseconds(phase.maxMs)} max`,
           width,
         ),
       );
@@ -1147,13 +1182,18 @@ function emptyStatsRollup(): StatsRollupState {
     calls: 0,
     chainCalls: 0,
     averageMs: 0,
+    p50Ms: 0,
+    p95Ms: 0,
     maxMs: 0,
+    p50OutputBytes: 0,
+    p95OutputBytes: 0,
   };
 }
 
 function parseStatsRollup(value: unknown): StatsRollupState {
   if (!isRecord(value)) return emptyStatsRollup();
   const duration = isRecord(value.duration_ms) ? value.duration_ms : {};
+  const outputSize = isRecord(value.output_size_bytes) ? value.output_size_bytes : {};
   return {
     count: numberField(value, "count"),
     success: numberField(value, "success"),
@@ -1163,7 +1203,11 @@ function parseStatsRollup(value: unknown): StatsRollupState {
     calls: numberField(value, "calls"),
     chainCalls: numberField(value, "chain_calls"),
     averageMs: numberField(duration, "average"),
+    p50Ms: histogramPercentile(duration, 0.5),
+    p95Ms: histogramPercentile(duration, 0.95),
     maxMs: numberField(duration, "max"),
+    p50OutputBytes: histogramPercentile(outputSize, 0.5),
+    p95OutputBytes: histogramPercentile(outputSize, 0.95),
   };
 }
 
@@ -1179,7 +1223,11 @@ function addStatsRollups(left: StatsRollupState, right: StatsRollupState): Stats
     chainCalls: left.chainCalls + right.chainCalls,
     averageMs:
       count > 0 ? (left.averageMs * left.count + right.averageMs * right.count) / count : 0,
+    p50Ms: Math.max(left.p50Ms, right.p50Ms),
+    p95Ms: Math.max(left.p95Ms, right.p95Ms),
     maxMs: Math.max(left.maxMs, right.maxMs),
+    p50OutputBytes: Math.max(left.p50OutputBytes, right.p50OutputBytes),
+    p95OutputBytes: Math.max(left.p95OutputBytes, right.p95OutputBytes),
   };
 }
 
@@ -1191,6 +1239,21 @@ function parseNamedStatsRollups(value: unknown): Array<{ name: string; rollup: S
       (left, right) =>
         right.rollup.count - left.rollup.count || left.name.localeCompare(right.name),
     );
+}
+
+function histogramPercentile(value: Record<string, unknown>, percentile: number): number {
+  const count = numberField(value, "count");
+  if (count === 0 || !Array.isArray(value.buckets)) return 0;
+  const target = Math.ceil(count * percentile);
+  let cumulative = 0;
+  for (const bucket of value.buckets) {
+    if (!isRecord(bucket)) continue;
+    cumulative += numberField(bucket, "count");
+    if (cumulative < target) continue;
+    const boundary = bucket.le;
+    return typeof boundary === "number" ? boundary : numberField(value, "max");
+  }
+  return numberField(value, "max");
 }
 
 function numberField(value: Record<string, unknown>, key: string): number {

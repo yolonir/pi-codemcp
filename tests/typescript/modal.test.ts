@@ -103,30 +103,61 @@ test("stats parser converts bounded rollups for the modal", () => {
         output_bytes: 200,
         calls: 8,
         chain_calls: 2,
-        duration_ms: { average: 12.5, max: 30 },
-      },
-      recent: [
-        {
-          count: 2,
-          success: 2,
-          failure: 0,
-          duration_ms: { average: 10, max: 15 },
+        duration_ms: {
+          count: 5,
+          average: 12.5,
+          max: 30,
+          buckets: [
+            { le: 10, count: 3 },
+            { le: 50, count: 2 },
+          ],
         },
-      ],
+        output_size_bytes: {
+          count: 5,
+          buckets: [
+            { le: 64, count: 3 },
+            { le: 256, count: 2 },
+          ],
+        },
+      },
+      recent: [{ count: 2, success: 2, failure: 0 }],
       operations: {
         execute: { count: 5, success: 4, failure: 1, duration_ms: { average: 12.5, max: 30 } },
       },
-      phases: { typecheck: { count: 5, average: 4, max: 9 } },
-      servers: { grafana: {} },
+      phases: {
+        typecheck: {
+          count: 5,
+          average: 4,
+          max: 9,
+          buckets: [
+            { le: 5, count: 4 },
+            { le: 10, count: 1 },
+          ],
+        },
+      },
+      failures: { runtime: 2 },
+      servers: { grafana: { output_bytes: 500 } },
       tools: { "grafana.query": {} },
       cache: { hits: 3, misses: 1 },
     }),
   ).toMatchObject({
     updatedAt: 100,
-    lifetime: { count: 5, success: 4, failure: 1, calls: 8, chainCalls: 2 },
+    lifetime: {
+      count: 5,
+      success: 4,
+      failure: 1,
+      calls: 8,
+      chainCalls: 2,
+      p50Ms: 10,
+      p95Ms: 50,
+      p50OutputBytes: 64,
+      p95OutputBytes: 256,
+    },
     recent: { count: 2, success: 2 },
     operations: [{ name: "execute", rollup: { count: 5 } }],
-    phases: [{ name: "typecheck", count: 5, averageMs: 4, maxMs: 9 }],
+    phases: [{ name: "typecheck", count: 5, averageMs: 4, p50Ms: 5, p95Ms: 10, maxMs: 9 }],
+    failures: [{ stage: "runtime", count: 2 }],
+    upstreamOutputBytes: 500,
     cacheHits: 3,
     cacheMisses: 1,
     serverCount: 1,
@@ -215,12 +246,17 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
         chain_calls: 2,
         input_bytes: 100,
         output_bytes: 200,
-        duration_ms: { average: 12.5, max: 30 },
+        duration_ms: { count: 5, average: 12.5, max: 30, buckets: [{ le: 25, count: 5 }] },
+        output_size_bytes: { count: 5, buckets: [{ le: 256, count: 5 }] },
       },
       operations: {
         execute: { count: 5, success: 4, failure: 1, duration_ms: { average: 12.5, max: 30 } },
       },
-      phases: { typecheck: { count: 5, average: 4, max: 9 } },
+      phases: {
+        typecheck: { count: 5, average: 4, max: 9, buckets: [{ le: 5, count: 5 }] },
+      },
+      failures: { runtime: 1 },
+      servers: { grafana: { output_bytes: 500 } },
       cache: { hits: 3, misses: 1 },
     }),
     async onDiscover(server) {
@@ -347,6 +383,8 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   expect(statsLines).toContain("[Stats]");
   expect(statsLines).toContain("LOCAL TELEMETRY");
   expect(statsLines).toContain("execute");
+  expect(statsLines).toContain("Withheld");
+  expect(statsLines).toContain("runtime");
   expect(statsLines).toContain("typecheck");
 
   component?.handleInput?.("\t");
