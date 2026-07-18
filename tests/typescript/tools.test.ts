@@ -11,7 +11,10 @@ interface RegisteredTool {
     params: Record<string, unknown>,
     signal: AbortSignal | undefined,
     onUpdate: undefined,
-  ): Promise<{ content: Array<{ type: string; text: string }> }>;
+  ): Promise<{
+    content: Array<{ type: string; text: string }>;
+    details?: Record<string, unknown>;
+  }>;
 }
 
 const view: SavedChainView = {
@@ -36,7 +39,10 @@ const view: SavedChainView = {
   },
 };
 
-function captureTools(options: { projectAvailable: boolean }) {
+function captureTools(options: {
+  projectAvailable: boolean;
+  executeResult?: Record<string, unknown>;
+}) {
   const tools = new Map<string, RegisteredTool>();
   const pi = {
     registerTool(tool: RegisteredTool) {
@@ -46,7 +52,8 @@ function captureTools(options: { projectAvailable: boolean }) {
   const lifecycle = {
     projectChainsPath: options.projectAvailable ? "/project/chains" : undefined,
     loadSettings: () => ({ ...DEFAULT_CODEMCP_SETTINGS, disabledTools: {} }),
-    async request() {
+    async request(name: string) {
+      if (name === "execute" && options.executeResult) return options.executeResult;
       throw new Error("unexpected sidecar request");
     },
   };
@@ -77,6 +84,23 @@ function captureTools(options: { projectAvailable: boolean }) {
   return { tools, calls };
 }
 
+test("execute sends only compact result while keeping metadata in details", async () => {
+  const { tools } = captureTools({
+    projectAvailable: true,
+    executeResult: {
+      ok: true,
+      result: { value: 2 },
+      calls_made: 1,
+      chain_calls: 0,
+    },
+  });
+  const execute = tools.get("codemcp_execute");
+  const result = await execute?.execute("id", { code: "return 2" }, undefined, undefined);
+  expect(result?.content[0]?.text).toBe('{"value":2}');
+  expect(result?.content[0]?.text).not.toContain("calls_made");
+  expect(result?.details).toMatchObject({ ok: true, callsMade: 1, chainCalls: 0 });
+});
+
 test("chain management lists freely and requires explicit mutation confirmation", async () => {
   const { tools, calls } = captureTools({ projectAvailable: true });
   const manage = tools.get("codemcp_manage_chains");
@@ -84,7 +108,7 @@ test("chain management lists freely and requires explicit mutation confirmation"
 
   const listed = await manage?.execute("id", { action: "list" }, undefined, undefined);
   expect(calls).toEqual(["list"]);
-  expect(listed?.content[0]?.text).toContain('"name": "daily"');
+  expect(listed?.content[0]?.text).toContain('"name":"daily"');
 
   await expect(
     manage?.execute(

@@ -290,8 +290,17 @@ export function registerCodeMcpTools(
         details: undefined,
       });
       const result = await lifecycle.request("execute", { code: params.code }, signal);
-      const output = formatCodeMcpOutput(result, outputLimits(lifecycle));
       const ok = result.ok === true;
+      const modelValue = ok
+        ? result.result
+        : {
+            failure_stage: result.failure_stage,
+            error: result.error,
+            shape: result.shape,
+            calls_made: result.calls_made,
+            chain_calls: result.chain_calls,
+          };
+      const output = formatCodeMcpOutput(modelValue, outputLimits(lifecycle));
       return {
         content: [{ type: "text", text: output.text }],
         details: {
@@ -518,7 +527,14 @@ function compactChainView(view: SavedChainView) {
 }
 
 function renderExpandedJson(content: readonly unknown[]): Text {
-  return new Text(highlightCode(getTextContent(content), "json").join("\n"), 0, 0);
+  const raw = getTextContent(content);
+  let formatted = raw;
+  try {
+    formatted = JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    // Keep explicit non-JSON errors readable.
+  }
+  return new Text(highlightCode(formatted, "json").join("\n"), 0, 0);
 }
 
 function outputLimits(lifecycle: CodeMcpLifecycle): { maxBytes: number; maxLines: number } {

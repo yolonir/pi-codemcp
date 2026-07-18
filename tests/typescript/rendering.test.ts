@@ -66,7 +66,7 @@ describe("codemcp_execute rendering", () => {
           content: [
             {
               type: "text",
-              text: JSON.stringify({ ok: true, result: { value: 2 }, calls_made: 1 }),
+              text: JSON.stringify({ value: 2 }),
             },
           ],
           details: {
@@ -117,7 +117,6 @@ describe("codemcp_execute rendering", () => {
             {
               type: "text",
               text: JSON.stringify({
-                ok: false,
                 failure_stage: "preflight",
                 error: "missing required argument: id",
                 calls_made: 0,
@@ -142,7 +141,6 @@ describe("codemcp_execute rendering", () => {
             {
               type: "text",
               text: JSON.stringify({
-                ok: false,
                 failure_stage: "runtime",
                 error: "upstream rejected the request",
                 calls_made: 2,

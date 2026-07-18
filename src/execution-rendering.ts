@@ -79,11 +79,13 @@ function renderExpandedResult(
   details: ExecutionRenderDetails | undefined,
   theme: Theme,
 ): Text {
-  const response = parseJsonObject(getTextContent(content));
+  const raw = getTextContent(content);
+  const parsed = parseJsonValue(raw);
+  const response = isRecord(parsed) ? parsed : undefined;
   const calls = details?.callsMade ?? 0;
   const chainCalls = details?.chainCalls ?? 0;
   if (details?.ok) {
-    const output = response ? formatJson(response.result) : getTextContent(content);
+    const output = parsed === undefined ? raw : formatJson(parsed);
     const highlighted = highlightCode(output, "json").join("\n");
     return new Text(
       `\n${theme.fg("success", theme.bold(`Output · ${formatExecutionCalls(calls, chainCalls)}`))}\n${highlighted}`,
@@ -155,10 +157,9 @@ function formatJson(value: unknown): string {
   return JSON.stringify(value, null, 2) ?? String(value);
 }
 
-function parseJsonObject(value: string): Record<string, unknown> | undefined {
+function parseJsonValue(value: string): unknown {
   try {
-    const parsed: unknown = JSON.parse(value);
-    return isRecord(parsed) ? parsed : undefined;
+    return JSON.parse(value);
   } catch {
     return undefined;
   }
