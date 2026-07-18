@@ -35,9 +35,8 @@ describe("Pi extension registration", () => {
     expect(events).toEqual(["session_start", "session_shutdown"]);
 
     const search = tools[0];
-    expect(search?.description).toBe(
-      "Search configured upstream MCP tools and saved chains, returning their typed SDK stubs.",
-    );
+    expect(search?.description).toContain("compact inventory");
+    expect(search?.description).toContain("codemcp_inspect");
     expect(search?.parameters).toMatchObject({
       properties: {
         server: { type: "string" },

@@ -9,6 +9,12 @@ import {
 } from "./execution-rendering.js";
 import type { CodeMcpLifecycle } from "./lifecycle.js";
 import { type CodeMcpOutputDetails, formatCodeMcpOutput } from "./output.js";
+import {
+  EXECUTE_PROMPT_GUIDELINES,
+  INSPECT_PROMPT_GUIDELINES,
+  SAVE_CHAIN_PROMPT_GUIDELINES,
+  SEARCH_PROMPT_GUIDELINES,
+} from "./prompts.js";
 
 interface SearchRenderDetails extends CodeMcpOutputDetails {
   matchCount: number;
@@ -116,11 +122,9 @@ export function registerCodeMcpTools(
     name: "codemcp_search",
     label: "MCP Search",
     description:
-      "Search configured upstream MCP tools and saved chains, returning their typed SDK stubs.",
-    promptSnippet: "Search MCP capabilities and reusable chains, then inspect typed SDK stubs",
-    promptGuidelines: [
-      "Use codemcp_search before codemcp_execute; every upstream or saved-chain match includes the complete typed SDK stub needed to write the execution.",
-    ],
+      "Search configured MCP capabilities or page through compact inventory. Returns names, signatures, ranking evidence, pagination, scope, and execution limits; invalid server names fail with suggestions. Exact stubs are available through codemcp_inspect.",
+    promptSnippet: "Discover compact MCP capabilities or inventory",
+    promptGuidelines: [...SEARCH_PROMPT_GUIDELINES],
     parameters: SearchParameters,
     async execute(_toolCallId, params, signal, onUpdate) {
       onUpdate?.({
@@ -196,10 +200,8 @@ export function registerCodeMcpTools(
     label: "MCP Inspect",
     description:
       "Return the exact typed SDK stubs for selected call identifiers from codemcp_search. The response deduplicates the shared JsonValue/type prelude.",
-    promptSnippet: "Inspect exact typed SDK stubs for selected MCP calls",
-    promptGuidelines: [
-      "Use codemcp_inspect after compact search when exact argument or result types are needed.",
-    ],
+    promptSnippet: "Load exact typed contracts for selected MCP calls",
+    promptGuidelines: [...INSPECT_PROMPT_GUIDELINES],
     parameters: InspectParameters,
     async execute(_toolCallId, params, signal, onUpdate) {
       onUpdate?.({
@@ -246,13 +248,9 @@ export function registerCodeMcpTools(
     name: "codemcp_execute",
     label: "MCP Execute",
     description:
-      "Type-check and execute one sandboxed Python MCP call graph. Supports sequential and dependent calls, loops, conditions, cross-server calls, enabled upstream tools, and reusable chains.* calls. The code has no host filesystem, environment, network, or subprocess access. Return a compact final value within the configured result limit; oversized values fail with a shape summary.",
-    promptSnippet: "Run a typed, sandboxed multi-call chain across configured MCP servers",
-    promptGuidelines: [
-      "Use codemcp_execute if you know tool schemas; call the returned server.method facade and use top-level return for the compact final value.",
-      "It is always better to execute multiple MCP calls in one codemcp_execute call rather than multiple single-call invocations.",
-      "You can compose upstream SDK calls and saved chains.* calls, running independent work with asyncio.gather or dependent work sequentially.",
-    ],
+      "Type-check and execute one bounded sandboxed Python MCP call graph. Use it when code can deterministically process intermediate results; preserve a model turn for semantic decisions or approvals. The sandbox has no host filesystem, environment, network, or subprocess access. Oversized results fail with bounded shape, size, and sample diagnostics.",
+    promptSnippet: "Run a bounded typed MCP workflow and return a compact result",
+    promptGuidelines: [...EXECUTE_PROMPT_GUIDELINES],
     parameters: ExecuteParameters,
     async execute(_toolCallId, params, signal, onUpdate) {
       onUpdate?.({
@@ -311,12 +309,7 @@ export function registerCodeMcpTools(
     description:
       "Validate and persist a reusable typed MCP chain in project scope by default or global scope when explicitly requested. Project chains override same-named global chains. The effective chain is immediately registered as a native mcp_chain_<name> tool and as chains.<name> inside CodeMCP. Requires explicit input and output JSON Schemas. Saving the same scoped name updates and re-enables it.",
     promptSnippet: "Save a repeated MCP execution as a typed reusable native tool",
-    promptGuidelines: [
-      "If a user repeatedly performs the same MCP workflow, you may offer to save it with codemcp_save_chain, but do not persist it until the user explicitly asks or accepts.",
-      "Use codemcp_save_chain only after the user explicitly asks to save a chain or accepts your suggestion to do so.",
-      "When using codemcp_save_chain, parameterize repeated values through the typed input object and provide exact inputSchema and outputSchema contracts.",
-      "Save chains in project scope unless the user explicitly asks to make one available globally across projects.",
-    ],
+    promptGuidelines: [...SAVE_CHAIN_PROMPT_GUIDELINES],
     parameters: SaveChainParameters,
     async execute(_toolCallId, params, signal, onUpdate) {
       onUpdate?.({
