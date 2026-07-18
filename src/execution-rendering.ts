@@ -7,6 +7,7 @@ export interface ExecutionRenderDetails extends CodeMcpOutputDetails {
   failureStage?: string;
   callsMade: number;
   chainCalls: number;
+  timings?: Record<string, unknown>;
   preview: string[];
 }
 

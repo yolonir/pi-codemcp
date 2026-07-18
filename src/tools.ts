@@ -309,6 +309,7 @@ export function registerCodeMcpTools(
           failureStage: typeof result.failure_stage === "string" ? result.failure_stage : undefined,
           callsMade: Number(result.calls_made ?? 0),
           chainCalls: Number(result.chain_calls ?? 0),
+          ...(isRecord(result.timings) ? { timings: result.timings } : {}),
           preview: previewExecutionValue(ok ? result.result : result.error),
         },
       };

@@ -159,6 +159,12 @@ class ExecutionResponse(BaseModel):
                 response["shape"] = self.shape
         if self.chain_calls > 0:
             response["chain_calls"] = self.chain_calls
+        timings: JsonObject = {
+            "typecheck_ms": round(self.metrics.typecheck_ms, 3),
+            "execution_ms": round(self.metrics.runtime_ms, 3),
+            "serialization_ms": round(self.metrics.serialization_ms, 3),
+        }
+        response["timings"] = timings
         return response
 
 

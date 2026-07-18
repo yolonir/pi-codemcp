@@ -117,7 +117,9 @@ async def test_valid_three_call_cross_server_chain_and_mutation() -> None:
     assert response.metrics.runtime_ms > 0
     assert response.metrics.serialization_ms >= 0
     assert response.metrics.result_bytes > 0
-    assert "metrics" not in response.model_dump(mode="json")
+    serialized = response.model_dump(mode="json")
+    assert "metrics" not in serialized
+    assert serialized["timings"]["execution_ms"] > 0
     assert [name for name, _ in seen] == [
         "alpha_get",
         "beta_put",

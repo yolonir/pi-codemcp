@@ -72,6 +72,8 @@ Nested chains share the same deadline, cancellation signal, catalog snapshot, an
 
 New manifests default to project scope under `<project>/.pi/pi-codemcp/chains`; explicitly global chains live under `<agent-dir>/pi-codemcp/chains`. A project chain overrides a same-named global chain without deleting it. Manifests contain sandboxed code and schemas, never credentials or execution results. `/codemcp` labels both scopes and can revalidate, enable, disable, or delete chains.
 
+There is deliberately no implicit “save last execution” state: the agent must submit the exact successfully tested code plus explicit input and output contracts. This keeps persistence reviewable and avoids saving the wrong attempt from a long session.
+
 ## Install
 
 ```bash

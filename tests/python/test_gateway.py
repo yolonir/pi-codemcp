@@ -299,11 +299,15 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
             },
         )
         execution_data = structured_data(executed.structured_content)
-        assert execution_data == {
-            "ok": True,
-            "result": {"identifier": "N-5", "saved": True},
-            "calls_made": 2,
+        assert execution_data["ok"] is True
+        assert execution_data["result"] == {"identifier": "N-5", "saved": True}
+        assert execution_data["calls_made"] == 2
+        assert set(execution_data["timings"]) == {
+            "typecheck_ms",
+            "execution_ms",
+            "serialization_ms",
         }
+        assert all(value >= 0 for value in execution_data["timings"].values())
         assert beta_pid.exists()
         connected_pids = [int(alpha_pid.read_text()), int(beta_pid.read_text())]
 

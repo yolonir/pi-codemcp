@@ -92,13 +92,19 @@ test("execute sends only compact result while keeping metadata in details", asyn
       result: { value: 2 },
       calls_made: 1,
       chain_calls: 0,
+      timings: { typecheck_ms: 4, execution_ms: 8, serialization_ms: 1 },
     },
   });
   const execute = tools.get("codemcp_execute");
   const result = await execute?.execute("id", { code: "return 2" }, undefined, undefined);
   expect(result?.content[0]?.text).toBe('{"value":2}');
   expect(result?.content[0]?.text).not.toContain("calls_made");
-  expect(result?.details).toMatchObject({ ok: true, callsMade: 1, chainCalls: 0 });
+  expect(result?.details).toMatchObject({
+    ok: true,
+    callsMade: 1,
+    chainCalls: 0,
+    timings: { typecheck_ms: 4, execution_ms: 8, serialization_ms: 1 },
+  });
 });
 
 test("chain management lists freely and requires explicit mutation confirmation", async () => {
