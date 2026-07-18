@@ -842,7 +842,7 @@ def _schema_type_label(schema: JsonSchema) -> str:
     return "JSON value"
 
 
-def _short_description(description: str | None, limit: int = 240) -> str | None:
+def _short_description(description: str | None, limit: int = 72) -> str | None:
     if description is None:
         return None
     first_paragraph = description.split("\n\n", 1)[0]

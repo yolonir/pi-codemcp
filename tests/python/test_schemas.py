@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -508,6 +509,66 @@ def test_catalog_search_replay_queries_have_complete_top_five_recall(
         assert all(match.server == "grafana" for match in matches), query
         assert all(match.score is not None for match in matches)
         assert all(match.matched_fields for match in matches)
+
+
+def test_catalog_search_sanitized_replay_top_three_recall_exceeds_target(
+    representative_search_catalog: ToolCatalog,
+) -> None:
+    replay = [
+        ("find grafana dashboards", "grafana_search_dashboards"),
+        ("dashboard overview panel count", "grafana_get_dashboard_summary"),
+        ("panel datasource queries", "grafana_get_dashboard_panel_queries"),
+        ("prometheus range metrics", "grafana_query_prometheus"),
+        ("alert firing state history", "grafana_alerting_manage_rules"),
+        ("notification contact point routing", "grafana_alerting_manage_routing"),
+        ("configured datasource uid", "grafana_list_datasources"),
+        ("linear issues assignee", "linear_list_issues"),
+        ("linear projects members", "linear_list_projects"),
+        ("grafana.search_dashboards", "grafana_search_dashboards"),
+        ("get_dashboard_summary", "grafana_get_dashboard_summary"),
+        ("dashboard-panel-query", "grafana_get_dashboard_panel_queries"),
+        ("query promql time range", "grafana_query_prometheus"),
+        ("inspect alert rule config", "grafana_alerting_manage_rules"),
+        ("debug alert receiver", "grafana_alerting_manage_routing"),
+        ("list grafana datasources", "grafana_list_datasources"),
+        ("my workspace issue", "linear_list_issues"),
+        ("workspace project list", "linear_list_projects"),
+        ("dashboard metrics queries", "grafana_get_dashboard_panel_queries"),
+        ("alerts active", "grafana_alerting_manage_rules"),
+    ]
+
+    hits = 0
+    zero_results = 0
+    for query, expected in replay:
+        matches = representative_search_catalog.search(query, limit=3)
+        zero_results += not matches
+        hits += expected in {match.name for match in matches}
+
+    assert hits / len(replay) >= 0.95
+    assert zero_results == 0
+
+
+def test_progressive_discovery_reduces_repeated_schema_payload_by_sixty_percent(
+    representative_search_catalog: ToolCatalog,
+) -> None:
+    query = "dashboard metrics query"
+    full = representative_search_catalog.search(query, limit=5, detail="full")
+    compact = representative_search_catalog.search(query, limit=5, detail="signatures")
+    old_results = []
+    for match in full:
+        serialized = match.model_dump(mode="json")
+        serialized["stub"] = (
+            f"{representative_search_catalog.stub_prelude}\n\n{match.stub}"
+        )
+        old_results.append(serialized)
+    old_search = {"results": old_results}
+    progressive_search = {
+        "results": [match.model_dump(mode="json") for match in compact],
+    }
+    old_payload = 2 * len(json.dumps(old_search))
+    progressive_payload = 2 * len(json.dumps(progressive_search))
+
+    assert progressive_payload <= old_payload * 0.4
 
 
 def test_catalog_search_normalizes_queries_and_retrieves_exact_identifiers(
