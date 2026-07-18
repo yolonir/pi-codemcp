@@ -570,6 +570,21 @@ def test_catalog_progressively_discloses_and_paginates_inventory(
     )
 
 
+def test_catalog_selective_type_stubs_include_only_referenced_facades(
+    representative_search_catalog: ToolCatalog,
+) -> None:
+    selected = representative_search_catalog.type_stubs_for(
+        {"grafana_query_prometheus"}
+    )
+
+    assert "class _GrafanaSdk" in selected
+    assert "async def query_prometheus" in selected
+    assert "GrafanaQueryPrometheusArgs" in selected
+    assert "async def search_dashboards" not in selected
+    assert "LinearListIssuesArgs" not in selected
+    assert len(selected) < len(representative_search_catalog.type_stubs) * 0.35
+
+
 def test_catalog_inspect_rejects_unknown_calls_with_suggestions(
     representative_search_catalog: ToolCatalog,
 ) -> None:

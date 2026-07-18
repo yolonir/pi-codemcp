@@ -22,7 +22,7 @@ from pydantic import (
 from pydantic_core import to_json
 
 from .json_types import JSON_VALUE_ADAPTER, JsonObject, JsonValue
-from .tool_catalog import schema_path_summary
+from .tool_catalog import referenced_calls, schema_path_summary
 
 if TYPE_CHECKING:
     from .chains import SavedChainManifest
@@ -284,7 +284,8 @@ class MontyExecutor:
             output_type=spec.output_type_name,
             typed=True,
         )
-        type_stubs = _chain_type_stubs(catalog, spec.input_type_name)
+        referenced = referenced_calls(code, catalog.facade_calls)
+        type_stubs = catalog.type_stubs_for(referenced, include=spec.name)
         async with self._execution_lock:
             await self._type_check(wrapped, catalog, type_stubs)
 
@@ -322,10 +323,10 @@ class MontyExecutor:
             output_type=output_type,
             typed=True,
         )
-        type_stubs = (
-            _chain_type_stubs(context.catalog, input_type)
-            if input_type is not None
-            else context.catalog.type_stubs
+        referenced = referenced_calls(code, context.catalog.facade_calls)
+        type_stubs = context.catalog.type_stubs_for(
+            referenced,
+            include=output_spec_name,
         )
         typecheck_started = time.perf_counter()
         try:
@@ -577,10 +578,6 @@ def _saved_chain_result_error(
 
 def _elapsed_ms(started: float) -> float:
     return (time.perf_counter() - started) * 1_000
-
-
-def _chain_type_stubs(catalog: ToolCatalog, _input_type: str) -> str:
-    return catalog.type_stubs
 
 
 def _inspect_json(value: JsonValue, *, samples: int, max_depth: int) -> JsonObject:

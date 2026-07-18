@@ -156,6 +156,36 @@ async def test_preflight_errors_make_zero_calls(code: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_executor_typechecks_only_referenced_sdk_stubs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[tuple[set[str], str | None]] = []
+    original = ToolCatalog.type_stubs_for
+
+    def capture(
+        self: ToolCatalog,
+        public_names: set[str],
+        *,
+        include: str | None = None,
+    ) -> str:
+        captured.append((set(public_names), include))
+        return original(self, public_names, include=include)
+
+    monkeypatch.setattr(ToolCatalog, "type_stubs_for", capture)
+
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        return {"value": 1}
+
+    response = await MontyExecutor(catalog()).execute(
+        'return await alpha.get({"id": "one"})',
+        call,
+    )
+
+    assert response.ok is True
+    assert captured == [({"alpha_get"}, None)]
+
+
+@pytest.mark.asyncio
 async def test_untyped_output_must_be_narrowed_before_typed_use() -> None:
     calls = 0
 
