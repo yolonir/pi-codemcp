@@ -367,10 +367,17 @@ class GatewayRuntime:
         mode: SearchMode,
         cursor: int,
     ) -> SearchResponse:
-        discovery_started = time.perf_counter()
-        await self._ensure_catalog_complete()
-        self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
         self._validate_search_server(server)
+        discovery_started = time.perf_counter()
+        discovery_servers: Iterable[str]
+        if server is None:
+            discovery_servers = self.handles.keys()
+        elif server == "chains":
+            discovery_servers = ()
+        else:
+            discovery_servers = (server,)
+        await self._ensure_servers_discovered(discovery_servers)
+        self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
         bounded_limit = min(max(limit, 1), 20)
         bounded_cursor = max(cursor, 0)
         counts = self.catalog.counts_by_server()
@@ -443,13 +450,19 @@ class GatewayRuntime:
         return response
 
     async def _inspect_impl(self, calls: list[str]) -> InspectResponse:
-        discovery_started = time.perf_counter()
-        await self._ensure_catalog_complete()
-        self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
         if not calls:
             raise ValueError("calls must contain at least one MCP call")
         if len(calls) > MAX_INSPECT_CALLS:
             raise ValueError(f"calls must contain at most {MAX_INSPECT_CALLS} MCP calls")
+        discovery_started = time.perf_counter()
+        requested_namespaces = {call.partition(".")[0] for call in calls}
+        discovery_servers = [
+            server
+            for server, namespace in self.catalog.server_aliases.items()
+            if namespace in requested_namespaces
+        ]
+        await self._ensure_servers_discovered(discovery_servers)
+        self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
         return InspectResponse(
             prelude=self.catalog.stub_prelude,
             project_scope_available=self.chain_store.project_store is not None,

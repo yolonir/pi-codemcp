@@ -177,6 +177,37 @@ async def test_force_discover_refreshes_only_the_selected_server(
 
 
 @pytest.mark.asyncio
+async def test_scoped_search_validates_before_discovery_and_connects_only_target(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).parents[2]
+    fixture = root / "tests" / "fixtures" / "upstream_server.py"
+    alpha_pid = tmp_path / "alpha.pid"
+    beta_pid = tmp_path / "beta.pid"
+    config_path = tmp_path / "mcp.json"
+    write_config(config_path, fixture, alpha_pid, beta_pid)
+    runtime = gateway.GatewayRuntime.create(
+        config_path,
+        tmp_path / "oauth",
+        tmp_path / "catalog",
+    )
+
+    try:
+        with pytest.raises(ValueError, match="suggestions"):
+            await runtime.search("number", server="bet")
+        assert not alpha_pid.exists()
+        assert not beta_pid.exists()
+
+        response = await runtime.search("number", server="beta")
+        assert [item.call for item in response.results] == ["beta.save_number"]
+        assert not alpha_pid.exists()
+        assert beta_pid.exists()
+        await wait_for_process_exit(int(beta_pid.read_text()))
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_gateway_lazy_connections_cache_facade_and_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
