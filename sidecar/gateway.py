@@ -500,17 +500,49 @@ class GatewayRuntime:
 
     async def execute(self, code: str) -> ExecutionResponse:
         started = time.perf_counter()
+        input_bytes = len(code.encode())
         discovery_started = time.perf_counter()
-        await self._ensure_servers_discovered(self._required_servers_for_code(code))
+        try:
+            await self._ensure_servers_discovered(self._required_servers_for_code(code))
+        except BaseException:
+            self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
+            self._record_operation_exception(
+                "execute",
+                started,
+                input_bytes,
+                failure_stage="discovery",
+            )
+            raise
         self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
         self.executor.update_catalog(self.catalog)
-        response = await self.executor.execute_graph(code, self._dispatch)
-        self._record_execution("execute", started, len(code.encode()), response)
+        try:
+            response = await self.executor.execute_graph(code, self._dispatch)
+        except BaseException as error:
+            self._record_operation_exception(
+                "execute",
+                started,
+                input_bytes,
+                failure_stage=(
+                    "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
+                ),
+            )
+            raise
+        self._record_execution("execute", started, input_bytes, response)
         return response
 
     async def _execute_chain(self, name: str, arguments: JsonObject) -> ExecutionResponse:
         started = time.perf_counter()
-        chain = self.chain_store.get(name).chain
+        input_bytes = len(to_json(arguments))
+        try:
+            chain = self.chain_store.get(name).chain
+        except BaseException:
+            self._record_operation_exception(
+                "execute_chain",
+                started,
+                input_bytes,
+                failure_stage="preflight",
+            )
+            raise
         if not chain.enabled:
             response = ExecutionResponse(
                 ok=False,
@@ -520,22 +552,59 @@ class GatewayRuntime:
             self._record_execution(
                 "execute_chain",
                 started,
-                len(to_json(arguments)),
+                input_bytes,
                 response,
             )
             return response
         discovery_started = time.perf_counter()
-        await self._ensure_servers_discovered(self._required_servers_for_chain(chain))
+        try:
+            await self._ensure_servers_discovered(self._required_servers_for_chain(chain))
+        except BaseException:
+            self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
+            self._record_operation_exception(
+                "execute_chain",
+                started,
+                input_bytes,
+                failure_stage="discovery",
+            )
+            raise
         self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
         self.executor.update_catalog(self.catalog)
-        response = await self.executor.execute_saved_chain(chain, arguments, self._dispatch)
+        try:
+            response = await self.executor.execute_saved_chain(chain, arguments, self._dispatch)
+        except BaseException as error:
+            self._record_operation_exception(
+                "execute_chain",
+                started,
+                input_bytes,
+                failure_stage=(
+                    "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
+                ),
+            )
+            raise
         self._record_execution(
             "execute_chain",
             started,
-            len(to_json(arguments)),
+            input_bytes,
             response,
         )
         return response
+
+    def _record_operation_exception(
+        self,
+        operation: str,
+        started: float,
+        input_bytes: int,
+        *,
+        failure_stage: str,
+    ) -> None:
+        self.stats_store.record_operation(
+            operation,
+            duration_ms=_elapsed_ms(started),
+            success=False,
+            failure_stage=failure_stage,
+            input_bytes=input_bytes,
+        )
 
     def _record_execution(
         self,

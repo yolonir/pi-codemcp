@@ -41,6 +41,7 @@ async def test_stats_store_aggregates_100k_calls_with_bounded_storage(
 
     await store.flush()
     snapshot = store.snapshot()
+    assert isinstance(snapshot["updated_at"], int) and snapshot["updated_at"] > 0
     lifetime = snapshot["lifetime"]
     assert isinstance(lifetime, dict)
     assert lifetime["count"] == 100_000
@@ -64,6 +65,7 @@ async def test_stats_store_aggregates_100k_calls_with_bounded_storage(
     restored = StatsStore(path)
     load_seconds = time.perf_counter() - load_started
     restored_snapshot = restored.snapshot()
+    assert restored_snapshot["updated_at"] == snapshot["updated_at"]
     restored_lifetime = restored_snapshot["lifetime"]
     assert isinstance(restored_lifetime, dict)
     assert restored_lifetime["count"] == 100_000

@@ -359,6 +359,40 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
 
 
 @pytest.mark.asyncio
+async def test_execute_telemetry_records_discovery_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(json.dumps({"mcpServers": {}}))
+    runtime = gateway.GatewayRuntime.create(
+        config_path,
+        tmp_path / "oauth",
+        tmp_path / "catalog",
+    )
+
+    async def fail_discovery(_: object) -> None:
+        raise RuntimeError("discovery failed")
+
+    monkeypatch.setattr(runtime, "_ensure_servers_discovered", fail_discovery)
+    try:
+        with pytest.raises(RuntimeError, match="discovery failed"):
+            await runtime.execute("return 1")
+        snapshot = runtime.stats_store.snapshot()
+        operations = snapshot["operations"]
+        failures = snapshot["failures"]
+        assert isinstance(operations, dict)
+        assert isinstance(failures, dict)
+        execute = operations["execute"]
+        assert isinstance(execute, dict)
+        assert execute["count"] == 1
+        assert execute["failure"] == 1
+        assert failures["discovery"] == 1
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_first_execute_discovers_and_connects_only_referenced_server(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

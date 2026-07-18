@@ -178,7 +178,9 @@ class StatsStore:
         self.cache_hits = 0
         self.cache_misses = 0
         self.recent: dict[int, Rollup] = {}
+        self.updated_at = 0
         self._dirty = False
+        self._closing = False
         self._flush_task: asyncio.Task[None] | None = None
         self._load()
 
@@ -264,7 +266,7 @@ class StatsStore:
         ]
         return JSON_OBJECT_ADAPTER.validate_python({
             "version": 1,
-            "updated_at": int(time.time()),
+            "updated_at": self.updated_at,
             "lifetime": self.lifetime.snapshot(),
             "recent": recent,
             "operations": _snapshot_mapping(self.operations),
@@ -276,6 +278,8 @@ class StatsStore:
         })
 
     def schedule_flush(self) -> None:
+        if self._closing:
+            return
         if self._flush_task is not None and not self._flush_task.done():
             return
         try:
@@ -289,9 +293,14 @@ class StatsStore:
             return
         payload = self.snapshot()
         self._dirty = False
-        await asyncio.to_thread(self._write, payload)
+        try:
+            await asyncio.to_thread(self._write, payload)
+        except BaseException:
+            self._dirty = True
+            raise
 
     async def close(self) -> None:
+        self._closing = True
         task, self._flush_task = self._flush_task, None
         if task is not None and not task.done():
             task.cancel()
@@ -305,8 +314,11 @@ class StatsStore:
             await self.flush()
         finally:
             self._flush_task = None
+            if self._dirty and not self._closing:
+                self.schedule_flush()
 
     def _changed(self) -> None:
+        self.updated_at = int(time.time())
         self._dirty = True
         self.schedule_flush()
 
@@ -351,6 +363,7 @@ class StatsStore:
             return
         if not isinstance(raw, dict) or raw.get("version") != 1:
             return
+        self.updated_at = _integer(raw.get("updated_at"))
         self.lifetime = Rollup.from_snapshot(raw.get("lifetime"))
         self.operations = _load_rollups(raw.get("operations"), MAX_OPERATIONS)
         self.phases = _load_histograms(raw.get("phases"), MAX_PHASES)
