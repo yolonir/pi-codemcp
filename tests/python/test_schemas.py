@@ -646,6 +646,36 @@ def test_catalog_selective_type_stubs_include_only_referenced_facades(
     assert len(selected) < len(representative_search_catalog.type_stubs) * 0.35
 
 
+def test_selective_type_stubs_remain_small_with_260_tools() -> None:
+    tools = [
+        mcp_types.Tool(
+            name=f"tool_{index}",
+            description=f"Return record {index}.",
+            inputSchema={
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+                "additionalProperties": False,
+            },
+            outputSchema={
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+        )
+        for index in range(260)
+    ]
+    large_catalog = ToolCatalog.from_server_tools({"bulk": tools})
+
+    selected = large_catalog.type_stubs_for({"bulk_tool_137"})
+
+    assert "async def tool_137" in selected
+    assert "async def tool_136" not in selected
+    assert "async def tool_138" not in selected
+    assert len(selected) < len(large_catalog.type_stubs) * 0.02
+
+
 def test_catalog_inspect_rejects_unknown_calls_with_suggestions(
     representative_search_catalog: ToolCatalog,
 ) -> None:
