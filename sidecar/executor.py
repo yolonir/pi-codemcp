@@ -4,6 +4,7 @@ import ast
 import asyncio
 import hashlib
 import textwrap
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Literal, Self
@@ -27,7 +28,12 @@ if TYPE_CHECKING:
 
 RESULT_BYTE_LIMIT = 16 * 1024
 SHAPE_FIELD_LIMIT = 20
+INSPECT_SAMPLE_LIMIT = 5
+INSPECT_DEPTH_LIMIT = 6
+INSPECT_COLLECTION_LIMIT = 10
+INSPECT_STRING_LIMIT = 200
 CHAIN_INPUT_EXTERNAL = "__codemcp_saved_chain_input"
+INSPECT_JSON_EXTERNAL = "__codemcp_inspect_json"
 
 
 class ExecutionContext:
@@ -364,6 +370,25 @@ class MontyExecutor:
                 return await context.call_tool(name, validated, context)
 
         external_functions: dict[str, ExternalFunction] = {}
+
+        async def inspect_json_external(
+            value: JsonValue,
+            *,
+            samples: int = 2,
+            max_depth: int = 3,
+        ) -> JsonValue:
+            await asyncio.sleep(0)
+            if not isinstance(samples, int) or isinstance(samples, bool):
+                raise TypeError("inspect_json samples must be an integer")
+            if not isinstance(max_depth, int) or isinstance(max_depth, bool):
+                raise TypeError("inspect_json max_depth must be an integer")
+            if not 0 <= samples <= INSPECT_SAMPLE_LIMIT:
+                raise ValueError(f"inspect_json samples must be from 0 to {INSPECT_SAMPLE_LIMIT}")
+            if not 1 <= max_depth <= INSPECT_DEPTH_LIMIT:
+                raise ValueError(f"inspect_json max_depth must be from 1 to {INSPECT_DEPTH_LIMIT}")
+            return _inspect_json(value, samples=samples, max_depth=max_depth)
+
+        external_functions[INSPECT_JSON_EXTERNAL] = inspect_json_external
         for spec in context.catalog.tools.values():
 
             async def sdk_method(
@@ -444,7 +469,7 @@ class MontyExecutor:
                         f"Returned value is {result_bytes} bytes; reduce it below "
                         f"{context.settings.result_byte_limit} bytes"
                     ),
-                    shape=_summarize_shape(result),
+                    shape=_inspect_json(result, samples=2, max_depth=3),
                     calls_made=context.calls_made,
                     chain_calls=context.chain_calls,
                 )
@@ -498,16 +523,120 @@ def _chain_type_stubs(catalog: ToolCatalog, _input_type: str) -> str:
     return catalog.type_stubs
 
 
-def _summarize_shape(value: JsonValue) -> JsonObject:
-    if not isinstance(value, dict):
-        return {"result": _shape_label(value)}
+def _inspect_json(value: JsonValue, *, samples: int, max_depth: int) -> JsonObject:
     summary: JsonObject = {
-        str(key): _shape_label(item) for key, item in list(value.items())[:SHAPE_FIELD_LIMIT]
+        "type": _shape_label(value),
+        "serialized_bytes": len(to_json(value)),
+        "shape": _describe_shape(value, depth=0, max_depth=max_depth),
+        "truncated": _inspection_is_truncated(value, depth=0, max_depth=max_depth),
     }
-    remaining = len(value) - len(summary)
-    if remaining > 0:
-        summary["<remaining>"] = f"{remaining} more fields"
+    cardinality = _cardinality(value)
+    if cardinality is not None:
+        summary["cardinality"] = cardinality
+    if isinstance(value, dict):
+        ranked_fields = sorted(
+            ((str(key), len(to_json(item))) for key, item in value.items()),
+            key=lambda item: (-item[1], item[0]),
+        )
+        summary["field_sizes"] = [
+            {"path": f"$.{key}", "bytes": size} for key, size in ranked_fields[:SHAPE_FIELD_LIMIT]
+        ]
+    if isinstance(value, list):
+        object_items = [item for item in value if isinstance(item, dict)]
+        if object_items:
+            key_counts = Counter(key for item in object_items for key in item)
+            summary["common_keys"] = JSON_VALUE_ADAPTER.validate_python(
+                [
+                    key
+                    for key, count in sorted(
+                        key_counts.items(), key=lambda item: (-item[1], item[0])
+                    )
+                    if count == len(object_items)
+                ][:SHAPE_FIELD_LIMIT]
+            )
+        summary["item_types"] = JSON_VALUE_ADAPTER.validate_python(
+            sorted({_shape_label(item) for item in value})
+        )
+    if samples > 0:
+        raw_samples = value[:samples] if isinstance(value, list) else [value]
+        summary["samples"] = [
+            _bounded_sample(item, depth=0, max_depth=max_depth) for item in raw_samples
+        ]
     return summary
+
+
+def _describe_shape(value: JsonValue, *, depth: int, max_depth: int) -> JsonValue:
+    if depth >= max_depth:
+        return _shape_label(value)
+    if isinstance(value, dict):
+        fields: JsonObject = {
+            str(key): _describe_shape(item, depth=depth + 1, max_depth=max_depth)
+            for key, item in list(value.items())[:SHAPE_FIELD_LIMIT]
+        }
+        remaining = len(value) - len(fields)
+        if remaining > 0:
+            fields["<remaining>"] = f"{remaining} more fields"
+        return fields
+    if isinstance(value, list):
+        shapes: list[JsonValue] = []
+        seen: set[str] = set()
+        for item in value[:INSPECT_COLLECTION_LIMIT]:
+            shape = _describe_shape(item, depth=depth + 1, max_depth=max_depth)
+            fingerprint = to_json(shape).decode()
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            shapes.append(shape)
+        return {"items": shapes, "count": len(value)}
+    return _shape_label(value)
+
+
+def _bounded_sample(value: JsonValue, *, depth: int, max_depth: int) -> JsonValue:
+    if depth >= max_depth:
+        return _shape_label(value)
+    if isinstance(value, str):
+        return value if len(value) <= INSPECT_STRING_LIMIT else f"{value[:INSPECT_STRING_LIMIT]}…"
+    if isinstance(value, dict):
+        object_sample: JsonObject = {
+            str(key): _bounded_sample(item, depth=depth + 1, max_depth=max_depth)
+            for key, item in list(value.items())[:INSPECT_COLLECTION_LIMIT]
+        }
+        if len(value) > INSPECT_COLLECTION_LIMIT:
+            object_sample["<remaining>"] = len(value) - INSPECT_COLLECTION_LIMIT
+        return object_sample
+    if isinstance(value, list):
+        list_sample: list[JsonValue] = [
+            _bounded_sample(item, depth=depth + 1, max_depth=max_depth)
+            for item in value[:INSPECT_COLLECTION_LIMIT]
+        ]
+        if len(value) > INSPECT_COLLECTION_LIMIT:
+            list_sample.append(f"<{len(value) - INSPECT_COLLECTION_LIMIT} more items>")
+        return list_sample
+    return value
+
+
+def _inspection_is_truncated(value: JsonValue, *, depth: int, max_depth: int) -> bool:
+    if depth >= max_depth and isinstance(value, (dict, list)):
+        return True
+    if isinstance(value, dict):
+        return len(value) > SHAPE_FIELD_LIMIT or any(
+            _inspection_is_truncated(item, depth=depth + 1, max_depth=max_depth)
+            for item in list(value.values())[:SHAPE_FIELD_LIMIT]
+        )
+    if isinstance(value, list):
+        return len(value) > INSPECT_COLLECTION_LIMIT or any(
+            _inspection_is_truncated(item, depth=depth + 1, max_depth=max_depth)
+            for item in value[:INSPECT_COLLECTION_LIMIT]
+        )
+    if isinstance(value, str):
+        return len(value) > INSPECT_STRING_LIMIT
+    return False
+
+
+def _cardinality(value: JsonValue) -> int | None:
+    if isinstance(value, (dict, list, str)):
+        return len(value)
+    return None
 
 
 def _shape_label(value: JsonValue) -> str:
@@ -570,6 +699,13 @@ def _rewrite_sdk_calls(code: str, catalog: ToolCatalog) -> str:
         def visit_Call(self, node: ast.Call) -> ast.AST:
             self.generic_visit(node)
             function = node.func
+            if isinstance(function, ast.Name) and function.id == "inspect_json":
+                external_call = ast.Call(
+                    func=ast.Name(id=INSPECT_JSON_EXTERNAL, ctx=ast.Load()),
+                    args=node.args,
+                    keywords=node.keywords,
+                )
+                return ast.copy_location(ast.Await(value=external_call), node)
             if not isinstance(function, ast.Attribute):
                 return node
             if not isinstance(function.value, ast.Name):

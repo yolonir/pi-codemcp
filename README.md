@@ -90,7 +90,7 @@ issues = await linear.list_issues({"assignee": "me", "limit": 50})
 return {"count": len(issues), "ids": [issue["identifier"] for issue in issues]}
 ```
 
-Incomplete upstream schemas become recursive `JsonValue`, not `Any`; unknown values must be narrowed explicitly before typed use.
+Incomplete upstream schemas become recursive `JsonValue`, not `Any`; unknown values must be narrowed explicitly before typed use. For unfamiliar outputs, `inspect_json(value, samples=2, max_depth=3)` returns a bounded structural summary, cardinality, field sizes, and samples. Oversized final results fail explicitly with the same actionable inspection data.
 
 ## Safety and limits
 
