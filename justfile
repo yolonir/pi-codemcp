@@ -80,11 +80,13 @@ release-check:
         rm -rf "$temporary"
     }
     trap cleanup EXIT
-    npm pack --pack-destination "$temporary" >/dev/null
+    bun pm pack --destination "$temporary" --ignore-scripts >/dev/null
     tarballs=("$temporary"/pi-codemcp-*.tgz)
     [[ ${#tarballs[@]} -eq 1 && -f "${tarballs[0]}" ]]
-    npm install --prefix "$temporary/consumer" --omit=dev --legacy-peer-deps \
-        "${tarballs[0]}" >/dev/null
+    mkdir -p "$temporary/consumer"
+    printf '{"private":true}\n' > "$temporary/consumer/package.json"
+    bun add --cwd "$temporary/consumer" --no-save --production --omit peer \
+        --ignore-scripts "${tarballs[0]}" >/dev/null
     package_root="$temporary/consumer/node_modules/pi-codemcp"
     [[ -f "$package_root/extensions/index.ts" ]]
     [[ -f "$package_root/sidecar/uv.lock" ]]
