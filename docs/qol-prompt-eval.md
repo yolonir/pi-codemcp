@@ -1,38 +1,18 @@
-# CodeMCP Terra A/B evaluation
+# CodeMCP prompt replay evaluation
 
 Date: 2026-07-18
 
-Model: `openai-codex/gpt-5.6-terra`, reasoning `low`, ephemeral sessions.
+Model: `openai-codex/gpt-5.6-terra`, reasoning `low`, ephemeral session, tools and extensions disabled.
 
-## Compared versions
+The replay uses the seven sanitized routing and stopping cases in `tests/fixtures/prompt-replay.json`. Each run received the same cases and was required to return one action per case. The baseline was the previous search/execute/save guidance; the candidate was the modular guidance in `src/prompts.ts`.
 
-- Baseline: commit `2165255`, immediately before the QoL work.
-- Current: QoL implementation with the model-facing search interface, search/execute prompt, tool descriptions, and fuzzy ranking restored to the baseline design. Search takes only `query`, optional `limit`, and optional `server`; every result contains its full typed stub. The separate inspect tool is removed.
+| Variant | Correct | Input tokens | Output tokens | Total tokens | Latency | Cost |
+|---|---:|---:|---:|---:|---:|---:|
+| Previous guidance | 6/7 (85.7%) | 824 | 81 | 905 | 6 s | $0.003275 |
+| Candidate guidance | 7/7 (100%) | 892 | 80 | 972 | 6 s | $0.003430 |
 
-Both variants used the same warm local deterministic MCP server. Baseline and current sessions were launched simultaneously in pairs.
+The previous guidance chose ranked capability search when asked to enumerate a known server. The candidate chose paginated inventory and matched all expected decisions: reuse known signatures, inventory for enumeration, programmatic execution for deterministic reduction, preserve model turns for semantic branches, stop at approval boundaries, inspect unfamiliar large values with bounded samples, and test code successfully before saving.
 
-## Final five-task replay
+The candidate costs 67 additional input tokens and $0.000155 in this replay, with no observed latency increase. It is retained because the shorter baseline regressed the inventory decision. No `asyncio.gather` example was added: the replay did not expose a failure that justified its context cost.
 
-The replay covered tool enumeration, incident filtering, a three-source aggregate, dependent metrics calls, and reduction of 120 events.
-
-| Metric | Baseline | Current |
-|---|---:|---:|
-| Correct answers | 5/5 | 5/5 |
-| Mean latency | 11.2 s | 11.2 s |
-| Parallel wall time | 16 s | 14 s |
-| Tool calls | 10 | 10 |
-| Searches | 6 | 6 |
-| Execute success / failure | 4 / 0 | 4 / 0 |
-| Upstream MCP calls | 8 | 8 |
-| Total tokens | 30,436 | 30,923 |
-| Cost | $0.057742 | $0.064995 |
-| Search output bytes | 15,024 | 12,997 |
-| All tool output bytes | 15,532 | 13,203 |
-
-Current matched baseline correctness, first-attempt reliability, call counts, and mean latency. It reduced search payload by 13.5% and total tool payload by 15.0%. Total tokens were 1.6% higher. Cost was 12.6% higher in this five-pair sample because provider cache allocation differed materially between paired requests; the raw uncached/cache split should be considered alongside billed cost.
-
-The final simplification removed `mode`, `detail`, `cursor`, inventory, pagination, the separate inspect tool, hybrid/BM25 ranking, score metadata, matched-field metadata, and the longer experimental search/execute prompts. The retained QoL work is below the model-facing orchestration layer: compact execute results, bounded introspection, local telemetry, saved-chain management, and selective internal type stubs.
-
-Earlier progressive-discovery and long-prompt candidates were rejected because live replays showed extra searches, import mistakes, and execution retries.
-
-Raw JSONL events and the aggregate used for this report were retained locally under `/tmp/pi-codemcp-qol-bench/`. The final files are `final3-*.jsonl` and `final3-summary.json`.
+This replay evaluates prompt-level decisions, not live upstream task success. Runtime task outcomes, call counts, latency, bytes, failure stages, and chain reuse are measured locally by the bounded Stats rollups implemented for this specification.

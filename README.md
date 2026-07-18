@@ -4,7 +4,8 @@ Fast, typed, sandboxed **Code Mode for every MCP server configured in Pi**.
 
 Instead of putting every upstream MCP tool definition into the model context, pi-codemcp gives the agent a small interface for discovery, execution, and reuse:
 
-- `codemcp_search` ranks capabilities and returns each match's exact typed stub.
+- `codemcp_search` ranks capabilities or pages through a compact inventory without loading full schemas.
+- `codemcp_inspect` returns exact typed SDK stubs only for selected calls.
 - `codemcp_execute` runs one sandboxed Python call graph across one or many MCP servers.
 - `codemcp_save_chain` turns a repeated call graph into a reusable native Pi tool.
 - `codemcp_manage_chains` lists chains or performs an explicitly confirmed enable, disable, revalidate, or delete.
@@ -19,11 +20,12 @@ Cloudflare described a better pattern in [Code Mode: give agents an entire API i
 
 pi-codemcp applies that idea on the **client side** to the MCP servers you already use in Pi:
 
-1. Search the combined catalog and receive exact schemas with the matches.
-2. Type-check a compact Python plan before any upstream call happens.
-3. Execute dependent or parallel calls without model round-trips between them.
-4. Return only the final data the agent actually needs.
-5. Save stable plans as native tools and reuse them without rewriting the call graph.
+1. Search the combined catalog or page through a compact inventory.
+2. Inspect exact schemas only for the calls selected for the task.
+3. Type-check a compact Python plan before any upstream call happens.
+4. Execute dependent or parallel calls without model round-trips between them.
+5. Return only the final data the agent actually needs.
+6. Save stable plans as native tools and reuse them without rewriting the call graph.
 
 That can make complex MCP workflows faster and substantially more token-efficient. Exact savings depend on the servers, schemas, model, and task.
 
@@ -85,7 +87,7 @@ Package users do not need Python, uv, Bun, or just. A pinned uv binary bootstrap
 
 ## Agent workflow
 
-The agent searches for a capability, receives its exact stub in the search result, and executes a compact plan:
+The agent searches for a capability, inspects the selected exact stub when needed, and executes a compact plan:
 
 ```python
 issues = await linear.list_issues({"assignee": "me", "limit": 50})

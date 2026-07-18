@@ -19,6 +19,7 @@ type JsonObject = Record<string, unknown>;
 
 export type SidecarToolName =
   | "search"
+  | "inspect"
   | "discover"
   | "reload_settings"
   | "apply_manager_changes"

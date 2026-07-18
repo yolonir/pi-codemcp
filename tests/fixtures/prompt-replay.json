@@ -2,12 +2,12 @@
   {
     "name": "reuse disclosed signature",
     "situation": "The exact current SDK signature is already in context.",
-    "expected": "search before execution"
+    "expected": "execute without another search"
   },
   {
     "name": "enumerate tools",
     "situation": "The user asks which tools a known server exposes.",
-    "expected": "use one capability search with a sufficient limit"
+    "expected": "use inventory mode with pagination"
   },
   {
     "name": "bounded aggregation",

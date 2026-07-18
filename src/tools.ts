@@ -16,6 +16,7 @@ import type { CodeMcpLifecycle } from "./lifecycle.js";
 import { type CodeMcpOutputDetails, formatCodeMcpOutput } from "./output.js";
 import {
   EXECUTE_PROMPT_GUIDELINES,
+  INSPECT_PROMPT_GUIDELINES,
   MANAGE_CHAIN_PROMPT_GUIDELINES,
   SAVE_CHAIN_PROMPT_GUIDELINES,
   SEARCH_PROMPT_GUIDELINES,
@@ -25,19 +26,42 @@ interface SearchRenderDetails extends CodeMcpOutputDetails {
   matchCount: number;
   totalToolCount: number;
   serverCount: number;
+  hasMore: boolean;
+  nextCursor?: number;
+  detail: string;
   preview: string[];
 }
 
 const SearchParameters = Type.Object({
-  query: Type.String({
-    minLength: 1,
-    description: "Words describing an upstream capability, tool, or saved chain",
-  }),
+  query: Type.Optional(
+    Type.String({
+      minLength: 1,
+      description: "Capability words for search mode; omit for inventory mode",
+    }),
+  ),
+  mode: Type.Optional(
+    Type.String({
+      enum: ["search", "inventory"],
+      description: "Rank by capability (default) or page through compact inventory",
+    }),
+  ),
+  detail: Type.Optional(
+    Type.String({
+      enum: ["names", "signatures", "full"],
+      description: "Disclosure level (default signatures); use inspect for selected full stubs",
+    }),
+  ),
   limit: Type.Optional(
     Type.Integer({
       minimum: 1,
       maximum: 20,
-      description: "Maximum matches to return (default 5)",
+      description: "Maximum matches per page (default 5)",
+    }),
+  ),
+  cursor: Type.Optional(
+    Type.Integer({
+      minimum: 0,
+      description: "Pagination cursor returned by a previous search",
     }),
   ),
   server: Type.Optional(
@@ -46,6 +70,14 @@ const SearchParameters = Type.Object({
       description: "Exact configured server name, or chains for saved chains",
     }),
   ),
+});
+
+const InspectParameters = Type.Object({
+  calls: Type.Array(Type.String({ minLength: 1 }), {
+    minItems: 1,
+    maxItems: 20,
+    description: "Exact call identifiers returned by search, such as grafana.query_prometheus",
+  }),
 });
 
 const SaveChainParameters = Type.Object({
@@ -122,8 +154,8 @@ export function registerCodeMcpTools(
     name: "codemcp_search",
     label: "MCP Search",
     description:
-      "Search configured upstream MCP tools and saved chains, returning their typed SDK stubs.",
-    promptSnippet: "Search MCP capabilities and reusable chains, then inspect typed SDK stubs",
+      "Search configured MCP capabilities or page through compact inventory. Returns names, signatures, ranking evidence, pagination, scope, and execution limits; invalid server names fail with suggestions. Exact stubs are available through codemcp_inspect.",
+    promptSnippet: "Discover compact MCP capabilities or inventory",
     promptGuidelines: [...SEARCH_PROMPT_GUIDELINES],
     parameters: SearchParameters,
     async execute(_toolCallId, params, signal, onUpdate) {
@@ -134,8 +166,11 @@ export function registerCodeMcpTools(
       const result = await lifecycle.request(
         "search",
         {
-          query: params.query,
+          ...(params.query === undefined ? {} : { query: params.query }),
+          mode: params.mode ?? "search",
+          detail: params.detail ?? "signatures",
           limit: params.limit ?? 5,
+          cursor: params.cursor ?? 0,
           ...(params.server === undefined ? {} : { server: params.server }),
         },
         signal,
@@ -158,13 +193,17 @@ export function registerCodeMcpTools(
           matchCount: results.length,
           totalToolCount: Number(result.total_tool_count ?? 0),
           serverCount: servers.length,
+          hasMore: result.has_more === true,
+          nextCursor: typeof result.next_cursor === "number" ? result.next_cursor : undefined,
+          detail: typeof result.detail === "string" ? result.detail : "signatures",
           preview,
         },
       };
     },
     renderCall(args, theme) {
+      const subject = args.mode === "inventory" ? "inventory" : `"${args.query ?? ""}"`;
       return new Text(
-        `${theme.fg("toolTitle", theme.bold("MCP Search "))}${theme.fg("accent", `"${args.query}"`)}`,
+        `${theme.fg("toolTitle", theme.bold("MCP Search "))}${theme.fg("accent", subject)}`,
         0,
         0,
       );
@@ -175,12 +214,64 @@ export function registerCodeMcpTools(
       const details = result.details as SearchRenderDetails | undefined;
       let text = theme.fg(
         "success",
-        `${details?.matchCount ?? 0} matches · ${details?.totalToolCount ?? 0} tools · ${details?.serverCount ?? 0} servers`,
+        `${details?.matchCount ?? 0} matches · ${details?.detail ?? "signatures"} · ${details?.totalToolCount ?? 0} tools · ${details?.serverCount ?? 0} servers`,
       );
       for (const name of details?.preview ?? []) {
         text += `\n${theme.fg("dim", `  ${name}`)}`;
       }
+      if (details?.hasMore) {
+        text += `\n${theme.fg("muted", `  more at cursor ${details.nextCursor ?? "?"}`)}`;
+      }
       text += `\n${theme.fg("muted", keyHint("app.tools.expand", "full results"))}`;
+      return new Text(text, 0, 0);
+    },
+  });
+
+  pi.registerTool({
+    name: "codemcp_inspect",
+    label: "MCP Inspect",
+    description:
+      "Return the exact typed SDK stubs for selected call identifiers from codemcp_search. The response deduplicates the shared JsonValue/type prelude.",
+    promptSnippet: "Load exact typed contracts for selected MCP calls",
+    promptGuidelines: [...INSPECT_PROMPT_GUIDELINES],
+    parameters: InspectParameters,
+    async execute(_toolCallId, params, signal, onUpdate) {
+      onUpdate?.({
+        content: [{ type: "text", text: "Inspecting MCP tool contracts..." }],
+        details: undefined,
+      });
+      const result = await lifecycle.request("inspect", { calls: params.calls }, signal);
+      const output = formatCodeMcpOutput(result, outputLimits(lifecycle));
+      const results = Array.isArray(result.results) ? result.results : [];
+      return {
+        content: [{ type: "text", text: output.text }],
+        details: {
+          ...output.details,
+          matchCount: results.length,
+          preview: results
+            .slice(0, 3)
+            .flatMap((item) =>
+              isRecord(item) && typeof item.call === "string" ? [item.call] : [],
+            ),
+        },
+      };
+    },
+    renderCall(args, theme) {
+      return new Text(
+        `${theme.fg("toolTitle", theme.bold("MCP Inspect "))}${theme.fg("accent", `${args.calls.length} calls`)}`,
+        0,
+        0,
+      );
+    },
+    renderResult(result, { expanded, isPartial }, theme) {
+      if (isPartial) return new Text(theme.fg("warning", "Loading exact contracts..."), 0, 0);
+      if (expanded) return renderExpandedJson(result.content);
+      const details = result.details as
+        | (CodeMcpOutputDetails & { matchCount: number; preview: string[] })
+        | undefined;
+      let text = theme.fg("success", `${details?.matchCount ?? 0} exact contracts`);
+      for (const call of details?.preview ?? []) text += `\n${theme.fg("dim", `  ${call}`)}`;
+      text += `\n${theme.fg("muted", keyHint("app.tools.expand", "full stubs"))}`;
       return new Text(text, 0, 0);
     },
   });
@@ -189,8 +280,8 @@ export function registerCodeMcpTools(
     name: "codemcp_execute",
     label: "MCP Execute",
     description:
-      "Type-check and execute one sandboxed Python MCP call graph. Supports sequential and dependent calls, loops, conditions, cross-server calls, enabled upstream tools, and reusable chains.* calls. The code has no host filesystem, environment, network, or subprocess access. Return a compact final value within the configured result limit; oversized values fail with a shape summary.",
-    promptSnippet: "Run a typed, sandboxed multi-call chain across configured MCP servers",
+      "Type-check and execute one bounded sandboxed Python MCP call graph. Use it when code can deterministically process intermediate results; preserve a model turn for semantic decisions or approvals. The sandbox has no host filesystem, environment, network, or subprocess access. Oversized results fail with bounded shape, size, and sample diagnostics.",
+    promptSnippet: "Run a bounded typed MCP workflow and return a compact result",
     promptGuidelines: [...EXECUTE_PROMPT_GUIDELINES],
     parameters: ExecuteParameters,
     async execute(_toolCallId, params, signal, onUpdate) {
