@@ -1,7 +1,12 @@
 import { type ExtensionAPI, highlightCode, keyHint } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { type ChainScope, nativeChainToolName, type SavedChainManager } from "./chains.js";
+import {
+  type ChainScope,
+  nativeChainToolName,
+  type SavedChainManager,
+  type SavedChainView,
+} from "./chains.js";
 import {
   getTextContent,
   previewExecutionValue,
@@ -12,6 +17,7 @@ import { type CodeMcpOutputDetails, formatCodeMcpOutput } from "./output.js";
 import {
   EXECUTE_PROMPT_GUIDELINES,
   INSPECT_PROMPT_GUIDELINES,
+  MANAGE_CHAIN_PROMPT_GUIDELINES,
   SAVE_CHAIN_PROMPT_GUIDELINES,
   SEARCH_PROMPT_GUIDELINES,
 } from "./prompts.js";
@@ -103,6 +109,32 @@ const SaveChainParameters = Type.Object({
   outputSchema: Type.Record(Type.String(), Type.Unknown(), {
     description: "Required JSON Schema for the chain return value",
   }),
+});
+
+const ManageChainsParameters = Type.Object({
+  action: Type.String({
+    enum: ["list", "enable", "disable", "revalidate", "delete"],
+    description: "Chain management action",
+  }),
+  name: Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: 64,
+      pattern: "^[a-z][a-z0-9_]{0,63}$",
+      description: "Saved-chain name; required for mutations",
+    }),
+  ),
+  scope: Type.Optional(
+    Type.String({
+      enum: ["project", "global"],
+      description: "Saved-chain scope; required for mutations",
+    }),
+  ),
+  confirmedByUser: Type.Optional(
+    Type.Boolean({
+      description: "Must be true for enable, disable, revalidate, or delete",
+    }),
+  ),
 });
 
 const ExecuteParameters = Type.Object({
@@ -312,11 +344,16 @@ export function registerCodeMcpTools(
     promptGuidelines: [...SAVE_CHAIN_PROMPT_GUIDELINES],
     parameters: SaveChainParameters,
     async execute(_toolCallId, params, signal, onUpdate) {
+      const scope = requireChainScope(params.scope ?? "project");
+      if (scope === "project" && lifecycle.projectChainsPath === undefined) {
+        throw new Error(
+          "Project saved-chain scope is unavailable in this session; ask before using global scope",
+        );
+      }
       onUpdate?.({
         content: [{ type: "text", text: `Validating saved chain ${params.name}...` }],
         details: undefined,
       });
-      const scope = requireChainScope(params.scope ?? "project");
       const view = await chains.save(
         {
           scope,
@@ -387,6 +424,97 @@ export function registerCodeMcpTools(
       );
     },
   });
+
+  pi.registerTool({
+    name: "codemcp_manage_chains",
+    label: "Manage MCP Chains",
+    description:
+      "List saved chains, or explicitly enable, disable, revalidate, or delete one scoped chain. Mutations require confirmedByUser=true and never bypass dependency checks.",
+    promptSnippet: "List or explicitly manage saved MCP chains",
+    promptGuidelines: [...MANAGE_CHAIN_PROMPT_GUIDELINES],
+    parameters: ManageChainsParameters,
+    async execute(_toolCallId, params, signal, onUpdate) {
+      const action = params.action;
+      let views: SavedChainView[];
+      if (action === "list") {
+        views = await chains.list(signal);
+      } else {
+        if (params.confirmedByUser !== true) {
+          throw new Error(`${action} requires confirmedByUser=true after explicit user approval`);
+        }
+        if (params.name === undefined || params.scope === undefined) {
+          throw new Error(`${action} requires name and scope`);
+        }
+        const scope = requireChainScope(params.scope);
+        if (scope === "project" && lifecycle.projectChainsPath === undefined) {
+          throw new Error("Project saved-chain scope is unavailable in this session");
+        }
+        onUpdate?.({
+          content: [{ type: "text", text: `${action} saved chain ${params.name}...` }],
+          details: undefined,
+        });
+        if (action === "enable" || action === "disable") {
+          const applied = await chains.applyEnabled(
+            [{ name: params.name, scope, enabled: action === "enable" }],
+            signal,
+          );
+          views = applied.chains;
+        } else if (action === "revalidate") {
+          await chains.revalidate(params.name, scope, signal);
+          views = await chains.list(signal);
+        } else {
+          views = await chains.delete(params.name, scope, signal);
+        }
+      }
+      const result = {
+        action,
+        project_scope_available: lifecycle.projectChainsPath !== undefined,
+        chains: views.map(compactChainView),
+      };
+      const output = formatCodeMcpOutput(result, outputLimits(lifecycle));
+      return {
+        content: [{ type: "text", text: output.text }],
+        details: {
+          ...output.details,
+          action,
+          chainCount: views.length,
+        },
+      };
+    },
+    renderCall(args, theme) {
+      return new Text(
+        `${theme.fg("toolTitle", theme.bold("Manage MCP Chains "))}${theme.fg("accent", args.action)}${args.name ? ` ${theme.fg("muted", args.name)}` : ""}`,
+        0,
+        0,
+      );
+    },
+    renderResult(result, { expanded, isPartial }, theme) {
+      if (isPartial) return new Text(theme.fg("warning", "Managing saved chains..."), 0, 0);
+      if (expanded) return renderExpandedJson(result.content);
+      const details = result.details as
+        | (CodeMcpOutputDetails & { action: string; chainCount: number })
+        | undefined;
+      return new Text(
+        theme.fg("success", `${details?.action ?? "list"} · ${details?.chainCount ?? 0} chains`),
+        0,
+        0,
+      );
+    },
+  });
+}
+
+function compactChainView(view: SavedChainView) {
+  return {
+    name: view.chain.name,
+    scope: view.scope,
+    status: view.status,
+    enabled: view.chain.enabled,
+    description: view.chain.description,
+    native_tool: nativeChainToolName(view.chain.name),
+    call: `chains.${view.chain.name}`,
+    stale_dependencies: view.staleDependencies,
+    called_by: view.calledBy,
+  };
 }
 
 function renderExpandedJson(content: readonly unknown[]): Text {

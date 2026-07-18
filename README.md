@@ -8,6 +8,7 @@ Instead of putting every upstream MCP tool definition into the model context, pi
 - `codemcp_inspect` returns exact typed SDK stubs only for selected calls.
 - `codemcp_execute` runs one sandboxed Python call graph across one or many MCP servers.
 - `codemcp_save_chain` turns a repeated call graph into a reusable native Pi tool.
+- `codemcp_manage_chains` lists chains or performs an explicitly confirmed enable, disable, revalidate, or delete.
 
 Intermediate results stay inside the sandbox. The model receives only the compact value returned by the program.
 

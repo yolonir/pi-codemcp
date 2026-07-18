@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   EXECUTE_PROMPT_GUIDELINES,
   INSPECT_PROMPT_GUIDELINES,
+  MANAGE_CHAIN_PROMPT_GUIDELINES,
   SAVE_CHAIN_PROMPT_GUIDELINES,
   SEARCH_PROMPT_GUIDELINES,
 } from "../../src/prompts.js";
@@ -23,6 +24,7 @@ const allGuidelines = [
   ...INSPECT_PROMPT_GUIDELINES,
   ...EXECUTE_PROMPT_GUIDELINES,
   ...SAVE_CHAIN_PROMPT_GUIDELINES,
+  ...MANAGE_CHAIN_PROMPT_GUIDELINES,
 ];
 
 test("agent prompt policy is lean, decision-based, and non-contradictory", () => {

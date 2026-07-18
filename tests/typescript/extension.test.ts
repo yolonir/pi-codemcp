@@ -30,6 +30,7 @@ describe("Pi extension registration", () => {
       "codemcp_inspect",
       "codemcp_execute",
       "codemcp_save_chain",
+      "codemcp_manage_chains",
     ]);
     expect(commands).toEqual(["codemcp"]);
     expect(events).toEqual(["session_start", "session_shutdown"]);
@@ -51,6 +52,12 @@ describe("Pi extension registration", () => {
     expect(tools[3]?.parameters).toMatchObject({
       properties: {
         scope: { type: "string", enum: ["project", "global"] },
+      },
+    });
+    expect(tools[4]?.parameters).toMatchObject({
+      properties: {
+        action: { enum: ["list", "enable", "disable", "revalidate", "delete"] },
+        confirmedByUser: { type: "boolean" },
       },
     });
   });

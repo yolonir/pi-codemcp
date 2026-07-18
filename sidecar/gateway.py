@@ -45,7 +45,7 @@ from .models import (
 )
 from .settings import CodeMcpSettings, load_settings
 from .stats import StatsStore
-from .tool_catalog import ToolCatalog
+from .tool_catalog import ToolCatalog, schema_path_summary
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
@@ -634,7 +634,7 @@ class GatewayRuntime:
                 message = error.display("concise", color=False).strip()
             else:
                 message = error.display("type-msg").strip()
-            raise ValueError(f"Saved chain failed preflight: {message}") from error
+            raise ValueError(_saved_chain_preflight_error(message, output_schema)) from error
         dependencies = self._chain_dependencies(code, candidate_catalog)
         saved = ChainStore.build(
             name=name,
@@ -697,7 +697,9 @@ class GatewayRuntime:
                 message = error.display("concise", color=False).strip()
             else:
                 message = error.display("type-msg").strip()
-            raise ValueError(f"Saved chain failed preflight: {message}") from error
+            raise ValueError(
+                _saved_chain_preflight_error(message, current.output_schema)
+            ) from error
         updated = current.model_copy(
             update={
                 "dependencies": self._chain_dependencies(current.code, candidate_catalog),
@@ -1033,6 +1035,15 @@ class GatewayRuntime:
             and isinstance(node.value, ast.Name)
             and node.value.id in aliases
         }
+
+
+def _saved_chain_preflight_error(message: str, output_schema: JsonObject) -> str:
+    expected = "\n".join(f"  - {path}" for path in schema_path_summary(output_schema))
+    return (
+        "Saved chain failed preflight against outputSchema.\n"
+        f"Expected output paths:\n{expected}\n"
+        f"Actual type-check result:\n{message}"
+    )
 
 
 def _elapsed_ms(started: float) -> float:

@@ -427,6 +427,20 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
     }
 
     try:
+        with pytest.raises(ValueError) as invalid_chain:
+            await runtime.chains.save(
+                scope="global",
+                name="invalid_countdown",
+                description="Return an invalid output shape.",
+                code='return {"value": "wrong"}',
+                input_schema=integer_input,
+                output_schema=integer_output,
+            )
+        validation_message = str(invalid_chain.value)
+        assert "failed preflight against outputSchema" in validation_message
+        assert "$.value: integer (required)" in validation_message
+        assert "Actual type-check result" in validation_message
+
         saved = await runtime.chains.save(
             scope="global",
             name="countdown",
@@ -516,6 +530,75 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
             if view.chain.name == "double_countdown"
         )
         assert dependent.status == "stale"
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_saved_chain_nested_generated_output_types_execute_without_name_errors(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(json.dumps({"mcpServers": {}}))
+    runtime = gateway.GatewayRuntime.create(
+        config_path,
+        tmp_path / "oauth",
+        tmp_path / "catalog",
+    )
+    nested_output = {
+        "type": "object",
+        "properties": {
+            "positions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string"},
+                        "legs": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "exchange": {"type": "string"},
+                                    "size": {"type": "number"},
+                                },
+                                "required": ["exchange", "size"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                    "required": ["symbol", "legs"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["positions"],
+        "additionalProperties": False,
+    }
+    try:
+        await runtime.chains.save(
+            scope="global",
+            name="nested_positions",
+            description="Return nested generated output types.",
+            code='return {"positions": [{"symbol": "BTC", "legs": [{"exchange": "alpha", "size": 1.5}]}]}',
+            input_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            output_schema=nested_output,
+        )
+        native = await runtime.chains.execute("nested_positions", {})
+        assert native.ok is True
+        assert native.result == {
+            "positions": [
+                {"symbol": "BTC", "legs": [{"exchange": "alpha", "size": 1.5}]}
+            ]
+        }
+        nested = await runtime.execute("return await chains.nested_positions({})")
+        assert nested.ok is True
+        assert nested.result == native.result
+        assert not (nested.error and "NameError" in nested.error)
     finally:
         await runtime.close()
 

@@ -759,6 +759,37 @@ class StubBuilder:
             self._active_refs.remove(ref)
 
 
+def schema_path_summary(schema: JsonObject, *, limit: int = 20) -> list[str]:
+    paths: list[str] = []
+
+    def visit(value: JsonSchema, path: str, *, required: bool) -> None:
+        if len(paths) >= limit:
+            return
+        label = _schema_type_label(value)
+        paths.append(f"{path}: {label}{' (required)' if required else ' (optional)'}")
+        if not isinstance(value, dict):
+            return
+        raw_properties = value.get("properties")
+        properties = raw_properties if isinstance(raw_properties, dict) else {}
+        raw_required = value.get("required")
+        required_names = (
+            {item for item in raw_required if isinstance(item, str)}
+            if isinstance(raw_required, list)
+            else set()
+        )
+        for name, child in properties.items():
+            if isinstance(child, (dict, bool)):
+                visit(child, f"{path}.{name}", required=name in required_names)
+        items = value.get("items")
+        if isinstance(items, (dict, bool)):
+            visit(items, f"{path}[]", required=True)
+
+    visit(schema, "$", required=True)
+    if len(paths) >= limit:
+        paths.append(f"<limited to {limit} paths>")
+    return paths
+
+
 def referenced_calls(code: str, facade_calls: dict[tuple[str, str], str]) -> set[str]:
     normalized = textwrap.dedent(code).strip("\n")
     wrapped = f"async def __codemcp_main():\n{textwrap.indent(normalized, '    ')}\n"
@@ -796,6 +827,19 @@ def _tool_view(
         score=score,
         matched_fields=matched_fields or [],
     )
+
+
+def _schema_type_label(schema: JsonSchema) -> str:
+    if isinstance(schema, bool):
+        return "any JSON value" if schema else "never"
+    raw_type = schema.get("type")
+    if isinstance(raw_type, str):
+        return raw_type
+    if isinstance(raw_type, list):
+        return " | ".join(str(item) for item in raw_type)
+    if "oneOf" in schema or "anyOf" in schema:
+        return "union"
+    return "JSON value"
 
 
 def _short_description(description: str | None, limit: int = 240) -> str | None:

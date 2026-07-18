@@ -22,6 +22,7 @@ from pydantic import (
 from pydantic_core import to_json
 
 from .json_types import JSON_VALUE_ADAPTER, JsonObject, JsonValue
+from .tool_catalog import schema_path_summary
 
 if TYPE_CHECKING:
     from .chains import SavedChainManifest
@@ -476,10 +477,11 @@ class MontyExecutor:
             try:
                 result = context.catalog.validate_saved_chain_result(output_spec_name, result)
             except (TypeError, ValidationError, ValueError) as error:
+                spec = context.catalog.tools[output_spec_name]
                 return self._failure(
                     context,
                     "result",
-                    f"Saved chain result violates its output schema: {error}",
+                    _saved_chain_result_error(error, spec.output_schema or {}),
                 )
 
         serialization_started = time.perf_counter()
@@ -547,6 +549,30 @@ class MontyExecutor:
         )
         response.metrics = context.metrics.model_copy()
         return response
+
+
+def _saved_chain_result_error(
+    error: TypeError | ValidationError | ValueError,
+    output_schema: JsonObject,
+) -> str:
+    expected = "\n".join(f"  - {path}" for path in schema_path_summary(output_schema))
+    if isinstance(error, ValidationError):
+        actual_lines = []
+        for item in error.errors()[:SHAPE_FIELD_LIMIT]:
+            location = "$" + "".join(
+                f"[{part}]" if isinstance(part, int) else f".{part}" for part in item["loc"]
+            )
+            actual_lines.append(
+                f"  - {location}: {item['msg']} (actual {type(item.get('input')).__name__})"
+            )
+        actual = "\n".join(actual_lines)
+    else:
+        actual = f"  - $: {error}"
+    return (
+        "Saved chain result violates outputSchema.\n"
+        f"Expected output paths:\n{expected}\n"
+        f"Actual result paths:\n{actual}"
+    )
 
 
 def _elapsed_ms(started: float) -> float:
