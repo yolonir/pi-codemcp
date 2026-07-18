@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import keyword
+import math
 import re
+import textwrap
+from collections import Counter
 from typing import TYPE_CHECKING, Literal
 
 from fastmcp.utilities.json_schema_type import json_schema_to_type
 from mcp import types as mcp_types
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 from pydantic_core import to_jsonable_python
-from rapidfuzz import fuzz, process, utils
+from rapidfuzz import fuzz
 
 from .json_types import (
     JSON_OBJECT_ADAPTER,
@@ -19,20 +23,24 @@ from .json_types import (
     JsonSchema,
     JsonValue,
 )
-from .models import ToolSchemaView
+from .models import SearchDetail, ToolSchemaView
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from .chains import SavedChainManifest
 
-# A 50-point partial match is generic half-string overlap; require evidence above it.
-SEARCH_SCORE_CUTOFF = 51
+SEARCH_SCORE_CUTOFF = 20.0
+MIN_PLURAL_TOKEN_LENGTH = 4
 STUB_IMPORTS = "from typing import Literal, Never, NotRequired, TypeAlias, TypedDict"
 JSON_TYPE_STUBS = (
     "JsonScalar: TypeAlias = bool | int | float | str | None",
     'JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]',
 )
+INSPECT_JSON_STUB = (
+    "def inspect_json(value: JsonValue, *, samples: int = 2, max_depth: int = 3) -> JsonValue: ..."
+)
+STUB_PRELUDE = "\n\n".join([STUB_IMPORTS, *JSON_TYPE_STUBS, INSPECT_JSON_STUB])
 
 
 class ToolSpec(BaseModel):
@@ -54,6 +62,7 @@ class ToolSpec(BaseModel):
     signature: str
     stub: str
     search_blob: str
+    search_fields: dict[str, str]
     input_adapter: TypeAdapter[object]
     kind: Literal["mcp_tool", "saved_chain"] = "mcp_tool"
     chain_id: str | None = None
@@ -69,6 +78,7 @@ class ToolCatalog(BaseModel):
     fingerprint: str
     tools: dict[str, ToolSpec]
     type_stubs: str
+    stub_prelude: str
     servers: tuple[str, ...]
     server_aliases: dict[str, str]
     facade_calls: dict[tuple[str, str], str]
@@ -240,8 +250,16 @@ class ToolCatalog(BaseModel):
                 input_type_name=input_type,
                 output_type_name=output_type,
                 signature=signature,
-                stub="\n\n".join([*JSON_TYPE_STUBS, *tool_definitions]),
+                stub="\n\n".join(tool_definitions),
                 search_blob=_build_search_blob(
+                    public_name,
+                    call,
+                    server,
+                    tool.name,
+                    tool.description,
+                    input_schema,
+                ),
+                search_fields=_build_search_fields(
                     public_name,
                     call,
                     server,
@@ -284,8 +302,7 @@ class ToolCatalog(BaseModel):
             ))
 
         type_stubs = "\n\n".join([
-            STUB_IMPORTS,
-            *JSON_TYPE_STUBS,
+            STUB_PRELUDE,
             *_dedupe(definitions),
             *facade_stubs,
         ])
@@ -293,6 +310,7 @@ class ToolCatalog(BaseModel):
             fingerprint=fingerprint,
             tools=specs,
             type_stubs=type_stubs,
+            stub_prelude=STUB_PRELUDE,
             servers=server_names,
             server_aliases=server_aliases,
             facade_calls=facade_calls,
@@ -304,32 +322,129 @@ class ToolCatalog(BaseModel):
         limit: int = 5,
         *,
         server: str | None = None,
+        detail: SearchDetail = "signatures",
+        offset: int = 0,
     ) -> list[ToolSchemaView]:
-        candidates = {
-            spec.name: spec.search_blob
+        ranked = self._ranked(query, server=server)
+        return [
+            _tool_view(spec, detail=detail, score=score, matched_fields=matched_fields)
+            for spec, score, matched_fields in ranked[offset : offset + limit]
+        ]
+
+    def _ranked(
+        self,
+        query: str,
+        *,
+        server: str | None = None,
+    ) -> list[tuple[ToolSpec, float, list[str]]]:
+        candidates = [
+            spec
             for spec in sorted(self.tools.values(), key=lambda item: item.name)
             if server is None or spec.server == server
-        }
-        ranked = process.extract(
-            query,
-            candidates,
-            scorer=fuzz.partial_ratio,
-            processor=utils.default_process,
-            score_cutoff=SEARCH_SCORE_CUTOFF,
-            limit=limit,
-        )
-        return [
-            ToolSchemaView(
-                name=self.tools[name].name,
-                call=self.tools[name].call,
-                source=self.tools[name].kind,
-                server=self.tools[name].server,
-                description=_short_description(self.tools[name].description),
-                signature=self.tools[name].signature,
-                stub=self.tools[name].stub,
-            )
-            for _, _, name in ranked
         ]
+        if not candidates:
+            return []
+        query_tokens = _search_tokens(query)
+        normalized_query = " ".join(query_tokens)
+        document_tokens = [_search_tokens(spec.search_blob) for spec in candidates]
+        document_frequency = Counter(token for tokens in document_tokens for token in set(tokens))
+        average_length = sum(map(len, document_tokens)) / max(1, len(document_tokens))
+        scored: list[tuple[ToolSpec, float, list[str]]] = []
+        for spec, tokens in zip(candidates, document_tokens, strict=True):
+            exact = _normalized_identifier(query) in {
+                _normalized_identifier(spec.name),
+                _normalized_identifier(spec.call),
+                _normalized_identifier(spec.short_name),
+            }
+            bm25 = _bm25_score(
+                query_tokens,
+                tokens,
+                document_frequency,
+                len(candidates),
+                average_length,
+            )
+            coverage = (
+                len(set(query_tokens) & set(tokens)) / len(set(query_tokens))
+                if query_tokens
+                else 0.0
+            )
+            fuzzy_score = fuzz.token_set_ratio(normalized_query, spec.search_blob) / 100
+            server_match = bool(set(query_tokens) & set(_search_tokens(spec.server)))
+            score = (
+                100.0
+                if exact
+                else min(
+                    99.0,
+                    bm25 * 12 + coverage * 45 + fuzzy_score * 20 + (20 if server_match else 0),
+                )
+            )
+            if score < SEARCH_SCORE_CUTOFF:
+                continue
+            matched_fields = [
+                field
+                for field, value in spec.search_fields.items()
+                if set(query_tokens) & set(_search_tokens(value))
+            ]
+            scored.append((spec, score, matched_fields))
+        return sorted(scored, key=lambda item: (-item[1], item[0].name))
+
+    def inventory(
+        self,
+        *,
+        server: str | None = None,
+        detail: SearchDetail = "names",
+        offset: int = 0,
+        limit: int = 20,
+    ) -> list[ToolSchemaView]:
+        candidates = [
+            spec
+            for spec in sorted(self.tools.values(), key=lambda item: item.call)
+            if server is None or spec.server == server
+        ]
+        return [_tool_view(spec, detail=detail) for spec in candidates[offset : offset + limit]]
+
+    def inspect(self, calls: list[str]) -> list[ToolSchemaView]:
+        by_identifier = {
+            identifier: spec
+            for spec in self.tools.values()
+            for identifier in (spec.name, spec.call)
+        }
+        unknown = [call for call in calls if call not in by_identifier]
+        if unknown:
+            suggestions = {
+                call: [
+                    match[0]
+                    for match in sorted(
+                        ((spec.call, fuzz.ratio(call, spec.call)) for spec in self.tools.values()),
+                        key=lambda item: (-item[1], item[0]),
+                    )[:3]
+                ]
+                for call in unknown
+            }
+            raise ValueError(f"Unknown MCP calls: {unknown}; suggestions: {suggestions}")
+        return [_tool_view(by_identifier[call], detail="full") for call in dict.fromkeys(calls)]
+
+    def type_stubs_for(self, public_names: set[str], *, include: str | None = None) -> str:
+        names = set(public_names)
+        if include is not None:
+            names.add(include)
+        specs = [self.tools[name] for name in sorted(names) if name in self.tools]
+        facade_methods: dict[str, list[str]] = {}
+        definitions: list[str] = []
+        for spec in specs:
+            definitions.extend(spec.stub.split("\n\n") if spec.stub else [])
+            facade_methods.setdefault(spec.namespace, []).append(
+                f"    async def {spec.method}(self, arguments: {spec.input_type_name}) "
+                f"-> {spec.output_type_name}: ..."
+            )
+        facades: list[str] = []
+        for namespace in sorted(facade_methods):
+            class_name = f"_{_pascal_case(namespace)}Sdk"
+            facades.extend((
+                "\n".join([f"class {class_name}:", *facade_methods[namespace]]),
+                f"{namespace}: {class_name}",
+            ))
+        return "\n\n".join([STUB_PRELUDE, *_dedupe(definitions), *facades])
 
     def counts_by_server(self) -> dict[str, int]:
         counts = dict.fromkeys(self.servers, 0)
@@ -644,6 +759,45 @@ class StubBuilder:
             self._active_refs.remove(ref)
 
 
+def referenced_calls(code: str, facade_calls: dict[tuple[str, str], str]) -> set[str]:
+    normalized = textwrap.dedent(code).strip("\n")
+    wrapped = f"async def __codemcp_main():\n{textwrap.indent(normalized, '    ')}\n"
+    try:
+        tree = ast.parse(wrapped, mode="exec")
+    except SyntaxError:
+        return set()
+    referenced: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if not isinstance(node.func.value, ast.Name):
+            continue
+        public_name = facade_calls.get((node.func.value.id, node.func.attr))
+        if public_name is not None:
+            referenced.add(public_name)
+    return referenced
+
+
+def _tool_view(
+    spec: ToolSpec,
+    *,
+    detail: SearchDetail,
+    score: float | None = None,
+    matched_fields: list[str] | None = None,
+) -> ToolSchemaView:
+    return ToolSchemaView(
+        name=spec.name,
+        call=spec.call,
+        source=spec.kind,
+        server=spec.server,
+        description=_short_description(spec.description),
+        signature=spec.signature if detail in {"signatures", "full"} else None,
+        stub=spec.stub if detail == "full" else None,
+        score=score,
+        matched_fields=matched_fields or [],
+    )
+
+
 def _short_description(description: str | None, limit: int = 240) -> str | None:
     if description is None:
         return None
@@ -685,6 +839,22 @@ def _field_comment(schema: JsonSchema) -> str | None:
     return "; ".join(notes) or None
 
 
+def _build_search_fields(
+    public_name: str,
+    call: str,
+    server: str,
+    short_name: str,
+    description: str | None,
+    input_schema: JsonObject,
+) -> dict[str, str]:
+    return {
+        "name": f"{public_name} {call} {short_name}",
+        "server": server,
+        "description": description or "",
+        "parameters": " ".join(_collect_property_names(input_schema)),
+    }
+
+
 def _build_search_blob(
     public_name: str,
     call: str,
@@ -693,14 +863,59 @@ def _build_search_blob(
     description: str | None,
     input_schema: JsonObject,
 ) -> str:
-    return " ".join([
-        public_name,
-        call,
-        server,
-        short_name,
-        description or "",
-        *_collect_property_names(input_schema),
-    ])
+    return " ".join(
+        _build_search_fields(
+            public_name,
+            call,
+            server,
+            short_name,
+            description,
+            input_schema,
+        ).values()
+    )
+
+
+def _search_tokens(value: str) -> list[str]:
+    expanded = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", value)
+    tokens = [
+        token
+        for token in re.findall(r"[a-z0-9]+", expanded.lower().replace("_", " "))
+        if len(token) > 1
+    ]
+    return [
+        token[:-1] if token.endswith("s") and len(token) >= MIN_PLURAL_TOKEN_LENGTH else token
+        for token in tokens
+    ]
+
+
+def _normalized_identifier(value: str) -> str:
+    return "".join(_search_tokens(value))
+
+
+def _bm25_score(
+    query_tokens: list[str],
+    document_tokens: list[str],
+    document_frequency: Counter[str],
+    document_count: int,
+    average_length: float,
+) -> float:
+    if not query_tokens or not document_tokens:
+        return 0.0
+    frequencies = Counter(document_tokens)
+    score = 0.0
+    k1 = 1.2
+    b = 0.75
+    for token in set(query_tokens):
+        frequency = frequencies[token]
+        if frequency == 0:
+            continue
+        frequency_in_documents = document_frequency[token]
+        inverse_document_frequency = math.log(
+            1 + (document_count - frequency_in_documents + 0.5) / (frequency_in_documents + 0.5)
+        )
+        denominator = frequency + k1 * (1 - b + b * len(document_tokens) / max(1.0, average_length))
+        score += inverse_document_frequency * frequency * (k1 + 1) / denominator
+    return score
 
 
 def _collect_property_names(schema: JsonSchema) -> list[str]:

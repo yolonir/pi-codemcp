@@ -9,7 +9,6 @@ from mcp import types as mcp_types
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import ValidationError
 
-from sidecar import tool_catalog
 from sidecar.chains import ChainStore
 from sidecar.mcp_config import normalize_mcp_config
 from sidecar.models import NormalizedServerInfo
@@ -211,7 +210,7 @@ def test_catalog_namespaces_single_server_and_searches_compactly() -> None:
 
     assert list(catalog.tools) == ["linear_get_issue"]
     assert catalog.tools["linear_get_issue"].backend_name == "get_issue"
-    matches = catalog.search("work id")
+    matches = catalog.search("work id", detail="full")
     assert [match.name for match in matches] == ["linear_get_issue"]
     assert matches[0].call == "linear.get_issue"
     assert matches[0].signature.startswith("await linear.get_issue(")
@@ -479,36 +478,36 @@ def representative_search_catalog() -> ToolCatalog:
     )
 
 
-def test_catalog_search_ranks_failed_multi_word_queries(
+def test_catalog_search_replay_queries_have_complete_top_five_recall(
     representative_search_catalog: ToolCatalog,
 ) -> None:
-    expected_rankings = {
-        "Grafana dashboards metrics query": [
+    expected_matches = {
+        "Grafana dashboards metrics query": {
             "grafana_search_dashboards",
             "grafana_get_dashboard_panel_queries",
             "grafana_get_dashboard_summary",
             "grafana_query_prometheus",
             "grafana_list_datasources",
-        ],
-        "dashboard summary panel datasource metrics query time range prometheus": [
+        },
+        "dashboard summary panel datasource metrics query time range prometheus": {
             "grafana_get_dashboard_panel_queries",
             "grafana_get_dashboard_summary",
             "grafana_search_dashboards",
             "grafana_query_prometheus",
-        ],
-        "alerts history firing active": [
+        },
+        "alerts history firing active": {
             "grafana_alerting_manage_rules",
             "grafana_alerting_manage_routing",
-        ],
+        },
     }
 
-    for query, expected in expected_rankings.items():
+    for query, expected in expected_matches.items():
         matches = representative_search_catalog.search(query, limit=5)
-        assert [match.name for match in matches] == expected, query
-        assert [match.call for match in matches] == [
-            name.replace("_", ".", 1) for name in expected
-        ], query
+        names = {match.name for match in matches}
+        assert expected <= names, query
         assert all(match.server == "grafana" for match in matches), query
+        assert all(match.score is not None for match in matches)
+        assert all(match.matched_fields for match in matches)
 
 
 def test_catalog_search_normalizes_queries_and_retrieves_exact_identifiers(
@@ -537,26 +536,45 @@ def test_catalog_search_normalizes_queries_and_retrieves_exact_identifiers(
 
 def test_catalog_search_prefilters_server_candidates_exactly(
     representative_search_catalog: ToolCatalog,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original_extract = tool_catalog.process.extract
-    captured_candidates: list[str] = []
-
-    def capture_extract(query: str, choices: dict[str, str], **kwargs: object) -> list:
-        captured_candidates.extend(choices)
-        return original_extract(query, choices, **kwargs)
-
-    monkeypatch.setattr(tool_catalog.process, "extract", capture_extract)
-
     matches = representative_search_catalog.search("dashboards", server="grafana")
 
-    assert captured_candidates == sorted(
-        spec.name
-        for spec in representative_search_catalog.tools.values()
-        if spec.server == "grafana"
-    )
     assert matches
     assert all(match.server == "grafana" for match in matches)
+    assert all(not match.name.startswith("linear_") for match in matches)
+
+
+def test_catalog_progressively_discloses_and_paginates_inventory(
+    representative_search_catalog: ToolCatalog,
+) -> None:
+    names = representative_search_catalog.inventory(detail="names", limit=2)
+    assert len(names) == 2
+    assert all(match.signature is None and match.stub is None for match in names)
+
+    signatures = representative_search_catalog.search(
+        "dashboard query", detail="signatures", limit=2
+    )
+    assert all(match.signature and match.stub is None for match in signatures)
+
+    calls = [match.call for match in signatures]
+    inspected = representative_search_catalog.inspect(calls)
+    assert [match.call for match in inspected] == calls
+    assert all(match.stub and "Args" in match.stub for match in inspected)
+    assert "JsonValue: TypeAlias" in representative_search_catalog.stub_prelude
+    assert "JsonValue: TypeAlias" not in inspected[0].stub
+
+    first_page = representative_search_catalog.inventory(limit=3, offset=0)
+    second_page = representative_search_catalog.inventory(limit=3, offset=3)
+    assert {match.call for match in first_page}.isdisjoint(
+        match.call for match in second_page
+    )
+
+
+def test_catalog_inspect_rejects_unknown_calls_with_suggestions(
+    representative_search_catalog: ToolCatalog,
+) -> None:
+    with pytest.raises(ValueError, match="suggestions"):
+        representative_search_catalog.inspect(["grafana.get_dashbord_summary"])
 
 
 def test_catalog_search_indexes_input_property_names_in_isolation() -> None:

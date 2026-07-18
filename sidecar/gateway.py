@@ -13,6 +13,7 @@ import pydantic_monty
 from fastmcp import Client, FastMCP
 from fastmcp.mcp_config import RemoteMCPServer, StdioMCPServer
 from pydantic import BaseModel, ConfigDict
+from rapidfuzz import fuzz, process
 
 from . import json_types
 from .catalog_cache import CatalogCache
@@ -30,7 +31,11 @@ from .chains import (
 from .executor import ExecutionContext, ExecutionResponse, MontyExecutor
 from .mcp_config import NormalizedConfig, load_mcp_json, normalize_mcp_config
 from .models import (
+    ExecutionLimitsView,
+    InspectResponse,
     NormalizedServerInfo,
+    SearchDetail,
+    SearchMode,
     SearchResponse,
     ServerToolSummary,
     StatusResponse,
@@ -47,6 +52,7 @@ if TYPE_CHECKING:
     from mcp import types as mcp_types
 
 DEFAULT_AGENT_DIR = Path.home() / ".pi" / "agent"
+MAX_INSPECT_CALLS = 20
 CODEMCP_AGENT_DIR_ENV = "PI_CODEMCP_AGENT_DIR"
 CODEMCP_PROJECT_CHAINS_DIR_ENV = "PI_CODEMCP_PROJECT_CHAINS_DIR"
 PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR"
@@ -308,27 +314,103 @@ class GatewayRuntime:
 
     async def search(
         self,
-        query: str,
+        query: str | None = None,
         limit: int = 5,
         server: str | None = None,
+        detail: SearchDetail = "signatures",
+        mode: SearchMode = "search",
+        cursor: int = 0,
     ) -> SearchResponse:
-        clean_query = query.strip()
-        if not clean_query:
-            raise ValueError("query must not be empty")
         await self._ensure_catalog_complete()
+        self._validate_search_server(server)
         bounded_limit = min(max(limit, 1), 20)
+        bounded_cursor = max(cursor, 0)
         counts = self.catalog.counts_by_server()
         servers = [
-            ServerToolSummary(name=server.name, tool_count=counts[server.name])
-            for server in self.normalized.servers
-            if counts.get(server.name, 0) > 0
+            ServerToolSummary(name=server_info.name, tool_count=counts[server_info.name])
+            for server_info in self.normalized.servers
+            if counts.get(server_info.name, 0) > 0
         ]
         if counts.get("chains", 0) > 0:
             servers.append(ServerToolSummary(name="chains", tool_count=counts["chains"]))
+        filtered_count = counts.get(server, 0) if server is not None else len(self.catalog.tools)
+        if mode == "inventory":
+            results = self.catalog.inventory(
+                server=server,
+                detail=detail,
+                offset=bounded_cursor,
+                limit=bounded_limit,
+            )
+            total_matches = filtered_count
+        else:
+            clean_query = (query or "").strip()
+            if not clean_query:
+                raise ValueError("query is required in search mode")
+            all_matches = self.catalog.search(
+                clean_query,
+                filtered_count,
+                server=server,
+                detail=detail,
+            )
+            total_matches = len(all_matches)
+            results = all_matches[bounded_cursor : bounded_cursor + bounded_limit]
+        next_cursor = (
+            bounded_cursor + len(results) if bounded_cursor + len(results) < total_matches else None
+        )
         return SearchResponse(
+            mode=mode,
+            detail=detail,
             total_tool_count=len(self.catalog.tools),
+            filtered_tool_count=filtered_count,
             servers=servers,
-            results=self.catalog.search(clean_query, bounded_limit, server=server),
+            cursor=bounded_cursor,
+            next_cursor=next_cursor,
+            has_more=next_cursor is not None,
+            project_scope_available=self.chain_store.project_store is not None,
+            execution_limits=self._execution_limits_view(),
+            prelude=self.catalog.stub_prelude if detail == "full" else None,
+            results=results,
+        )
+
+    async def inspect(self, calls: list[str]) -> InspectResponse:
+        await self._ensure_catalog_complete()
+        if not calls:
+            raise ValueError("calls must contain at least one MCP call")
+        if len(calls) > MAX_INSPECT_CALLS:
+            raise ValueError(f"calls must contain at most {MAX_INSPECT_CALLS} MCP calls")
+        return InspectResponse(
+            prelude=self.catalog.stub_prelude,
+            project_scope_available=self.chain_store.project_store is not None,
+            execution_limits=self._execution_limits_view(),
+            results=self.catalog.inspect(calls),
+        )
+
+    def _validate_search_server(self, server: str | None) -> None:
+        if server is None:
+            return
+        valid = set(self.catalog.servers)
+        if server in valid:
+            return
+        suggestions = [
+            name
+            for name, _score, _index in process.extract(
+                server,
+                sorted(valid),
+                scorer=fuzz.ratio,
+                limit=3,
+            )
+        ]
+        raise ValueError(
+            f"Unknown MCP server {server!r}; available: {sorted(valid)}; suggestions: {suggestions}"
+        )
+
+    def _execution_limits_view(self) -> ExecutionLimitsView:
+        settings = self.executor.settings
+        return ExecutionLimitsView(
+            timeout_seconds=settings.timeout_seconds,
+            tool_timeout_seconds=settings.tool_timeout_seconds,
+            max_calls=settings.max_calls,
+            result_limit_bytes=settings.result_byte_limit,
         )
 
     async def execute(self, code: str) -> ExecutionResponse:
@@ -800,12 +882,21 @@ mcp = FastMCP(
 
 @mcp.tool
 async def search(
-    query: str,
+    query: str | None = None,
     limit: int = 5,
     server: str | None = None,
+    detail: SearchDetail = "signatures",
+    mode: SearchMode = "search",
+    cursor: int = 0,
 ) -> SearchResponse:
-    """Search configured upstream MCP tools and saved chains by capability."""
-    return await _require_runtime().search(query, limit, server)
+    """Search or page through configured upstream MCP tools and saved chains."""
+    return await _require_runtime().search(query, limit, server, detail, mode, cursor)
+
+
+@mcp.tool
+async def inspect(calls: list[str]) -> InspectResponse:
+    """Return exact typed SDK stubs for selected call identifiers."""
+    return await _require_runtime().inspect(calls)
 
 
 @mcp.tool

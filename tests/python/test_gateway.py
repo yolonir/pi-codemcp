@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 
 from sidecar import gateway
 from sidecar.chains import ChainEnabledChange
@@ -193,6 +194,7 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
         exposed = {tool.name for tool in await client.list_tools()}
         assert exposed == {
             "search",
+            "inspect",
             "discover",
             "reload_settings",
             "apply_manager_changes",
@@ -243,17 +245,33 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
         assert [item["name"] for item in beta_search_data["results"]] == [
             "beta_save_number"
         ]
+        assert beta_search_data["detail"] == "signatures"
+        assert beta_search_data["project_scope_available"] is False
+        assert beta_search_data["execution_limits"]["max_calls"] == 50
+
+        inventory = await client.call_tool(
+            "search",
+            {"mode": "inventory", "detail": "names", "limit": 1, "cursor": 0},
+        )
+        inventory_data = structured_data(inventory.structured_content)
+        assert inventory_data["has_more"] is True
+        assert inventory_data["next_cursor"] == 1
+        assert "signature" not in inventory_data["results"][0]
+
+        with pytest.raises(ToolError, match="suggestions"):
+            await client.call_tool("search", {"query": "number", "server": "bet"})
+
         discovery_pids = [int(alpha_pid.read_text()), int(beta_pid.read_text())]
         for pid in discovery_pids:
             await wait_for_process_exit(pid)
         alpha_pid.unlink()
         beta_pid.unlink()
 
-        assert "AlphaGetNumberArgs" in next(
-            item["stub"]
-            for item in search_data["results"]
-            if item["name"] == "alpha_get_number"
-        )
+        assert all("stub" not in item for item in search_data["results"])
+        inspected = await client.call_tool("inspect", {"calls": ["alpha.get_number"]})
+        inspected_data = structured_data(inspected.structured_content)
+        assert "JsonValue: TypeAlias" in inspected_data["prelude"]
+        assert "AlphaGetNumberArgs" in inspected_data["results"][0]["stub"]
         assert "input_schema" not in search_data["results"][0]
         assert "output_schema" not in search_data["results"][0]
         assert not alpha_pid.exists()
