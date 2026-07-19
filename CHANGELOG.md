@@ -11,8 +11,7 @@
 
 ### Performance Improvements
 
-* streamline quality and release checks ([fd29b00](https://github.com/yolonir/pi-codemcp/commit/fd29b004ce49463b6b04653699af2408db13866c))
-* streamline quality and release checks ([4665777](https://github.com/yolonir/pi-codemcp/commit/4665777a823b91fadb1730752969c1225fb10f1f))
+* streamline quality and release checks ([#12](https://github.com/yolonir/pi-codemcp/pull/12)) ([fd29b00](https://github.com/yolonir/pi-codemcp/commit/fd29b004ce49463b6b04653699af2408db13866c))
 
 ## [1.0.0](https://github.com/yolonir/pi-codemcp/compare/v0.1.0...v1.0.0) (2026-07-18)
 
