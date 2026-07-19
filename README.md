@@ -128,6 +128,17 @@ To test the checkout without loading an installed copy:
 pi -ne -e . --no-session
 ```
 
+The sidecar also has a stable internal CLI for development, debugging, and future runtime adapters:
+
+```bash
+uv run --project sidecar --frozen -m sidecar.cli serve --stdio
+uv run --project sidecar --frozen -m sidecar.cli status --agent-dir ~/.pi/agent
+uv run --project sidecar --frozen -m sidecar.cli search "linear issues"
+uv run --project sidecar --frozen -m sidecar.cli execute --code-file plan.py
+uv run --project sidecar --frozen -m sidecar.cli chain list
+uv run --project sidecar --frozen -m sidecar.cli doctor --agent-dir ~/.pi/agent
+```
+
 `just check` runs lockfile checks, TypeScript, Biome, Bun tests, Ruff, mypy, ty, and pytest. `just release-check` additionally packs the npm artifact, installs it into a clean consumer directory, and runs the packaged sidecar without a system uv on `PATH`.
 
 ## Releases

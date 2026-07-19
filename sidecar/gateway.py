@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import os
 import textwrap
 import time
 from contextlib import AsyncExitStack, asynccontextmanager
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 
 import pydantic_monty
@@ -37,19 +35,18 @@ from .models import (
     UpstreamStatus,
     UpstreamToolStatus,
 )
+from .runtime_paths import resolve_runtime_paths
 from .settings import CodeMcpSettings, load_settings
 from .tool_catalog import ToolCatalog
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+    from pathlib import Path
 
     from fastmcp.client.transports import ClientTransport
     from mcp import types as mcp_types
 
-DEFAULT_AGENT_DIR = Path.home() / ".pi" / "agent"
-CODEMCP_AGENT_DIR_ENV = "PI_CODEMCP_AGENT_DIR"
-CODEMCP_PROJECT_CHAINS_DIR_ENV = "PI_CODEMCP_PROJECT_CHAINS_DIR"
-PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR"
+    from .runtime_paths import RuntimePaths
 type ServerConfig = StdioMCPServer | RemoteMCPServer
 type JsonObject = json_types.JsonObject
 type JsonValue = json_types.JsonValue
@@ -734,6 +731,7 @@ def _compact_description(description: str | None, limit: int = 160) -> str | Non
 class RuntimeState:
     def __init__(self) -> None:
         self.runtime: GatewayRuntime | None = None
+        self.paths: RuntimePaths | None = None
 
 
 _runtime_state = RuntimeState()
@@ -745,22 +743,12 @@ def _require_runtime() -> GatewayRuntime:
     return _runtime_state.runtime
 
 
+def configure_runtime_paths(paths: RuntimePaths | None) -> None:
+    _runtime_state.paths = paths
+
+
 def _runtime_paths() -> tuple[Path, Path, Path, Path, Path, Path | None]:
-    raw_agent_dir = os.environ.get(CODEMCP_AGENT_DIR_ENV) or os.environ.get(PI_AGENT_DIR_ENV)
-    agent_dir = Path(raw_agent_dir).expanduser() if raw_agent_dir else DEFAULT_AGENT_DIR
-    state_dir = agent_dir / "pi-codemcp"
-    raw_project_chains_dir = os.environ.get(CODEMCP_PROJECT_CHAINS_DIR_ENV)
-    project_chains_dir = (
-        Path(raw_project_chains_dir).expanduser() if raw_project_chains_dir else None
-    )
-    return (
-        agent_dir / "mcp.json",
-        state_dir / "oauth",
-        state_dir / "catalog",
-        state_dir / "settings.json",
-        state_dir / "chains",
-        project_chains_dir,
-    )
+    return (_runtime_state.paths or resolve_runtime_paths()).as_tuple()
 
 
 @asynccontextmanager
