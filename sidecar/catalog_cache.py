@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 from contextlib import suppress
 from typing import TYPE_CHECKING, Literal
@@ -68,7 +69,7 @@ class CatalogCache:
         with suppress(OSError):
             self.directory.chmod(0o700)
         path = self._path(server_name)
-        temporary = path.with_suffix(".tmp")
+        temporary = self.directory / f".{path.stem}.{os.getpid()}.{time.time_ns()}.tmp"
         entry = CachedServerCatalog(
             server_name=server_name,
             config_fingerprint=config_fingerprint,

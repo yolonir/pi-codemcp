@@ -389,13 +389,15 @@ class ToolCatalog(BaseModel):
             if wrap_from_meta and not spec.output_wrap_result:
                 adapter = spec.wrapped_output_adapter
             if adapter is None:
-                return _normalize_json_value(
-                    JSON_VALUE_ADAPTER.validate_python(to_jsonable_python(structured))
+                normalized = JSON_VALUE_ADAPTER.validate_python(to_jsonable_python(structured))
+            else:
+                validated = adapter.validate_python(structured)
+                normalized = JSON_VALUE_ADAPTER.validate_python(
+                    adapter.dump_python(validated, mode="json")
                 )
-            validated = adapter.validate_python(structured)
-            return _normalize_json_value(
-                JSON_VALUE_ADAPTER.validate_python(adapter.dump_python(validated, mode="json"))
-            )
+            if isinstance(normalized, str) and (spec.output_wrap_result or wrap_from_meta):
+                return _normalize_text_result(normalized)
+            return normalized
 
         if result.structuredContent is not None:
             return _normalize_json_value(
@@ -497,11 +499,13 @@ class StubBuilder:
             output_schema = _as_schema(_object_property(self.output_schema, "result"))
         if (
             self.normalize_json_string_output
+            and self.output_schema
+            and self.output_schema.get("x-fastmcp-wrap-result")
             and isinstance(output_schema, dict)
             and output_schema.get("type") == "string"
         ):
-            # Runtime normalization promotes JSON object/array text to native values.
-            # A plain `str` annotation would therefore be a false guarantee.
+            # FastMCP-wrapped tools often expose JSON payloads as a `result` string.
+            # The runtime intentionally unwraps and parses that top-level string.
             output_schema = True
         output_type = self._ensure_named_type(
             f"{_pascal_case(self.tool_name)}Result",
@@ -816,7 +820,9 @@ def _merge_all_of(
                 if isinstance(required, str) and required not in merged_required:
                     merged_required.append(required)
         if "additionalProperties" in resolved:
-            additional_properties = resolved["additionalProperties"]
+            additional_properties = JSON_VALUE_ADAPTER.validate_python(
+                resolved["additionalProperties"]
+            )
             has_additional_properties = True
     merged: JsonObject = {
         "type": "object",

@@ -5,7 +5,7 @@ import asyncio
 import textwrap
 import time
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, cast
 
 import pydantic_monty
 from fastmcp import Client, FastMCP
@@ -137,11 +137,14 @@ class ServerHandle:
             return self._client
         exit_stack = AsyncExitStack()
         try:
-            client = await exit_stack.enter_async_context(
-                Client(
-                    self.server_config.to_transport(),
-                    name=f"pi-codemcp-{self.info.name}",
-                )
+            client = cast(
+                "Client[ClientTransport]",
+                await exit_stack.enter_async_context(
+                    Client(
+                        self.server_config.to_transport(),
+                        name=f"pi-codemcp-{self.info.name}",
+                    )
+                ),
             )
         except BaseException:
             await exit_stack.aclose()
@@ -772,9 +775,9 @@ async def lifespan(_: FastMCP[None]) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        runtime, _runtime_state.runtime = _runtime_state.runtime, None
-        if runtime is not None:
-            await runtime.close()
+        runtime = _runtime_state.runtime
+        _runtime_state.runtime = None
+        await runtime.close()
 
 
 mcp = FastMCP(

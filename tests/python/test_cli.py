@@ -37,7 +37,7 @@ def test_cli_serve_stdio_delegates_to_gateway_main(
     def fake_gateway_main() -> None:
         calls.append(("serve", gateway._runtime_paths()))
 
-    monkeypatch.setattr(cli.gateway, "main", fake_gateway_main)
+    monkeypatch.setattr(gateway, "main", fake_gateway_main)
 
     assert cli.main(["serve", "--stdio", "--agent-dir", str(tmp_path)]) == 0
     assert calls == [
