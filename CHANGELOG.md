@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.1](https://github.com/yolonir/pi-codemcp/compare/v1.1.0...v1.1.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* publish pi.dev gallery image ([63fb03e](https://github.com/yolonir/pi-codemcp/commit/63fb03e80cb97b2b1164ba38fd90915981710106))
+* publish pi.dev gallery image ([#16](https://github.com/yolonir/pi-codemcp/issues/16)) ([f1c8d55](https://github.com/yolonir/pi-codemcp/commit/f1c8d55d8602601e2c77be8f48357fdcedddf703))
+
 ## [1.1.0](https://github.com/yolonir/pi-codemcp/compare/v1.0.0...v1.1.0) (2026-07-19)
 
 
