@@ -4,9 +4,11 @@ Fast, typed, sandboxed **Code Mode for every MCP server configured in Pi**.
 
 Instead of putting every upstream MCP tool definition into the model context, pi-codemcp gives the agent a small interface for discovery, execution, and reuse:
 
-- `codemcp_search` finds relevant tools and returns only their typed SDK stubs.
+- `codemcp_search` ranks capabilities or pages through a compact inventory without loading full schemas.
+- `codemcp_inspect` returns exact typed SDK stubs only for selected calls.
 - `codemcp_execute` runs one sandboxed Python call graph across one or many MCP servers.
 - `codemcp_save_chain` turns a repeated call graph into a reusable native Pi tool.
+- `codemcp_manage_chains` lists chains or performs an explicitly confirmed enable, disable, revalidate, or delete.
 
 Intermediate results stay inside the sandbox. The model receives only the compact value returned by the program.
 
@@ -18,11 +20,12 @@ Cloudflare described a better pattern in [Code Mode: give agents an entire API i
 
 pi-codemcp applies that idea on the **client side** to the MCP servers you already use in Pi:
 
-1. Search the combined catalog without loading every schema into context.
-2. Type-check a compact Python plan before any upstream call happens.
-3. Execute dependent or parallel calls without model round-trips between them.
-4. Return only the final data the agent actually needs.
-5. Save stable plans as native tools and reuse them without rewriting the call graph.
+1. Search the combined catalog or page through a compact inventory.
+2. Inspect exact schemas only for the calls selected for the task.
+3. Type-check a compact Python plan before any upstream call happens.
+4. Execute dependent or parallel calls without model round-trips between them.
+5. Return only the final data the agent actually needs.
+6. Save stable plans as native tools and reuse them without rewriting the call graph.
 
 That can make complex MCP workflows faster and substantially more token-efficient. Exact savings depend on the servers, schemas, model, and task.
 
@@ -39,6 +42,7 @@ pi-codemcp is deliberately opinionated about operational quality:
 - Time, memory, call count, and output size are bounded.
 - Failures are explicit; there are no silent retries or compatibility fallbacks.
 - Tool output is compact by default and expands with Pi's normal `Ctrl+O` UI.
+- Bounded local telemetry uses fixed rollups rather than session event logs and appears in the `/codemcp` Stats tab.
 
 There is always room to make it faster and more reliable. If something is not working well, please report it rather than silently giving up on the extension.
 
@@ -68,6 +72,8 @@ Nested chains share the same deadline, cancellation signal, catalog snapshot, an
 
 New manifests default to project scope under `<project>/.pi/pi-codemcp/chains`; explicitly global chains live under `<agent-dir>/pi-codemcp/chains`. A project chain overrides a same-named global chain without deleting it. Manifests contain sandboxed code and schemas, never credentials or execution results. `/codemcp` labels both scopes and can revalidate, enable, disable, or delete chains.
 
+There is deliberately no implicit “save last execution” state: the agent must submit the exact successfully tested code plus explicit input and output contracts. This keeps persistence reviewable and avoids saving the wrong attempt from a long session.
+
 ## Install
 
 ```bash
@@ -80,20 +86,20 @@ Package users do not need Python, uv, Bun, or just. A pinned uv binary bootstrap
 
 ## Agent workflow
 
-The agent searches for a capability, receives the complete stub it needs, and executes a compact plan:
+The agent searches for a capability, inspects the selected exact stub when needed, and executes a compact plan:
 
 ```python
 issues = await linear.list_issues({"assignee": "me", "limit": 50})
 return {"count": len(issues), "ids": [issue["identifier"] for issue in issues]}
 ```
 
-Incomplete upstream schemas become recursive `JsonValue`, not `Any`; unknown values must be narrowed explicitly before typed use.
+Incomplete upstream schemas become recursive `JsonValue`, not `Any`; unknown values must be narrowed explicitly before typed use. For unfamiliar outputs, `inspect_json(value, samples=2, max_depth=3)` returns a bounded structural summary, cardinality, field sizes, and samples. Oversized final results fail explicitly with the same actionable inspection data.
 
 ## Safety and limits
 
 FastMCP owns MCP transports, runtime validation, and OAuth. [Pydantic Monty](https://github.com/pydantic/monty) type-checks and executes agent-written Python without host filesystem, environment, network, or subprocess access.
 
-`/codemcp` configures servers, saved chains, per-tool policy, timeouts, call limits, output limits, cache TTL, and warmup. Server, chain, tool-policy, and setting toggles stay local and instantaneous until one `Ctrl+S` batch save/reload. Discovery, revalidation, and deletion remain explicit immediate actions. The sandbox also has a fixed memory ceiling; executions are serialized per Pi session. There are no automatic retries or cross-service rollback.
+`/codemcp` configures servers, saved chains, per-tool policy, timeouts, call limits, output limits, cache TTL, and warmup, and shows bounded lifetime/recent telemetry in its Stats tab. Server, chain, tool-policy, and setting toggles stay local and instantaneous until one `Ctrl+S` batch save/reload. Discovery, revalidation, and deletion remain explicit immediate actions. The sandbox also has a fixed memory ceiling; executions are serialized per Pi session. There are no automatic retries or cross-service rollback.
 
 Enabled tools retain their upstream permissions. Saved chains never bypass server or per-tool policy and are checked against the current enabled catalog whenever they run.
 

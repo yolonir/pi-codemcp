@@ -49,6 +49,43 @@ export interface ChainModalState {
   error?: string;
 }
 
+export interface StatsRollupState {
+  count: number;
+  success: number;
+  failure: number;
+  inputBytes: number;
+  outputBytes: number;
+  calls: number;
+  chainCalls: number;
+  averageMs: number;
+  p50Ms: number;
+  p95Ms: number;
+  maxMs: number;
+  p50OutputBytes: number;
+  p95OutputBytes: number;
+}
+
+export interface StatsModalState {
+  updatedAt: number;
+  lifetime: StatsRollupState;
+  recent: StatsRollupState;
+  operations: Array<{ name: string; rollup: StatsRollupState }>;
+  phases: Array<{
+    name: string;
+    count: number;
+    averageMs: number;
+    p50Ms: number;
+    p95Ms: number;
+    maxMs: number;
+  }>;
+  failures: Array<{ stage: string; count: number }>;
+  upstreamOutputBytes: number;
+  cacheHits: number;
+  cacheMisses: number;
+  serverCount: number;
+  toolCount: number;
+}
+
 export interface ServerModalState {
   name: string;
   transport: string;
@@ -92,6 +129,7 @@ interface ServerManagerOptions {
   servers: ServerModalState[];
   chains: ChainModalState[];
   settings: CodeMcpSettings;
+  stats: StatsModalState;
   onDiscover(server: ServerModalState): Promise<ServerModalState>;
   onSaveChanges(
     settings: CodeMcpSettings,
@@ -171,12 +209,6 @@ const SETTING_DEFINITIONS: SettingDefinition[] = [
     description: "Maximum CodeMCP tool-result text placed into the agent context.",
     choices: [10, 25, 50, 100, 200, 512].map(kibChoice),
   },
-  {
-    key: "outputLineLimit",
-    label: "Agent line limit",
-    description: "Maximum CodeMCP tool-result lines placed into the agent context.",
-    choices: [500, 1_000, 2_000, 5_000, 10_000].map(numberChoice),
-  },
 ];
 
 export async function showServerManagerModal(
@@ -221,6 +253,58 @@ export function chainStatesFromViews(views: SavedChainView[]): ChainModalState[]
   }));
 }
 
+export function statsStateFromSnapshot(snapshot: Record<string, unknown>): StatsModalState {
+  const lifetime = parseStatsRollup(snapshot.lifetime);
+  const recent = Array.isArray(snapshot.recent)
+    ? snapshot.recent.reduce<StatsRollupState>(
+        (total, item) => addStatsRollups(total, parseStatsRollup(item)),
+        emptyStatsRollup(),
+      )
+    : emptyStatsRollup();
+  const operations = parseNamedStatsRollups(snapshot.operations);
+  const rawPhases = isRecord(snapshot.phases) ? snapshot.phases : {};
+  const phases = Object.entries(rawPhases).flatMap(([name, value]) => {
+    if (!isRecord(value)) return [];
+    return [
+      {
+        name,
+        count: numberField(value, "count"),
+        averageMs: numberField(value, "average"),
+        p50Ms: histogramPercentile(value, 0.5),
+        p95Ms: histogramPercentile(value, 0.95),
+        maxMs: numberField(value, "max"),
+      },
+    ];
+  });
+  const rawFailures = isRecord(snapshot.failures) ? snapshot.failures : {};
+  const failures = Object.entries(rawFailures)
+    .flatMap(([stage, count]) =>
+      typeof count === "number" && count >= 0 ? [{ stage, count }] : [],
+    )
+    .sort((left, right) => right.count - left.count || left.stage.localeCompare(right.stage));
+  const rawServers = isRecord(snapshot.servers) ? snapshot.servers : {};
+  const upstreamOutputBytes = Object.values(rawServers).reduce<number>(
+    (total, value) => total + (isRecord(value) ? numberField(value, "output_bytes") : 0),
+    0,
+  );
+  const cache = isRecord(snapshot.cache) ? snapshot.cache : {};
+  const servers = Object.keys(rawServers).length;
+  const tools = isRecord(snapshot.tools) ? Object.keys(snapshot.tools).length : 0;
+  return {
+    updatedAt: numberField(snapshot, "updated_at"),
+    lifetime,
+    recent,
+    operations,
+    phases,
+    failures,
+    upstreamOutputBytes,
+    cacheHits: numberField(cache, "hits"),
+    cacheMisses: numberField(cache, "misses"),
+    serverCount: servers,
+    toolCount: tools,
+  };
+}
+
 export function serverStatesFromStatus(status: Record<string, unknown>): ServerModalState[] {
   if (!Array.isArray(status.upstreams)) return [];
   return status.upstreams.flatMap((value) => {
@@ -249,7 +333,7 @@ export function serverStatesFromStatus(status: Record<string, unknown>): ServerM
 
 class ServerManagerModal implements Component, Focusable {
   private readonly search = new Input();
-  private activeTab: "servers" | "chains" | "settings" = "servers";
+  private activeTab: "servers" | "chains" | "stats" | "settings" = "servers";
   private activePane: "servers" | "tools" = "servers";
   private selectedServerIndex = 0;
   private selectedToolIndex = 0;
@@ -284,7 +368,7 @@ class ServerManagerModal implements Component, Focusable {
 
   set focused(value: boolean) {
     this._focused = value;
-    this.search.focused = value && this.activeTab !== "settings";
+    this.search.focused = value && !["stats", "settings"].includes(this.activeTab);
   }
 
   render(width: number): string[] {
@@ -297,6 +381,7 @@ class ServerManagerModal implements Component, Focusable {
       render: (bodyWidth: number) => {
         if (this.activeTab === "servers") return this.renderServers(bodyWidth);
         if (this.activeTab === "chains") return this.renderChains(bodyWidth);
+        if (this.activeTab === "stats") return this.renderStats(bodyWidth);
         return this.renderSettings(bodyWidth);
       },
       invalidate: () => this.search.invalidate(),
@@ -331,16 +416,18 @@ class ServerManagerModal implements Component, Focusable {
         this.activeTab === "servers"
           ? "chains"
           : this.activeTab === "chains"
-            ? "settings"
-            : "servers";
+            ? "stats"
+            : this.activeTab === "stats"
+              ? "settings"
+              : "servers";
       this.search.setValue("");
-      this.search.focused = this._focused && this.activeTab !== "settings";
+      this.search.focused = this._focused && !["stats", "settings"].includes(this.activeTab);
       this.requestRender();
       return;
     }
     if (this.activeTab === "settings") this.handleSettingsInput(data);
     else if (this.activeTab === "chains") this.handleChainInput(data);
-    else this.handleServerInput(data);
+    else if (this.activeTab === "servers") this.handleServerInput(data);
     this.requestRender();
   }
 
@@ -444,11 +531,15 @@ class ServerManagerModal implements Component, Focusable {
       this.activeTab === "chains"
         ? this.theme.fg("accent", this.theme.bold("[Chains]"))
         : this.theme.fg("muted", "Chains");
+    const stats =
+      this.activeTab === "stats"
+        ? this.theme.fg("accent", this.theme.bold("[Stats]"))
+        : this.theme.fg("muted", "Stats");
     const settings =
       this.activeTab === "settings"
         ? this.theme.fg("accent", this.theme.bold("[Settings]"))
         : this.theme.fg("muted", "Settings");
-    const tabs = `${servers}  ${chains}  ${settings}`;
+    const tabs = `${servers}  ${chains}  ${stats}  ${settings}`;
     const title = this.theme.fg("dim", this.theme.bold("CodeMCP"));
     const gap = " ".repeat(Math.max(1, width - visibleWidth(tabs) - visibleWidth(title)));
     return truncateToWidth(`${tabs}${gap}${title}`, width);
@@ -659,6 +750,57 @@ class ServerManagerModal implements Component, Focusable {
     return lines;
   }
 
+  private renderStats(width: number): string[] {
+    const stats = this.options.stats;
+    const lifetime = stats.lifetime;
+    const recent = stats.recent;
+    const cacheTotal = stats.cacheHits + stats.cacheMisses;
+    const cacheRate = cacheTotal > 0 ? `${Math.round((100 * stats.cacheHits) / cacheTotal)}%` : "—";
+    const lines = [
+      this.theme.fg("dim", this.theme.bold("LOCAL TELEMETRY")),
+      this.theme.fg(
+        "muted",
+        `Updated ${stats.updatedAt > 0 ? new Date(stats.updatedAt * 1_000).toLocaleString() : "never"} · bounded rollups`,
+      ),
+      "",
+      `${this.theme.fg("dim", "Lifetime")}  ${lifetime.count.toLocaleString()} runs · ${lifetime.success.toLocaleString()} ok · ${lifetime.failure.toLocaleString()} failed`,
+      `${this.theme.fg("dim", "Calls")}     ${lifetime.calls.toLocaleString()} MCP · ${lifetime.chainCalls.toLocaleString()} nested chains`,
+      `${this.theme.fg("dim", "Bytes")}     ${formatBytes(lifetime.inputBytes)} in · ${formatBytes(lifetime.outputBytes)} out`,
+      `${this.theme.fg("dim", "Latency")}   ${formatMilliseconds(lifetime.p50Ms)} p50 · ${formatMilliseconds(lifetime.p95Ms)} p95 · ${formatMilliseconds(lifetime.maxMs)} max`,
+      `${this.theme.fg("dim", "Results")}   ${formatBytes(lifetime.p50OutputBytes)} p50 · ${formatBytes(lifetime.p95OutputBytes)} p95`,
+      `${this.theme.fg("dim", "Withheld")}  ${formatBytes(Math.max(0, stats.upstreamOutputBytes - lifetime.outputBytes))} upstream bytes kept out of final results`,
+      `${this.theme.fg("dim", "Recent")}    ${recent.count.toLocaleString()} runs in retained hourly buckets`,
+      `${this.theme.fg("dim", "Observed")}  ${stats.serverCount} servers · ${stats.toolCount} tools · ${cacheRate} cache hit`,
+      "",
+      this.theme.fg("dim", this.theme.bold("OPERATIONS")),
+    ];
+    if (stats.operations.length === 0) lines.push(this.theme.fg("muted", "No operations yet"));
+    for (const operation of stats.operations) {
+      lines.push(
+        truncateToWidth(
+          `${operation.name.padEnd(18)} ${operation.rollup.count.toLocaleString().padStart(8)} · ${operation.rollup.failure.toLocaleString()} failed · ${formatMilliseconds(operation.rollup.averageMs)} avg`,
+          width,
+        ),
+      );
+    }
+    lines.push("", this.theme.fg("dim", this.theme.bold("FAILURE STAGES")));
+    if (stats.failures.length === 0) lines.push(this.theme.fg("muted", "No failures yet"));
+    for (const failure of stats.failures) {
+      lines.push(`${failure.stage.padEnd(18)} ${failure.count.toLocaleString().padStart(8)}`);
+    }
+    lines.push("", this.theme.fg("dim", this.theme.bold("PHASES")));
+    if (stats.phases.length === 0) lines.push(this.theme.fg("muted", "No phase timings yet"));
+    for (const phase of stats.phases) {
+      lines.push(
+        truncateToWidth(
+          `${phase.name.padEnd(18)} ${phase.count.toLocaleString().padStart(8)} · ${formatMilliseconds(phase.p50Ms)} p50 · ${formatMilliseconds(phase.p95Ms)} p95 · ${formatMilliseconds(phase.maxMs)} max`,
+          width,
+        ),
+      );
+    }
+    return lines.slice(0, Math.max(1, modalBodyRows()));
+  }
+
   private renderSettings(width: number): string[] {
     const splitHeight = Math.max(1, modalBodyRows());
     const leftWidth = Math.min(38, Math.max(28, Math.floor(width * 0.42)));
@@ -714,7 +856,10 @@ class ServerManagerModal implements Component, Focusable {
       return `tab servers · ↑/↓ navigate · ←/→/enter change · ctrl+s save · esc close${pending}`;
     }
     if (this.activeTab === "chains") {
-      return `tab settings · ↑/↓ navigate · space toggle · r revalidate · del delete · esc close${pending}`;
+      return `tab stats · ↑/↓ navigate · space toggle · r revalidate · del delete · esc close${pending}`;
+    }
+    if (this.activeTab === "stats") {
+      return `tab settings · bounded local rollups · esc close${pending}`;
     }
     return `tab chains · ←/→ pane · ↑/↓ navigate · space toggle · d discover · esc close${pending}`;
   }
@@ -1019,6 +1164,105 @@ class ServerManagerModal implements Component, Focusable {
     this.selectedToolIndex = 0;
     this.selectedChainIndex = 0;
   }
+}
+
+function emptyStatsRollup(): StatsRollupState {
+  return {
+    count: 0,
+    success: 0,
+    failure: 0,
+    inputBytes: 0,
+    outputBytes: 0,
+    calls: 0,
+    chainCalls: 0,
+    averageMs: 0,
+    p50Ms: 0,
+    p95Ms: 0,
+    maxMs: 0,
+    p50OutputBytes: 0,
+    p95OutputBytes: 0,
+  };
+}
+
+function parseStatsRollup(value: unknown): StatsRollupState {
+  if (!isRecord(value)) return emptyStatsRollup();
+  const duration = isRecord(value.duration_ms) ? value.duration_ms : {};
+  const outputSize = isRecord(value.output_size_bytes) ? value.output_size_bytes : {};
+  return {
+    count: numberField(value, "count"),
+    success: numberField(value, "success"),
+    failure: numberField(value, "failure"),
+    inputBytes: numberField(value, "input_bytes"),
+    outputBytes: numberField(value, "output_bytes"),
+    calls: numberField(value, "calls"),
+    chainCalls: numberField(value, "chain_calls"),
+    averageMs: numberField(duration, "average"),
+    p50Ms: histogramPercentile(duration, 0.5),
+    p95Ms: histogramPercentile(duration, 0.95),
+    maxMs: numberField(duration, "max"),
+    p50OutputBytes: histogramPercentile(outputSize, 0.5),
+    p95OutputBytes: histogramPercentile(outputSize, 0.95),
+  };
+}
+
+function addStatsRollups(left: StatsRollupState, right: StatsRollupState): StatsRollupState {
+  const count = left.count + right.count;
+  return {
+    count,
+    success: left.success + right.success,
+    failure: left.failure + right.failure,
+    inputBytes: left.inputBytes + right.inputBytes,
+    outputBytes: left.outputBytes + right.outputBytes,
+    calls: left.calls + right.calls,
+    chainCalls: left.chainCalls + right.chainCalls,
+    averageMs:
+      count > 0 ? (left.averageMs * left.count + right.averageMs * right.count) / count : 0,
+    p50Ms: Math.max(left.p50Ms, right.p50Ms),
+    p95Ms: Math.max(left.p95Ms, right.p95Ms),
+    maxMs: Math.max(left.maxMs, right.maxMs),
+    p50OutputBytes: Math.max(left.p50OutputBytes, right.p50OutputBytes),
+    p95OutputBytes: Math.max(left.p95OutputBytes, right.p95OutputBytes),
+  };
+}
+
+function parseNamedStatsRollups(value: unknown): Array<{ name: string; rollup: StatsRollupState }> {
+  if (!isRecord(value)) return [];
+  return Object.entries(value)
+    .map(([name, item]) => ({ name, rollup: parseStatsRollup(item) }))
+    .sort(
+      (left, right) =>
+        right.rollup.count - left.rollup.count || left.name.localeCompare(right.name),
+    );
+}
+
+function histogramPercentile(value: Record<string, unknown>, percentile: number): number {
+  const count = numberField(value, "count");
+  if (count === 0 || !Array.isArray(value.buckets)) return 0;
+  const target = Math.ceil(count * percentile);
+  let cumulative = 0;
+  for (const bucket of value.buckets) {
+    if (!isRecord(bucket)) continue;
+    cumulative += numberField(bucket, "count");
+    if (cumulative < target) continue;
+    const boundary = bucket.le;
+    return typeof boundary === "number" ? boundary : numberField(value, "max");
+  }
+  return numberField(value, "max");
+}
+
+function numberField(value: Record<string, unknown>, key: string): number {
+  const item = value[key];
+  return typeof item === "number" && Number.isFinite(item) && item >= 0 ? item : 0;
+}
+
+function formatBytes(value: number): string {
+  if (value < 1_024) return `${value} B`;
+  if (value < 1_024 * 1_024) return `${(value / 1_024).toFixed(1)} KiB`;
+  return `${(value / (1_024 * 1_024)).toFixed(1)} MiB`;
+}
+
+function formatMilliseconds(value: number): string {
+  return value >= 1_000 ? `${(value / 1_000).toFixed(2)}s` : `${value.toFixed(1)}ms`;
 }
 
 function parseTools(value: unknown): ToolModalState[] {

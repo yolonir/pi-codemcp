@@ -66,7 +66,7 @@ describe("codemcp_execute rendering", () => {
           content: [
             {
               type: "text",
-              text: JSON.stringify({ ok: true, result: { value: 2 }, calls_made: 1 }),
+              text: JSON.stringify({ value: 2 }),
             },
           ],
           details: {
@@ -117,7 +117,6 @@ describe("codemcp_execute rendering", () => {
             {
               type: "text",
               text: JSON.stringify({
-                ok: false,
                 failure_stage: "preflight",
                 error: "missing required argument: id",
                 calls_made: 0,
@@ -142,7 +141,6 @@ describe("codemcp_execute rendering", () => {
             {
               type: "text",
               text: JSON.stringify({
-                ok: false,
                 failure_stage: "runtime",
                 error: "upstream rejected the request",
                 calls_made: 2,
@@ -167,6 +165,23 @@ describe("codemcp_execute rendering", () => {
     expect(runtime).toContain("Runtime failed");
     expect(runtime).toContain("Failure occurred after 2 MCP calls");
     expect(runtime).toContain("upstream rejected the request");
+  });
+});
+
+describe("codemcp_manage_chains rendering", () => {
+  test("renders manager failures explicitly", () => {
+    const tool = captureTool("codemcp_manage_chains");
+    const failed = render(
+      tool.renderResult?.(
+        { content: [{ type: "text", text: "delete requires confirmedByUser=true" }] },
+        { expanded: false, isPartial: false },
+        plainTheme,
+        { isError: true },
+      ) as Component,
+    );
+
+    expect(failed).toContain("confirmedByUser=true");
+    expect(failed).not.toContain("0 chains");
   });
 });
 

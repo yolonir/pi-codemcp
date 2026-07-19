@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "model": "openai-codex/gpt-5.6-terra",
+  "thinking": "low",
+  "caseCount": 7,
+  "variants": {
+    "baseline": {
+      "correct": 7,
+      "total": 7,
+      "elapsedMs": 7419,
+      "usage": {
+        "input": 965,
+        "output": 120,
+        "cacheRead": 0,
+        "reasoning": 0,
+        "totalTokens": 1085,
+        "cost": {
+          "total": 0.0042125
+        }
+      },
+      "outcomes": [
+        {
+          "name": "reuse disclosed signature",
+          "expected": "execute without another search",
+          "actual": "execute without another search",
+          "correct": true
+        },
+        {
+          "name": "enumerate tools",
+          "expected": "use inventory mode with pagination",
+          "actual": "use inventory mode with pagination",
+          "correct": true
+        },
+        {
+          "name": "bounded aggregation",
+          "expected": "use one programmatic execution with a compact return",
+          "actual": "use one programmatic execution with a compact return",
+          "correct": true
+        },
+        {
+          "name": "semantic branch",
+          "expected": "preserve a model turn before choosing the next call",
+          "actual": "preserve a model turn before choosing the next call",
+          "correct": true
+        },
+        {
+          "name": "approval boundary",
+          "expected": "stop before the mutation and request approval",
+          "actual": "stop before the mutation and request approval",
+          "correct": true
+        },
+        {
+          "name": "unknown large output",
+          "expected": "return bounded inspect_json shape and samples before projection",
+          "actual": "return bounded inspect_json shape and samples before projection",
+          "correct": true
+        },
+        {
+          "name": "save reusable chain",
+          "expected": "save the successful parameterized code with exact schemas",
+          "actual": "save the successful parameterized code with exact schemas",
+          "correct": true
+        }
+      ]
+    },
+    "current": {
+      "correct": 7,
+      "total": 7,
+      "elapsedMs": 7156,
+      "usage": {
+        "input": 1058,
+        "output": 120,
+        "cacheRead": 0,
+        "reasoning": 0,
+        "totalTokens": 1178,
+        "cost": {
+          "total": 0.004445
+        }
+      },
+      "outcomes": [
+        {
+          "name": "reuse disclosed signature",
+          "expected": "execute without another search",
+          "actual": "execute without another search",
+          "correct": true
+        },
+        {
+          "name": "enumerate tools",
+          "expected": "use inventory mode with pagination",
+          "actual": "use inventory mode with pagination",
+          "correct": true
+        },
+        {
+          "name": "bounded aggregation",
+          "expected": "use one programmatic execution with a compact return",
+          "actual": "use one programmatic execution with a compact return",
+          "correct": true
+        },
+        {
+          "name": "semantic branch",
+          "expected": "preserve a model turn before choosing the next call",
+          "actual": "preserve a model turn before choosing the next call",
+          "correct": true
+        },
+        {
+          "name": "approval boundary",
+          "expected": "stop before the mutation and request approval",
+          "actual": "stop before the mutation and request approval",
+          "correct": true
+        },
+        {
+          "name": "unknown large output",
+          "expected": "return bounded inspect_json shape and samples before projection",
+          "actual": "return bounded inspect_json shape and samples before projection",
+          "correct": true
+        },
+        {
+          "name": "save reusable chain",
+          "expected": "save the successful parameterized code with exact schemas",
+          "actual": "save the successful parameterized code with exact schemas",
+          "correct": true
+        }
+      ]
+    }
+  }
+}

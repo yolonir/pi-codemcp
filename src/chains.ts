@@ -191,9 +191,8 @@ export class SavedChainManager {
           throw new Error(error);
         }
         const settings = manager.lifecycle.loadSettings();
-        const output = formatCodeMcpOutput(result, {
+        const output = formatCodeMcpOutput(result.result, {
           maxBytes: settings.outputLimitKiB * 1024,
-          maxLines: settings.outputLineLimit,
         });
         return {
           content: [{ type: "text", text: output.text }],

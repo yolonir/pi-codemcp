@@ -155,7 +155,7 @@ test("saved manifests defer runtime actions and new saves activate immediately",
       properties: { value: { type: "integer" } },
     });
     const result = await native?.execute("call-1", { value: 4 }, undefined);
-    expect(result?.content[0]?.text).toContain('"value": 4');
+    expect(result?.content[0]?.text).toBe('{"value":4}');
     const renderedCall = native?.renderCall?.({ value: 4 }, plainTheme, { expanded: false });
     expect(renderedCall?.render(120).join("\n")).toContain("MCP Chain echo_value · 1 argument");
     const renderedResult = result

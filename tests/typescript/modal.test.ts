@@ -8,6 +8,7 @@ import {
   type ServerModalState,
   serverStatesFromStatus,
   showServerManagerModal,
+  statsStateFromSnapshot,
 } from "../../src/modal.js";
 import { type CodeMcpSettings, DEFAULT_CODEMCP_SETTINGS } from "../../src/settings.js";
 
@@ -90,7 +91,81 @@ test("server status parser preserves server and tool policy state", () => {
   ]);
 });
 
-test("server manager renders split tabs, discovers, and toggles", async () => {
+test("stats parser converts bounded rollups for the modal", () => {
+  expect(
+    statsStateFromSnapshot({
+      updated_at: 100,
+      lifetime: {
+        count: 5,
+        success: 4,
+        failure: 1,
+        input_bytes: 100,
+        output_bytes: 200,
+        calls: 8,
+        chain_calls: 2,
+        duration_ms: {
+          count: 5,
+          average: 12.5,
+          max: 30,
+          buckets: [
+            { le: 10, count: 3 },
+            { le: 50, count: 2 },
+          ],
+        },
+        output_size_bytes: {
+          count: 5,
+          buckets: [
+            { le: 64, count: 3 },
+            { le: 256, count: 2 },
+          ],
+        },
+      },
+      recent: [{ count: 2, success: 2, failure: 0 }],
+      operations: {
+        execute: { count: 5, success: 4, failure: 1, duration_ms: { average: 12.5, max: 30 } },
+      },
+      phases: {
+        typecheck: {
+          count: 5,
+          average: 4,
+          max: 9,
+          buckets: [
+            { le: 5, count: 4 },
+            { le: 10, count: 1 },
+          ],
+        },
+      },
+      failures: { runtime: 2 },
+      servers: { grafana: { output_bytes: 500 } },
+      tools: { "grafana.query": {} },
+      cache: { hits: 3, misses: 1 },
+    }),
+  ).toMatchObject({
+    updatedAt: 100,
+    lifetime: {
+      count: 5,
+      success: 4,
+      failure: 1,
+      calls: 8,
+      chainCalls: 2,
+      p50Ms: 10,
+      p95Ms: 50,
+      p50OutputBytes: 64,
+      p95OutputBytes: 256,
+    },
+    recent: { count: 2, success: 2 },
+    operations: [{ name: "execute", rollup: { count: 5 } }],
+    phases: [{ name: "typecheck", count: 5, averageMs: 4, p50Ms: 5, p95Ms: 10, maxMs: 9 }],
+    failures: [{ stage: "runtime", count: 2 }],
+    upstreamOutputBytes: 500,
+    cacheHits: 3,
+    cacheMisses: 1,
+    serverCount: 1,
+    toolCount: 1,
+  });
+});
+
+test("server manager renders split tabs, stats, discovers, and toggles", async () => {
   const servers: ServerModalState[] = [
     {
       name: "grafana",
@@ -161,6 +236,29 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
     servers,
     chains,
     settings: { ...DEFAULT_CODEMCP_SETTINGS, disabledTools: {} },
+    stats: statsStateFromSnapshot({
+      updated_at: 100,
+      lifetime: {
+        count: 100_000,
+        success: 90_000,
+        failure: 10_000,
+        calls: 200_000,
+        chain_calls: 2,
+        input_bytes: 100,
+        output_bytes: 200,
+        duration_ms: { count: 5, average: 12.5, max: 30, buckets: [{ le: 25, count: 5 }] },
+        output_size_bytes: { count: 5, buckets: [{ le: 256, count: 5 }] },
+      },
+      operations: {
+        execute: { count: 5, success: 4, failure: 1, duration_ms: { average: 12.5, max: 30 } },
+      },
+      phases: {
+        typecheck: { count: 5, average: 4, max: 9, buckets: [{ le: 5, count: 5 }] },
+      },
+      failures: { runtime: 1 },
+      servers: { grafana: { output_bytes: 500 } },
+      cache: { hits: 3, misses: 1 },
+    }),
     async onDiscover(server) {
       discoveries.push(server.name);
       return {
@@ -279,6 +377,19 @@ test("server manager renders split tabs, discovers, and toggles", async () => {
   expect((component?.render(120) ?? []).join("\n")).toContain(
     "Save this chain change before revalidation",
   );
+
+  component?.handleInput?.("\t");
+  const statsLines = renderWithRows(component, 100, 60).join("\n");
+  expect(statsLines).toContain("[Stats]");
+  expect(statsLines).toContain("LOCAL TELEMETRY");
+  expect(statsLines).toContain("execute");
+  expect(statsLines).toContain("Withheld");
+  expect(statsLines).toContain("runtime");
+  expect(statsLines).toContain("typecheck");
+  expect(statsLines).toContain("100,000 runs");
+  const renderStarted = performance.now();
+  for (let index = 0; index < 100; index += 1) component?.render(100);
+  expect(performance.now() - renderStarted).toBeLessThan(500);
 
   component?.handleInput?.("\t");
   expect((component?.render(90) ?? []).join("\n")).toContain("[Settings]");

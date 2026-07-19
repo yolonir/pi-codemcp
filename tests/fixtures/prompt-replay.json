@@ -1,0 +1,37 @@
+[
+  {
+    "name": "reuse disclosed signature",
+    "situation": "The exact current SDK signature is already in context.",
+    "expected": "execute without another search"
+  },
+  {
+    "name": "enumerate tools",
+    "situation": "The user asks which tools a known server exposes.",
+    "expected": "use inventory mode with pagination"
+  },
+  {
+    "name": "bounded aggregation",
+    "situation": "Several read-only results can be filtered and aggregated deterministically.",
+    "expected": "use one programmatic execution with a compact return"
+  },
+  {
+    "name": "semantic branch",
+    "situation": "The meaning of an intermediate result determines what evidence is needed next.",
+    "expected": "preserve a model turn before choosing the next call"
+  },
+  {
+    "name": "approval boundary",
+    "situation": "A later mutating call requires user approval.",
+    "expected": "stop before the mutation and request approval"
+  },
+  {
+    "name": "unknown large output",
+    "situation": "An untyped result may be large and its shape is unfamiliar.",
+    "expected": "return bounded inspect_json shape and samples before projection"
+  },
+  {
+    "name": "save reusable chain",
+    "situation": "The user explicitly requests persistence after the code succeeded.",
+    "expected": "save the successful parameterized code with exact schemas"
+  }
+]

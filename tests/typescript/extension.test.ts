@@ -7,7 +7,7 @@ import { createCodeMcpExtension, saveManagerChanges } from "../../extensions/ind
 import { DEFAULT_CODEMCP_SETTINGS, loadCodeMcpSettings } from "../../src/settings.js";
 
 describe("Pi extension registration", () => {
-  test("registers search, execute, save, and one manager command", () => {
+  test("registers search, inspect, execute, save, and one manager command", () => {
     const tools: Array<{ name: string; description?: string; parameters?: unknown }> = [];
     const commands: string[] = [];
     const events: string[] = [];
@@ -27,22 +27,37 @@ describe("Pi extension registration", () => {
 
     expect(tools.map((tool) => tool.name)).toEqual([
       "codemcp_search",
+      "codemcp_inspect",
       "codemcp_execute",
       "codemcp_save_chain",
+      "codemcp_manage_chains",
     ]);
     expect(commands).toEqual(["codemcp"]);
     expect(events).toEqual(["session_start", "session_shutdown"]);
 
     const search = tools[0];
-    expect(search?.description).toBe(
-      "Search configured upstream MCP tools and saved chains, returning their typed SDK stubs.",
-    );
+    expect(search?.description).toContain("compact inventory");
+    expect(search?.description).toContain("codemcp_inspect");
     expect(search?.parameters).toMatchObject({
-      properties: { server: { type: "string" } },
+      properties: {
+        server: { type: "string" },
+        mode: { enum: ["search", "inventory"] },
+        detail: { enum: ["names", "signatures", "full"] },
+        cursor: { type: "integer" },
+      },
     });
-    expect(tools[2]?.parameters).toMatchObject({
+    expect(tools[1]?.parameters).toMatchObject({
+      properties: { calls: { type: "array" } },
+    });
+    expect(tools[3]?.parameters).toMatchObject({
       properties: {
         scope: { type: "string", enum: ["project", "global"] },
+      },
+    });
+    expect(tools[4]?.parameters).toMatchObject({
+      properties: {
+        action: { enum: ["list", "enable", "disable", "revalidate", "delete"] },
+        confirmedByUser: { type: "boolean" },
       },
     });
   });
