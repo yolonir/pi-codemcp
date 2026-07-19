@@ -51,10 +51,10 @@ lint-python:
     uv run --project sidecar ruff check sidecar tests/python tests/fixtures
 
 typecheck-python:
-    uv run --project sidecar mypy \
-        sidecar tests/python/test_executor.py tests/python/test_settings.py
-    uv run --project sidecar ty check \
-        sidecar tests/python/test_executor.py tests/python/test_settings.py
+    uv run --project sidecar mypy --config-file sidecar/pyproject.toml \
+        sidecar tests/python/test_executor.py tests/python/test_settings.py tests/python/test_cli.py
+    uv run --project sidecar ty check --project sidecar --extra-search-path . \
+        sidecar tests/python/test_executor.py tests/python/test_settings.py tests/python/test_cli.py
 
 test-python:
     uv run --project sidecar pytest tests/python -q

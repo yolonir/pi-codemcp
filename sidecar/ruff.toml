@@ -1,0 +1,2 @@
+# Keep standalone Ruff invocations in the sidecar directory aligned with pyproject.toml.
+extend = "pyproject.toml"

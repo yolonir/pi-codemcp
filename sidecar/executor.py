@@ -10,7 +10,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from itertools import islice
-from typing import TYPE_CHECKING, Literal, Self
+from typing import TYPE_CHECKING, Literal, Self, assert_never, override
 
 import pydantic_monty
 from pydantic import (
@@ -403,8 +403,8 @@ class MontyExecutor:
         async def inspect_json_external(
             value: JsonValue,
             *,
-            samples: int = 2,
-            max_depth: int = 3,
+            samples: JsonValue = 2,
+            max_depth: JsonValue = 3,
         ) -> JsonValue:
             await asyncio.sleep(0)
             if not isinstance(samples, int) or isinstance(samples, bool):
@@ -822,7 +822,7 @@ def _shape_label(value: JsonValue) -> str:
         return "boolean"
     if isinstance(value, dict):
         return "object"
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list):
         return f"array[{len(value)}]"
     if isinstance(value, str):
         return "string"
@@ -830,7 +830,7 @@ def _shape_label(value: JsonValue) -> str:
         return "integer"
     if isinstance(value, float):
         return "number"
-    return type(value).__name__
+    assert_never(value)
 
 
 def _wrap_code(
@@ -872,6 +872,7 @@ def _rewrite_sdk_calls(code: str, catalog: ToolCatalog) -> str:
     tree = ast.parse(code, filename="codemcp_execute.py", mode="exec")
 
     class FacadeCallRewriter(ast.NodeTransformer):
+        @override
         def visit_Call(self, node: ast.Call) -> ast.AST:
             self.generic_visit(node)
             function = node.func

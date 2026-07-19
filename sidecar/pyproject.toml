@@ -2,7 +2,7 @@
 name = "pi-codemcp-sidecar"
 version = "0.1.0"
 description = "Python sidecar for pi-codemcp"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
   "fastmcp==3.4.4",
   "httpx==0.28.1",
@@ -28,7 +28,7 @@ pythonpath = [".."]
 
 [tool.ruff]
 required-version = "==0.15.21"
-target-version = "py312"
+target-version = "py313"
 line-length = 100
 src = ["sidecar"]
 preview = true
@@ -92,13 +92,14 @@ docstring-code-line-length = 100
 "tests/fixtures/**/*.py" = ["T201"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.13"
 plugins = ["pydantic.mypy"]
 strict = true
 files = [
   "sidecar",
   "tests/python/test_executor.py",
   "tests/python/test_settings.py",
+  "tests/python/test_cli.py",
 ]
 pretty = true
 show_error_codes = true
@@ -129,7 +130,7 @@ warn_required_dynamic_aliases = true
 warn_untyped_fields = true
 
 [tool.ty.environment]
-python-version = "3.12"
+python-version = "3.13"
 
 [tool.ty.rules]
 all = "error"

@@ -527,7 +527,10 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
 
     declared = mcp_types.CallToolResult(
         content=[],
-        structuredContent={"value": "null"},
+        structuredContent={
+            "value": "null",
+            "payload": '{"nested": true}',
+        },
         isError=False,
     )
     declared_catalog = ToolCatalog.from_server_tools(
@@ -539,15 +542,19 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
                     [],
                     {
                         "type": "object",
-                        "properties": {"value": {"type": "string"}},
-                        "required": ["value"],
+                        "properties": {
+                            "value": {"type": "string"},
+                            "payload": {"type": "string"},
+                        },
+                        "required": ["value", "payload"],
                     },
                 )
             ]
         }
     )
     assert declared_catalog.normalize_result("example_read", declared) == {
-        "value": None
+        "value": "null",
+        "payload": '{"nested": true}',
     }
 
 
