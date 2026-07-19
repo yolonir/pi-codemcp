@@ -12,12 +12,42 @@ from fastmcp.exceptions import ToolError
 
 from sidecar import gateway
 from sidecar.chains import ChainEnabledChange
-from sidecar.json_types import JSON_OBJECT_ADAPTER, JsonObject
+from sidecar.json_types import JSON_OBJECT_ADAPTER, JsonObject, JsonValue
 
 
 def structured_data(structured: dict[str, object] | None) -> JsonObject:
     assert structured is not None
     return JSON_OBJECT_ADAPTER.validate_python(structured)
+
+
+def json_object_list(value: JsonValue) -> list[JsonObject]:
+    assert isinstance(value, list)
+    objects: list[JsonObject] = []
+    for item in value:
+        assert isinstance(item, dict)
+        objects.append(item)
+    return objects
+
+
+def objects_by_name(value: JsonValue) -> dict[str, JsonObject]:
+    objects: dict[str, JsonObject] = {}
+    for item in json_object_list(value):
+        name = item.get("name")
+        assert isinstance(name, str)
+        objects[name] = item
+    return objects
+
+
+def required_string(record: JsonObject, key: str) -> str:
+    value = record[key]
+    assert isinstance(value, str)
+    return value
+
+
+def required_object(record: JsonObject, key: str) -> JsonObject:
+    value = record[key]
+    assert isinstance(value, dict)
+    return value
 
 
 async def wait_for_process_exit(pid: int) -> None:
@@ -27,7 +57,7 @@ async def wait_for_process_exit(pid: int) -> None:
         except ProcessLookupError:
             return
         await asyncio.sleep(0.02)
-    pytest.fail(f"upstream child process {pid} was not terminated")
+    raise AssertionError(f"upstream child process {pid} was not terminated")
 
 
 def write_config(
@@ -242,7 +272,7 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
         initial_status = await client.call_tool("status", {})
         initial_data = structured_data(initial_status.structured_content)
         assert initial_data["tool_count"] == 0
-        upstreams = {item["name"]: item for item in initial_data["upstreams"]}
+        upstreams = objects_by_name(initial_data["upstreams"])
         assert upstreams["alpha"]["enabled"] is True
         assert upstreams["alpha"]["connected"] is False
         assert upstreams["alpha"]["discovered"] is False
@@ -267,19 +297,20 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
             {"name": "alpha", "tool_count": 2},
             {"name": "beta", "tool_count": 1},
         ]
-        assert search_data["results"][0]["name"] == "beta_save_number"
-        assert search_data["results"][0]["call"] == "beta.save_number"
-        assert "call_tool" not in search_data["results"][0]["signature"]
+        search_results = json_object_list(search_data["results"])
+        assert search_results[0]["name"] == "beta_save_number"
+        assert search_results[0]["call"] == "beta.save_number"
+        assert "call_tool" not in required_string(search_results[0], "signature")
         beta_search = await client.call_tool(
             "search", {"query": "number", "server": "beta"}
         )
         beta_search_data = structured_data(beta_search.structured_content)
-        assert [item["name"] for item in beta_search_data["results"]] == [
-            "beta_save_number"
-        ]
+        beta_search_results = json_object_list(beta_search_data["results"])
+        assert [item["name"] for item in beta_search_results] == ["beta_save_number"]
         assert beta_search_data["detail"] == "signatures"
         assert beta_search_data["project_scope_available"] is False
-        assert beta_search_data["execution_limits"]["max_calls"] == 50
+        execution_limits = required_object(beta_search_data, "execution_limits")
+        assert execution_limits["max_calls"] == 50
 
         inventory = await client.call_tool(
             "search",
@@ -288,7 +319,8 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
         inventory_data = structured_data(inventory.structured_content)
         assert inventory_data["has_more"] is True
         assert inventory_data["next_cursor"] == 1
-        assert "signature" not in inventory_data["results"][0]
+        inventory_results = json_object_list(inventory_data["results"])
+        assert "signature" not in inventory_results[0]
 
         with pytest.raises(ToolError, match="suggestions"):
             await client.call_tool("search", {"query": "number", "server": "bet"})
@@ -299,16 +331,17 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
         alpha_pid.unlink()
         beta_pid.unlink()
 
-        assert "JsonValue: TypeAlias" in search_data["prelude"]
-        assert "BetaSaveNumberArgs" in search_data["results"][0]["stub"]
-        assert all("stub" in item for item in search_data["results"][:3])
-        assert all("stub" not in item for item in search_data["results"][3:])
+        assert "JsonValue: TypeAlias" in required_string(search_data, "prelude")
+        assert "BetaSaveNumberArgs" in required_string(search_results[0], "stub")
+        assert all("stub" in item for item in search_results[:3])
+        assert all("stub" not in item for item in search_results[3:])
         inspected = await client.call_tool("inspect", {"calls": ["alpha.get_number"]})
         inspected_data = structured_data(inspected.structured_content)
-        assert "JsonValue: TypeAlias" in inspected_data["prelude"]
-        assert "AlphaGetNumberArgs" in inspected_data["results"][0]["stub"]
-        assert "input_schema" not in search_data["results"][0]
-        assert "output_schema" not in search_data["results"][0]
+        inspected_results = json_object_list(inspected_data["results"])
+        assert "JsonValue: TypeAlias" in required_string(inspected_data, "prelude")
+        assert "AlphaGetNumberArgs" in required_string(inspected_results[0], "stub")
+        assert "input_schema" not in search_results[0]
+        assert "output_schema" not in search_results[0]
         assert not alpha_pid.exists()
         assert not beta_pid.exists()
 
@@ -336,12 +369,18 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
         assert execution_data["ok"] is True
         assert execution_data["result"] == {"identifier": "N-5", "saved": True}
         assert execution_data["calls_made"] == 2
-        assert set(execution_data["timings"]) == {
+        timings = required_object(execution_data, "timings")
+        assert set(timings) == {
             "typecheck_ms",
             "execution_ms",
             "serialization_ms",
         }
-        assert all(value >= 0 for value in execution_data["timings"].values())
+        assert all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and value >= 0
+            for value in timings.values()
+        )
         assert beta_pid.exists()
         connected_pids = [int(alpha_pid.read_text()), int(beta_pid.read_text())]
 
@@ -463,7 +502,10 @@ async def test_catalog_cache_invalidates_only_changed_server(
         status = structured_data(
             (await second.call_tool("status", {})).structured_content
         )
-        counts = {item["name"]: item["tool_count"] for item in status["upstreams"]}
+        counts = {
+            name: item["tool_count"]
+            for name, item in objects_by_name(status["upstreams"]).items()
+        }
         assert counts == {"alpha": 0, "beta": 1, "ignored": 0}
         await second.call_tool("search", {"query": "number"})
         assert alpha_pid.exists()
@@ -485,13 +527,13 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
         tmp_path / "oauth",
         tmp_path / "catalog",
     )
-    integer_input = {
+    integer_input: JsonObject = {
         "type": "object",
         "properties": {"count": {"type": "integer", "minimum": 0}},
         "required": ["count"],
         "additionalProperties": False,
     }
-    integer_output = {
+    integer_output: JsonObject = {
         "type": "object",
         "properties": {"value": {"type": "integer"}},
         "required": ["value"],
@@ -617,7 +659,7 @@ async def test_saved_chain_nested_generated_output_types_execute_without_name_er
         tmp_path / "oauth",
         tmp_path / "catalog",
     )
-    nested_output = {
+    nested_output: JsonObject = {
         "type": "object",
         "properties": {
             "positions": {
@@ -687,12 +729,12 @@ async def test_project_chains_shadow_global_chains_without_disabled_fallback(
         tmp_path / "catalog",
         project_chain_dir=tmp_path / "project" / ".pi" / "pi-codemcp" / "chains",
     )
-    input_schema = {
+    input_schema: JsonObject = {
         "type": "object",
         "properties": {},
         "additionalProperties": False,
     }
-    output_schema = {
+    output_schema: JsonObject = {
         "type": "object",
         "properties": {"source": {"type": "string"}},
         "required": ["source"],

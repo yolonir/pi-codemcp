@@ -1,0 +1,5 @@
+[src]
+include = ["sidecar", "tests/python"]
+
+[environment]
+python-version = "3.13"

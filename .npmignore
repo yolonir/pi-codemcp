@@ -1,7 +1,0 @@
-sidecar/.venv/
-sidecar/**/__pycache__/
-sidecar/**/*.py[cod]
-sidecar/.pytest_cache/
-sidecar/.ruff_cache/
-sidecar/.mypy_cache/
-sidecar/.ty_cache/

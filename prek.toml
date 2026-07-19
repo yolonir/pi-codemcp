@@ -2,7 +2,9 @@
 # See https://prek.j178.dev.
 #:schema https://www.schemastore.org/prek.json
 
-minimum_prek_version = "0.4.8"
+minimum_prek_version = "0.4.10"
+default_install_hook_types = ["pre-commit", "pre-push"]
+default_stages = ["pre-commit"]
 
 [[repos]]
 repo = "builtin"
@@ -31,6 +33,15 @@ hooks = [
 repo = "local"
 hooks = [
   {
+    id = "fast-quality",
+    name = "TypeScript and Python format and lint",
+    entry = "just check-fast",
+    language = "system",
+    pass_filenames = false,
+    always_run = true,
+    require_serial = true,
+  },
+  {
     id = "quality",
     name = "locks, TypeScript, Python, and tests",
     entry = "just check",
@@ -38,5 +49,6 @@ hooks = [
     pass_filenames = false,
     always_run = true,
     require_serial = true,
+    stages = ["pre-push"],
   },
 ]
