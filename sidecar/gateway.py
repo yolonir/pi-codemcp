@@ -11,6 +11,8 @@ import pydantic_monty
 from fastmcp import Client, FastMCP
 from fastmcp.mcp_config import RemoteMCPServer, StdioMCPServer
 from pydantic import BaseModel, ConfigDict
+from pydantic_core import to_json
+from rapidfuzz import fuzz, process
 
 from . import json_types
 from .catalog_cache import CatalogCache
@@ -28,7 +30,11 @@ from .chains import (
 from .executor import ExecutionContext, ExecutionResponse, MontyExecutor
 from .mcp_config import NormalizedConfig, load_mcp_json, normalize_mcp_config
 from .models import (
+    ExecutionLimitsView,
+    InspectResponse,
     NormalizedServerInfo,
+    SearchDetail,
+    SearchMode,
     SearchResponse,
     ServerToolSummary,
     StatusResponse,
@@ -37,7 +43,8 @@ from .models import (
 )
 from .runtime_paths import resolve_runtime_paths
 from .settings import CodeMcpSettings, load_settings
-from .tool_catalog import ToolCatalog
+from .stats import StatsStore
+from .tool_catalog import ToolCatalog, schema_path_summary
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
@@ -47,6 +54,8 @@ if TYPE_CHECKING:
     from mcp import types as mcp_types
 
     from .runtime_paths import RuntimePaths
+
+MAX_INSPECT_CALLS = 20
 type ServerConfig = StdioMCPServer | RemoteMCPServer
 type JsonObject = json_types.JsonObject
 type JsonValue = json_types.JsonValue
@@ -238,6 +247,9 @@ class GatewayRuntime:
         self.chain_store = chain_store
         self.catalog = catalog
         self.executor = executor
+        self.stats_store = StatsStore(settings_path.parent / "stats.json")
+        for handle in handles.values():
+            self.stats_store.record_cache(hit=handle.tools is not None)
         self.chains = SavedChainRuntime(
             SavedChainHandlers(
                 execute=self._execute_chain,
@@ -305,50 +317,386 @@ class GatewayRuntime:
             *(handle.close() for handle in self.handles.values()),
             return_exceptions=True,
         )
+        await self.stats_store.close()
 
     async def search(
         self,
-        query: str,
+        query: str | None = None,
         limit: int = 5,
         server: str | None = None,
+        detail: SearchDetail = "signatures",
+        mode: SearchMode = "search",
+        cursor: int = 0,
     ) -> SearchResponse:
-        clean_query = query.strip()
-        if not clean_query:
-            raise ValueError("query must not be empty")
-        await self._ensure_catalog_complete()
+        started = time.perf_counter()
+        input_bytes = len(
+            to_json({
+                "query": query,
+                "limit": limit,
+                "server": server,
+                "detail": detail,
+                "mode": mode,
+                "cursor": cursor,
+            })
+        )
+        try:
+            response = await self._search_impl(query, limit, server, detail, mode, cursor)
+        except BaseException:
+            self.stats_store.record_operation(
+                "search",
+                duration_ms=_elapsed_ms(started),
+                success=False,
+                failure_stage="error",
+                input_bytes=input_bytes,
+            )
+            raise
+        self.stats_store.record_operation(
+            "search",
+            duration_ms=_elapsed_ms(started),
+            success=True,
+            input_bytes=input_bytes,
+            output_bytes=len(to_json(response.model_dump(mode="json"))),
+        )
+        return response
+
+    async def _search_impl(
+        self,
+        query: str | None,
+        limit: int,
+        server: str | None,
+        detail: SearchDetail,
+        mode: SearchMode,
+        cursor: int,
+    ) -> SearchResponse:
+        self._validate_search_server(server)
+        discovery_started = time.perf_counter()
+        discovery_servers: Iterable[str]
+        if server is None:
+            discovery_servers = self.handles.keys()
+        elif server == "chains":
+            discovery_servers = ()
+        else:
+            discovery_servers = (server,)
+        await self._ensure_servers_discovered(discovery_servers)
+        self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
         bounded_limit = min(max(limit, 1), 20)
+        bounded_cursor = max(cursor, 0)
         counts = self.catalog.counts_by_server()
         servers = [
-            ServerToolSummary(name=server.name, tool_count=counts[server.name])
-            for server in self.normalized.servers
-            if counts.get(server.name, 0) > 0
+            ServerToolSummary(name=server_info.name, tool_count=counts[server_info.name])
+            for server_info in self.normalized.servers
+            if counts.get(server_info.name, 0) > 0
         ]
         if counts.get("chains", 0) > 0:
             servers.append(ServerToolSummary(name="chains", tool_count=counts["chains"]))
+        filtered_count = counts.get(server, 0) if server is not None else len(self.catalog.tools)
+        if mode == "inventory":
+            results = self.catalog.inventory(
+                server=server,
+                detail=detail,
+                offset=bounded_cursor,
+                limit=bounded_limit,
+            )
+            total_matches = filtered_count
+        else:
+            clean_query = (query or "").strip()
+            if not clean_query:
+                raise ValueError("query is required in search mode")
+            all_matches = self.catalog.search(
+                clean_query,
+                filtered_count,
+                server=server,
+                detail=detail,
+            )
+            total_matches = len(all_matches)
+            results = all_matches[bounded_cursor : bounded_cursor + bounded_limit]
+        next_cursor = (
+            bounded_cursor + len(results) if bounded_cursor + len(results) < total_matches else None
+        )
+        include_prelude = detail == "full"
+        if mode == "search" and detail == "signatures" and results:
+            inspected = {
+                item.call: item.stub
+                for item in self.catalog.inspect([
+                    result.call for result in results[: min(3, len(results))]
+                ])
+            }
+            results = [
+                result.model_copy(update={"stub": inspected[result.call]})
+                if result.call in inspected
+                else result
+                for result in results
+            ]
+            include_prelude = True
         return SearchResponse(
+            mode=mode,
+            detail=detail,
             total_tool_count=len(self.catalog.tools),
+            filtered_tool_count=filtered_count,
             servers=servers,
-            results=self.catalog.search(clean_query, bounded_limit, server=server),
+            cursor=bounded_cursor,
+            next_cursor=next_cursor,
+            has_more=next_cursor is not None,
+            project_scope_available=self.chain_store.project_store is not None,
+            execution_limits=self._execution_limits_view(),
+            prelude=self.catalog.stub_prelude if include_prelude else None,
+            results=results,
+        )
+
+    async def inspect(self, calls: list[str]) -> InspectResponse:
+        started = time.perf_counter()
+        try:
+            response = await self._inspect_impl(calls)
+        except BaseException:
+            self.stats_store.record_operation(
+                "inspect",
+                duration_ms=_elapsed_ms(started),
+                success=False,
+                failure_stage="error",
+                input_bytes=len(to_json(calls)),
+            )
+            raise
+        self.stats_store.record_operation(
+            "inspect",
+            duration_ms=_elapsed_ms(started),
+            success=True,
+            input_bytes=len(to_json(calls)),
+            output_bytes=len(to_json(response.model_dump(mode="json"))),
+        )
+        return response
+
+    async def _inspect_impl(self, calls: list[str]) -> InspectResponse:
+        if not calls:
+            raise ValueError("calls must contain at least one MCP call")
+        if len(calls) > MAX_INSPECT_CALLS:
+            raise ValueError(f"calls must contain at most {MAX_INSPECT_CALLS} MCP calls")
+        discovery_started = time.perf_counter()
+        requested_namespaces = {call.partition(".")[0] for call in calls}
+        discovery_servers = [
+            server
+            for server, namespace in self.catalog.server_aliases.items()
+            if namespace in requested_namespaces
+        ]
+        await self._ensure_servers_discovered(discovery_servers)
+        self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
+        return InspectResponse(
+            prelude=self.catalog.stub_prelude,
+            project_scope_available=self.chain_store.project_store is not None,
+            execution_limits=self._execution_limits_view(),
+            results=self.catalog.inspect(calls),
+        )
+
+    def _validate_search_server(self, server: str | None) -> None:
+        if server is None:
+            return
+        valid = set(self.catalog.servers)
+        if server in valid:
+            return
+        suggestions = [
+            name
+            for name, _score, _index in process.extract(
+                server,
+                sorted(valid),
+                scorer=fuzz.ratio,
+                limit=3,
+            )
+        ]
+        raise ValueError(
+            f"Unknown MCP server {server!r}; available: {sorted(valid)}; suggestions: {suggestions}"
+        )
+
+    def _execution_limits_view(self) -> ExecutionLimitsView:
+        settings = self.executor.settings
+        return ExecutionLimitsView(
+            timeout_seconds=settings.timeout_seconds,
+            tool_timeout_seconds=settings.tool_timeout_seconds,
+            max_calls=settings.max_calls,
+            result_limit_bytes=settings.result_byte_limit,
         )
 
     async def execute(self, code: str) -> ExecutionResponse:
-        await self._ensure_servers_discovered(self._required_servers_for_code(code))
+        started = time.perf_counter()
+        input_bytes = len(code.encode())
+        discovery_started = time.perf_counter()
+        try:
+            await self._ensure_servers_discovered(self._required_servers_for_code(code))
+        except BaseException:
+            self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
+            self._record_operation_exception(
+                "execute",
+                started,
+                input_bytes,
+                failure_stage="discovery",
+            )
+            raise
+        self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
         self.executor.update_catalog(self.catalog)
-        return await self.executor.execute_graph(code, self._dispatch)
+        try:
+            response = await self.executor.execute_graph(code, self._dispatch)
+        except BaseException as error:
+            self._record_operation_exception(
+                "execute",
+                started,
+                input_bytes,
+                failure_stage=(
+                    "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
+                ),
+            )
+            raise
+        self._record_execution("execute", started, input_bytes, response)
+        return response
 
     async def _execute_chain(self, name: str, arguments: JsonObject) -> ExecutionResponse:
-        chain = self.chain_store.get(name).chain
+        started = time.perf_counter()
+        input_bytes = len(to_json(arguments))
+        try:
+            chain = self.chain_store.get(name).chain
+        except BaseException:
+            self._record_operation_exception(
+                "execute_chain",
+                started,
+                input_bytes,
+                failure_stage="preflight",
+            )
+            raise
         if not chain.enabled:
-            return ExecutionResponse(
+            response = ExecutionResponse(
                 ok=False,
                 failure_stage="preflight",
                 error=f"Saved chain is disabled: {name}",
             )
-        await self._ensure_servers_discovered(self._required_servers_for_chain(chain))
+            self._record_execution(
+                "execute_chain",
+                started,
+                input_bytes,
+                response,
+            )
+            return response
+        discovery_started = time.perf_counter()
+        try:
+            await self._ensure_servers_discovered(self._required_servers_for_chain(chain))
+        except BaseException:
+            self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
+            self._record_operation_exception(
+                "execute_chain",
+                started,
+                input_bytes,
+                failure_stage="discovery",
+            )
+            raise
+        self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
         self.executor.update_catalog(self.catalog)
-        return await self.executor.execute_saved_chain(chain, arguments, self._dispatch)
+        try:
+            response = await self.executor.execute_saved_chain(chain, arguments, self._dispatch)
+        except BaseException as error:
+            self._record_operation_exception(
+                "execute_chain",
+                started,
+                input_bytes,
+                failure_stage=(
+                    "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
+                ),
+            )
+            raise
+        self._record_execution(
+            "execute_chain",
+            started,
+            input_bytes,
+            response,
+        )
+        return response
+
+    def _record_operation_exception(
+        self,
+        operation: str,
+        started: float,
+        input_bytes: int,
+        *,
+        failure_stage: str,
+    ) -> None:
+        self.stats_store.record_operation(
+            operation,
+            duration_ms=_elapsed_ms(started),
+            success=False,
+            failure_stage=failure_stage,
+            input_bytes=input_bytes,
+        )
+
+    def _record_execution(
+        self,
+        operation: str,
+        started: float,
+        input_bytes: int,
+        response: ExecutionResponse,
+    ) -> None:
+        self.stats_store.record_operation(
+            operation,
+            duration_ms=_elapsed_ms(started),
+            success=response.ok,
+            failure_stage=response.failure_stage,
+            input_bytes=input_bytes,
+            output_bytes=response.metrics.result_bytes,
+            calls=response.calls_made,
+            chain_calls=response.chain_calls,
+        )
+        metrics = response.metrics
+        for phase, duration in (
+            ("typecheck", metrics.typecheck_ms),
+            ("execution", metrics.runtime_ms),
+            ("serialization", metrics.serialization_ms),
+        ):
+            if duration > 0:
+                self.stats_store.record_phase(phase, duration)
 
     async def _save_chain(
+        self,
+        *,
+        scope: ChainScope,
+        name: str,
+        description: str,
+        code: str,
+        input_schema: JsonObject,
+        output_schema: JsonObject,
+    ) -> SaveChainResponse:
+        started = time.perf_counter()
+        input_bytes = len(
+            to_json({
+                "scope": scope,
+                "name": name,
+                "description": description,
+                "code": code,
+                "input_schema": input_schema,
+                "output_schema": output_schema,
+            })
+        )
+        try:
+            response = await self._save_chain_impl(
+                scope=scope,
+                name=name,
+                description=description,
+                code=code,
+                input_schema=input_schema,
+                output_schema=output_schema,
+            )
+        except BaseException:
+            self.stats_store.record_operation(
+                "save_chain",
+                duration_ms=_elapsed_ms(started),
+                success=False,
+                failure_stage="validation",
+                input_bytes=input_bytes,
+            )
+            raise
+        self.stats_store.record_operation(
+            "save_chain",
+            duration_ms=_elapsed_ms(started),
+            success=True,
+            input_bytes=input_bytes,
+            output_bytes=len(to_json(response.model_dump(mode="json"))),
+        )
+        return response
+
+    async def _save_chain_impl(
         self,
         *,
         scope: ChainScope,
@@ -384,7 +732,7 @@ class GatewayRuntime:
                 message = error.display("concise", color=False).strip()
             else:
                 message = error.display("type-msg").strip()
-            raise ValueError(f"Saved chain failed preflight: {message}") from error
+            raise ValueError(_saved_chain_preflight_error(message, output_schema)) from error
         dependencies = self._chain_dependencies(code, candidate_catalog)
         saved = ChainStore.build(
             name=name,
@@ -403,9 +751,37 @@ class GatewayRuntime:
         )
 
     def _list_chains(self) -> ChainListResponse:
-        return ChainListResponse(chains=self._chain_views())
+        started = time.perf_counter()
+        response = ChainListResponse(chains=self._chain_views())
+        self.stats_store.record_operation(
+            "list_chains",
+            duration_ms=_elapsed_ms(started),
+            success=True,
+            output_bytes=len(to_json(response.model_dump(mode="json"))),
+        )
+        return response
 
     async def _revalidate_chain(self, name: str, scope: ChainScope) -> ChainStatusView:
+        started = time.perf_counter()
+        try:
+            response = await self._revalidate_chain_impl(name, scope)
+        except BaseException:
+            self.stats_store.record_operation(
+                "revalidate_chain",
+                duration_ms=_elapsed_ms(started),
+                success=False,
+                failure_stage="validation",
+            )
+            raise
+        self.stats_store.record_operation(
+            "revalidate_chain",
+            duration_ms=_elapsed_ms(started),
+            success=True,
+            output_bytes=len(to_json(response.model_dump(mode="json"))),
+        )
+        return response
+
+    async def _revalidate_chain_impl(self, name: str, scope: ChainScope) -> ChainStatusView:
         current = self.chain_store.get(name, scope).chain
         await self._ensure_servers_discovered(self._referenced_servers(current.code))
         chains = [chain for chain in self.chain_store.enabled() if chain.name != name]
@@ -419,7 +795,9 @@ class GatewayRuntime:
                 message = error.display("concise", color=False).strip()
             else:
                 message = error.display("type-msg").strip()
-            raise ValueError(f"Saved chain failed preflight: {message}") from error
+            raise ValueError(
+                _saved_chain_preflight_error(message, current.output_schema)
+            ) from error
         updated = current.model_copy(
             update={
                 "dependencies": self._chain_dependencies(current.code, candidate_catalog),
@@ -431,6 +809,26 @@ class GatewayRuntime:
         return self._chain_view(name, scope)
 
     async def _delete_chain(self, name: str, scope: ChainScope) -> ChainListResponse:
+        started = time.perf_counter()
+        try:
+            response = await self._delete_chain_impl(name, scope)
+        except BaseException:
+            self.stats_store.record_operation(
+                "delete_chain",
+                duration_ms=_elapsed_ms(started),
+                success=False,
+                failure_stage="error",
+            )
+            raise
+        self.stats_store.record_operation(
+            "delete_chain",
+            duration_ms=_elapsed_ms(started),
+            success=True,
+            output_bytes=len(to_json(response.model_dump(mode="json"))),
+        )
+        return response
+
+    async def _delete_chain_impl(self, name: str, scope: ChainScope) -> ChainListResponse:
         effective = self.chain_store.get(name)
         called_by = self._called_by().get(name, []) if effective.scope == scope else []
         if called_by:
@@ -453,15 +851,37 @@ class GatewayRuntime:
             return await self.executor.execute_nested_chain(chain, arguments, context)
 
         handle = self.handles[spec.server]
-        result = await handle.call_tool(
+        started = time.perf_counter()
+        input_bytes = len(to_json(arguments))
+        try:
+            result = await handle.call_tool(
+                spec.backend_name,
+                arguments,
+                timeout_seconds=min(
+                    self.executor.settings.tool_timeout_seconds,
+                    max(0.001, context.remaining_seconds()),
+                ),
+            )
+            normalized = context.catalog.normalize_result(public_name, result)
+        except BaseException:
+            self.stats_store.record_upstream(
+                spec.server,
+                spec.backend_name,
+                duration_ms=_elapsed_ms(started),
+                success=False,
+                input_bytes=input_bytes,
+                output_bytes=0,
+            )
+            raise
+        self.stats_store.record_upstream(
+            spec.server,
             spec.backend_name,
-            arguments,
-            timeout_seconds=min(
-                self.executor.settings.tool_timeout_seconds,
-                max(0.001, context.remaining_seconds()),
-            ),
+            duration_ms=_elapsed_ms(started),
+            success=True,
+            input_bytes=input_bytes,
+            output_bytes=len(to_json(normalized)),
         )
-        return context.catalog.normalize_result(public_name, result)
+        return normalized
 
     async def discover(self, server: str) -> StatusResponse:
         handle = self.handles.get(server)
@@ -715,6 +1135,19 @@ class GatewayRuntime:
         }
 
 
+def _saved_chain_preflight_error(message: str, output_schema: JsonObject) -> str:
+    expected = "\n".join(f"  - {path}" for path in schema_path_summary(output_schema))
+    return (
+        "Saved chain failed preflight against outputSchema.\n"
+        f"Expected output paths:\n{expected}\n"
+        f"Actual type-check result:\n{message}"
+    )
+
+
+def _elapsed_ms(started: float) -> float:
+    return (time.perf_counter() - started) * 1_000
+
+
 def _parse_code(code: str) -> ast.AST | None:
     normalized = textwrap.dedent(code).strip("\n")
     wrapped = f"async def __codemcp_main():\n{textwrap.indent(normalized, '    ')}\n"
@@ -791,12 +1224,21 @@ mcp = FastMCP(
 
 @mcp.tool
 async def search(
-    query: str,
+    query: str | None = None,
     limit: int = 5,
     server: str | None = None,
+    detail: SearchDetail = "signatures",
+    mode: SearchMode = "search",
+    cursor: int = 0,
 ) -> SearchResponse:
-    """Search configured upstream MCP tools and saved chains by capability."""
-    return await _require_runtime().search(query, limit, server)
+    """Search or page through configured upstream MCP tools and saved chains."""
+    return await _require_runtime().search(query, limit, server, detail, mode, cursor)
+
+
+@mcp.tool
+async def inspect(calls: list[str]) -> InspectResponse:
+    """Return exact typed SDK stubs for selected call identifiers."""
+    return await _require_runtime().inspect(calls)
 
 
 @mcp.tool
@@ -868,6 +1310,12 @@ async def revalidate_chain(name: str, scope: ChainScope) -> ChainStatusView:
 async def delete_chain(name: str, scope: ChainScope) -> ChainListResponse:
     """Delete an unused saved chain from its storage scope."""
     return await _require_runtime().chains.delete(name, scope)
+
+
+@mcp.tool
+def stats() -> JsonObject:
+    """Return bounded local CodeMCP telemetry rollups."""
+    return _require_runtime().stats_store.snapshot()
 
 
 @mcp.tool

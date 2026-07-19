@@ -113,6 +113,13 @@ async def test_valid_three_call_cross_server_chain_and_mutation() -> None:
     assert response.ok is True
     assert response.result == {"saved": True, "issue": "LIN-1"}
     assert response.calls_made == 3
+    assert response.metrics.typecheck_ms >= 0
+    assert response.metrics.runtime_ms > 0
+    assert response.metrics.serialization_ms >= 0
+    assert response.metrics.result_bytes > 0
+    serialized = response.model_dump(mode="json")
+    assert "metrics" not in serialized
+    assert serialized["timings"]["execution_ms"] > 0
     assert [name for name, _ in seen] == [
         "alpha_get",
         "beta_put",
@@ -148,6 +155,36 @@ async def test_preflight_errors_make_zero_calls(code: str) -> None:
     assert response.calls_made == 0
     assert calls == 0
     assert response.error
+
+
+@pytest.mark.asyncio
+async def test_executor_typechecks_only_referenced_sdk_stubs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[tuple[set[str], str | None]] = []
+    original = ToolCatalog.type_stubs_for
+
+    def capture(
+        self: ToolCatalog,
+        public_names: set[str],
+        *,
+        include: str | None = None,
+    ) -> str:
+        captured.append((set(public_names), include))
+        return original(self, public_names, include=include)
+
+    monkeypatch.setattr(ToolCatalog, "type_stubs_for", capture)
+
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        return {"value": 1}
+
+    response = await MontyExecutor(catalog()).execute(
+        'return await alpha.get({"id": "one"})',
+        call,
+    )
+
+    assert response.ok is True
+    assert captured == [({"alpha_get"}, None)]
 
 
 @pytest.mark.asyncio
@@ -204,17 +241,113 @@ async def test_oversized_result_fails_with_shape_without_retry() -> None:
     async def call(_: str, __: JsonObject) -> JsonValue:
         nonlocal calls
         calls += 1
-        return {"summary": {"title": "large"}, "panels": ["x" * 100]}
+        return {"summary": {"title": "large"}, "panels": ["x" * 2_000]}
 
     response = await MontyExecutor(
-        catalog(), settings=ExecutionSettings(result_byte_limit=64)
+        catalog(), settings=ExecutionSettings(result_byte_limit=1_024)
     ).execute("return await alpha.dynamic({})", call)
 
     assert response.ok is False
     assert response.failure_stage == "result"
-    assert response.error and "reduce it below 64 bytes" in response.error
-    assert response.shape == {"summary": "object", "panels": "array[1]"}
+    assert response.error and "reduce it below 1024 bytes" in response.error
+    shape = response.shape
+    assert shape is not None
+    assert shape["type"] == "object"
+    serialized_bytes = shape["serialized_bytes"]
+    assert isinstance(serialized_bytes, int) and serialized_bytes > 1_024
+    assert shape["cardinality"] == 2
+    assert shape["shape"] == {
+        "summary": {"title": "string"},
+        "panels": {"items": ["string"], "count": 1},
+    }
+    field_sizes = shape["field_sizes"]
+    assert isinstance(field_sizes, list) and field_sizes
+    first_field = field_sizes[0]
+    assert isinstance(first_field, dict) and first_field["path"] == "$.panels"
+    samples = shape["samples"]
+    assert isinstance(samples, list) and samples
+    first_sample = samples[0]
+    assert isinstance(first_sample, dict)
+    panels = first_sample["panels"]
+    assert isinstance(panels, list)
+    assert isinstance(panels[0], str) and panels[0].endswith("…")
+    assert len(response.model_dump_json().encode()) < 1_024
     assert response.calls_made == calls == 1
+
+
+@pytest.mark.asyncio
+async def test_oversized_diagnostic_truncates_unbounded_json_keys() -> None:
+    huge_key = "k" * 100_000
+
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        return {huge_key: 1}
+
+    response = await MontyExecutor(
+        catalog(), settings=ExecutionSettings(result_byte_limit=1_024)
+    ).execute("return await alpha.dynamic({})", call)
+
+    assert response.ok is False
+    assert response.failure_stage == "result"
+    assert response.shape is not None
+    assert response.shape["truncated"] is True
+    assert huge_key not in response.model_dump_json()
+    assert len(response.model_dump_json().encode()) < 1_024
+
+
+@pytest.mark.asyncio
+async def test_inspect_json_reports_bounded_runtime_shape_and_samples() -> None:
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        return [
+            {"id": 1, "message": "x" * 250, "labels": {"service": "api"}},
+            {"id": 2, "message": "ok", "labels": {"service": "worker"}},
+            {"id": 3, "message": "ignored", "labels": {"service": "api"}},
+        ]
+
+    response = await MontyExecutor(catalog()).execute(
+        """
+        value = await alpha.dynamic({})
+        return inspect_json(value, samples=2, max_depth=3)
+        """,
+        call,
+    )
+
+    assert response.ok is True
+    assert isinstance(response.result, dict)
+    assert response.result["type"] == "array[3]"
+    assert response.result["cardinality"] == 3
+    assert response.result["common_keys"] == ["id", "labels", "message"]
+    assert response.result["scalar_types"] == {
+        "$[].id": ["integer"],
+        "$[].labels.service": ["string"],
+        "$[].message": ["string"],
+    }
+    result_samples = response.result["samples"]
+    assert isinstance(result_samples, list) and len(result_samples) == 2
+    result_first = result_samples[0]
+    assert isinstance(result_first, dict)
+    message = result_first["message"]
+    assert isinstance(message, str) and message.endswith("…")
+    assert response.calls_made == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code, message",
+    [
+        ("return inspect_json([], samples=0)", "samples must be from"),
+        ("return inspect_json([], samples=4)", "samples must be from"),
+        ("return inspect_json([], max_depth=0)", "max_depth must be from"),
+    ],
+)
+async def test_inspect_json_rejects_unbounded_options(code: str, message: str) -> None:
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        raise AssertionError("no MCP tool call expected")
+
+    response = await MontyExecutor(catalog()).execute(code, call)
+    assert response.ok is False
+    assert response.failure_stage == "runtime"
+    assert response.error and message in response.error
+    assert response.calls_made == 0
 
 
 @pytest.mark.asyncio

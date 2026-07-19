@@ -1,0 +1,318 @@
+{
+  "schemaVersion": 1,
+  "model": "openai-codex/gpt-5.6-terra",
+  "thinking": "low",
+  "tasks": [
+    "inventory",
+    "filter incidents",
+    "three-source aggregate",
+    "dependent metrics",
+    "large reduction"
+  ],
+  "variants": {
+    "baseline": {
+      "correct": 5,
+      "meanElapsedMs": 11388,
+      "toolCalls": 12,
+      "searches": 8,
+      "inspects": 0,
+      "executeSuccesses": 4,
+      "executeFailures": 0,
+      "upstreamCalls": 8,
+      "toolOutputBytes": 18260,
+      "searchOutputBytes": 17752,
+      "totalTokens": 32961,
+      "cost": 0.06470450000000001
+    },
+    "current": {
+      "correct": 5,
+      "meanElapsedMs": 11412,
+      "toolCalls": 10,
+      "searches": 6,
+      "inspects": 0,
+      "executeSuccesses": 4,
+      "executeFailures": 0,
+      "upstreamCalls": 8,
+      "toolOutputBytes": 12167,
+      "searchOutputBytes": 11961,
+      "totalTokens": 35385,
+      "cost": 0.04927650000000001
+    }
+  },
+  "runs": [
+    {
+      "variant": "baseline",
+      "task": "inventory",
+      "correct": true,
+      "answer": [
+        "bench.get_dependencies",
+        "bench.get_events",
+        "bench.get_owner",
+        "bench.list_incidents",
+        "bench.service_metrics"
+      ],
+      "elapsedMs": 11714,
+      "toolCalls": 1,
+      "searches": 1,
+      "inspects": 0,
+      "executeSuccesses": 0,
+      "executeFailures": 0,
+      "executeErrors": [],
+      "upstreamCalls": 0,
+      "toolOutputBytes": 3500,
+      "searchOutputBytes": 3500,
+      "usage": {
+        "input": 2736,
+        "output": 65,
+        "cacheRead": 1024,
+        "reasoning": 9,
+        "totalTokens": 3825,
+        "cost": 0.008071000000000002
+      }
+    },
+    {
+      "variant": "current",
+      "task": "inventory",
+      "correct": true,
+      "answer": [
+        "bench.get_dependencies",
+        "bench.get_events",
+        "bench.get_owner",
+        "bench.list_incidents",
+        "bench.service_metrics"
+      ],
+      "elapsedMs": 12193,
+      "toolCalls": 1,
+      "searches": 1,
+      "inspects": 0,
+      "executeSuccesses": 0,
+      "executeFailures": 0,
+      "executeErrors": [],
+      "upstreamCalls": 0,
+      "toolOutputBytes": 1126,
+      "searchOutputBytes": 1126,
+      "usage": {
+        "input": 834,
+        "output": 79,
+        "cacheRead": 3072,
+        "reasoning": 19,
+        "totalTokens": 3985,
+        "cost": 0.004038
+      }
+    },
+    {
+      "variant": "baseline",
+      "task": "filter incidents",
+      "correct": true,
+      "answer": ["PAY-002", "PAY-004", "PAY-007", "PAY-008"],
+      "elapsedMs": 10506,
+      "toolCalls": 2,
+      "searches": 1,
+      "inspects": 0,
+      "executeSuccesses": 1,
+      "executeFailures": 0,
+      "executeErrors": [],
+      "upstreamCalls": 1,
+      "toolOutputBytes": 2434,
+      "searchOutputBytes": 2321,
+      "usage": {
+        "input": 3120,
+        "output": 132,
+        "cacheRead": 2560,
+        "reasoning": 8,
+        "totalTokens": 5812,
+        "cost": 0.010420000000000002
+      }
+    },
+    {
+      "variant": "current",
+      "task": "filter incidents",
+      "correct": true,
+      "answer": ["PAY-002", "PAY-004", "PAY-007", "PAY-008"],
+      "elapsedMs": 9858,
+      "toolCalls": 2,
+      "searches": 1,
+      "inspects": 0,
+      "executeSuccesses": 1,
+      "executeFailures": 0,
+      "executeErrors": [],
+      "upstreamCalls": 1,
+      "toolOutputBytes": 1924,
+      "searchOutputBytes": 1883,
+      "usage": {
+        "input": 1472,
+        "output": 138,
+        "cacheRead": 5120,
+        "reasoning": 8,
+        "totalTokens": 6730,
+        "cost": 0.00703
+      }
+    },
+    {
+      "variant": "baseline",
+      "task": "three-source aggregate",
+      "correct": true,
+      "answer": {
+        "owner": "team-api",
+        "p95_latency_ms": 180,
+        "open_incident_count": 8
+      },
+      "elapsedMs": 14233,
+      "toolCalls": 5,
+      "searches": 4,
+      "inspects": 0,
+      "executeSuccesses": 1,
+      "executeFailures": 0,
+      "executeErrors": [],
+      "upstreamCalls": 3,
+      "toolOutputBytes": 7577,
+      "searchOutputBytes": 7442,
+      "usage": {
+        "input": 5295,
+        "output": 312,
+        "cacheRead": 6144,
+        "reasoning": 38,
+        "totalTokens": 11751,
+        "cost": 0.0194535
+      }
+    },
+    {
+      "variant": "current",
+      "task": "three-source aggregate",
+      "correct": true,
+      "answer": {
+        "owner": "team-api",
+        "p95_latency_ms": 180,
+        "open_incident_count": 8
+      },
+      "elapsedMs": 13647,
+      "toolCalls": 3,
+      "searches": 2,
+      "inspects": 0,
+      "executeSuccesses": 1,
+      "executeFailures": 0,
+      "executeErrors": [],
+      "upstreamCalls": 3,
+      "toolOutputBytes": 4753,
+      "searchOutputBytes": 4688,
+      "usage": {
+        "input": 6565,
+        "output": 285,
+        "cacheRead": 4096,
+        "reasoning": 56,
+        "totalTokens": 10946,
+        "cost": 0.0217115
+      }
+    },
+    {
+      "variant": "baseline",
+      "task": "dependent metrics",
+      "correct": true,
+      "answer": {
+        "api": 0.02,
+        "payments": 0.01
+      },
+      "elapsedMs": 9750,
+      "toolCalls": 2,
+      "searches": 1,
+      "inspects": 0,
+      "executeSuccesses": 1,
+      "executeFailures": 0,
+      "executeErrors": [],
+      "upstreamCalls": 3,
+      "toolOutputBytes": 2260,
+      "searchOutputBytes": 2168,
+      "usage": {
+        "input": 4041,
+        "output": 143,
+        "cacheRead": 1536,
+        "reasoning": 8,
+        "totalTokens": 5720,
+        "cost": 0.012631500000000002
+      }
+    },
+    {
+      "variant": "current",
+      "task": "dependent metrics",
+      "correct": true,
+      "answer": {
+        "api": 0.02,
+        "payments": 0.01
+      },
+      "elapsedMs": 10524,
+      "toolCalls": 2,
+      "searches": 1,
+      "inspects": 0,
+      "executeSuccesses": 1,
+      "executeFailures": 0,
+      "executeErrors": [],
+      "upstreamCalls": 3,
+      "toolOutputBytes": 2399,
+      "searchOutputBytes": 2371,
+      "usage": {
+        "input": 2168,
+        "output": 168,
+        "cacheRead": 4608,
+        "reasoning": 26,
+        "totalTokens": 6944,
+        "cost": 0.009092
+      }
+    },
+    {
+      "variant": "baseline",
+      "task": "large reduction",
+      "correct": true,
+      "answer": {
+        "count": 120,
+        "kinds": ["request", "retry", "timeout"],
+        "max_latency_ms": 132
+      },
+      "elapsedMs": 10739,
+      "toolCalls": 2,
+      "searches": 1,
+      "inspects": 0,
+      "executeSuccesses": 1,
+      "executeFailures": 0,
+      "executeErrors": [],
+      "upstreamCalls": 1,
+      "toolOutputBytes": 2489,
+      "searchOutputBytes": 2321,
+      "usage": {
+        "input": 4685,
+        "output": 144,
+        "cacheRead": 1024,
+        "reasoning": 9,
+        "totalTokens": 5853,
+        "cost": 0.0141285
+      }
+    },
+    {
+      "variant": "current",
+      "task": "large reduction",
+      "correct": true,
+      "answer": {
+        "count": 120,
+        "kinds": ["request", "retry", "timeout"],
+        "max_latency_ms": 132
+      },
+      "elapsedMs": 10839,
+      "toolCalls": 2,
+      "searches": 1,
+      "inspects": 0,
+      "executeSuccesses": 1,
+      "executeFailures": 0,
+      "executeErrors": [],
+      "upstreamCalls": 1,
+      "toolOutputBytes": 1965,
+      "searchOutputBytes": 1893,
+      "usage": {
+        "input": 1502,
+        "output": 158,
+        "cacheRead": 5120,
+        "reasoning": 15,
+        "totalTokens": 6780,
+        "cost": 0.007405
+      }
+    }
+  ]
+}

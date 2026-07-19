@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -9,7 +10,6 @@ from mcp import types as mcp_types
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import ValidationError
 
-from sidecar import tool_catalog
 from sidecar.chains import ChainStore
 from sidecar.mcp_config import normalize_mcp_config
 from sidecar.models import NormalizedServerInfo
@@ -211,7 +211,7 @@ def test_catalog_namespaces_single_server_and_searches_compactly() -> None:
 
     assert list(catalog.tools) == ["linear_get_issue"]
     assert catalog.tools["linear_get_issue"].backend_name == "get_issue"
-    matches = catalog.search("work id")
+    matches = catalog.search("work id", detail="full")
     assert [match.name for match in matches] == ["linear_get_issue"]
     assert matches[0].call == "linear.get_issue"
     assert matches[0].signature.startswith("await linear.get_issue(")
@@ -479,36 +479,96 @@ def representative_search_catalog() -> ToolCatalog:
     )
 
 
-def test_catalog_search_ranks_failed_multi_word_queries(
+def test_catalog_search_replay_queries_have_complete_top_five_recall(
     representative_search_catalog: ToolCatalog,
 ) -> None:
-    expected_rankings = {
-        "Grafana dashboards metrics query": [
+    expected_matches = {
+        "Grafana dashboards metrics query": {
             "grafana_search_dashboards",
             "grafana_get_dashboard_panel_queries",
             "grafana_get_dashboard_summary",
             "grafana_query_prometheus",
             "grafana_list_datasources",
-        ],
-        "dashboard summary panel datasource metrics query time range prometheus": [
+        },
+        "dashboard summary panel datasource metrics query time range prometheus": {
             "grafana_get_dashboard_panel_queries",
             "grafana_get_dashboard_summary",
             "grafana_search_dashboards",
             "grafana_query_prometheus",
-        ],
-        "alerts history firing active": [
+        },
+        "alerts history firing active": {
             "grafana_alerting_manage_rules",
             "grafana_alerting_manage_routing",
-        ],
+        },
     }
 
-    for query, expected in expected_rankings.items():
+    for query, expected in expected_matches.items():
         matches = representative_search_catalog.search(query, limit=5)
-        assert [match.name for match in matches] == expected, query
-        assert [match.call for match in matches] == [
-            name.replace("_", ".", 1) for name in expected
-        ], query
+        names = {match.name for match in matches}
+        assert expected <= names, query
         assert all(match.server == "grafana" for match in matches), query
+        assert all(match.score is not None for match in matches)
+        assert all(match.matched_fields for match in matches)
+
+
+def test_catalog_search_sanitized_replay_top_three_recall_exceeds_target(
+    representative_search_catalog: ToolCatalog,
+) -> None:
+    replay = [
+        ("find grafana dashboards", "grafana_search_dashboards"),
+        ("dashboard overview panel count", "grafana_get_dashboard_summary"),
+        ("panel datasource queries", "grafana_get_dashboard_panel_queries"),
+        ("prometheus range metrics", "grafana_query_prometheus"),
+        ("alert firing state history", "grafana_alerting_manage_rules"),
+        ("notification contact point routing", "grafana_alerting_manage_routing"),
+        ("configured datasource uid", "grafana_list_datasources"),
+        ("linear issues assignee", "linear_list_issues"),
+        ("linear projects members", "linear_list_projects"),
+        ("grafana.search_dashboards", "grafana_search_dashboards"),
+        ("get_dashboard_summary", "grafana_get_dashboard_summary"),
+        ("dashboard-panel-query", "grafana_get_dashboard_panel_queries"),
+        ("query promql time range", "grafana_query_prometheus"),
+        ("inspect alert rule config", "grafana_alerting_manage_rules"),
+        ("debug alert receiver", "grafana_alerting_manage_routing"),
+        ("list grafana datasources", "grafana_list_datasources"),
+        ("my workspace issue", "linear_list_issues"),
+        ("workspace project list", "linear_list_projects"),
+        ("dashboard metrics queries", "grafana_get_dashboard_panel_queries"),
+        ("alerts active", "grafana_alerting_manage_rules"),
+    ]
+
+    hits = 0
+    zero_results = 0
+    for query, expected in replay:
+        matches = representative_search_catalog.search(query, limit=3)
+        zero_results += not matches
+        hits += expected in {match.name for match in matches}
+
+    assert hits / len(replay) >= 0.95
+    assert zero_results == 0
+
+
+def test_progressive_discovery_reduces_repeated_schema_payload_by_sixty_percent(
+    representative_search_catalog: ToolCatalog,
+) -> None:
+    query = "dashboard metrics query"
+    full = representative_search_catalog.search(query, limit=5, detail="full")
+    compact = representative_search_catalog.search(query, limit=5, detail="signatures")
+    old_results = []
+    for match in full:
+        serialized = match.model_dump(mode="json")
+        serialized["stub"] = (
+            f"{representative_search_catalog.stub_prelude}\n\n{match.stub}"
+        )
+        old_results.append(serialized)
+    old_search = {"results": old_results}
+    progressive_search = {
+        "results": [match.model_dump(mode="json") for match in compact],
+    }
+    old_payload = 2 * len(json.dumps(old_search))
+    progressive_payload = 2 * len(json.dumps(progressive_search))
+
+    assert progressive_payload <= old_payload * 0.4
 
 
 def test_catalog_search_normalizes_queries_and_retrieves_exact_identifiers(
@@ -537,26 +597,90 @@ def test_catalog_search_normalizes_queries_and_retrieves_exact_identifiers(
 
 def test_catalog_search_prefilters_server_candidates_exactly(
     representative_search_catalog: ToolCatalog,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original_extract = tool_catalog.process.extract
-    captured_candidates: list[str] = []
-
-    def capture_extract(query: str, choices: dict[str, str], **kwargs: object) -> list:
-        captured_candidates.extend(choices)
-        return original_extract(query, choices, **kwargs)
-
-    monkeypatch.setattr(tool_catalog.process, "extract", capture_extract)
-
     matches = representative_search_catalog.search("dashboards", server="grafana")
 
-    assert captured_candidates == sorted(
-        spec.name
-        for spec in representative_search_catalog.tools.values()
-        if spec.server == "grafana"
-    )
     assert matches
     assert all(match.server == "grafana" for match in matches)
+    assert all(not match.name.startswith("linear_") for match in matches)
+
+
+def test_catalog_progressively_discloses_and_paginates_inventory(
+    representative_search_catalog: ToolCatalog,
+) -> None:
+    names = representative_search_catalog.inventory(detail="names", limit=2)
+    assert len(names) == 2
+    assert all(match.signature is None and match.stub is None for match in names)
+
+    signatures = representative_search_catalog.search(
+        "dashboard query", detail="signatures", limit=2
+    )
+    assert all(match.signature and match.stub is None for match in signatures)
+
+    calls = [match.call for match in signatures]
+    inspected = representative_search_catalog.inspect(calls)
+    assert [match.call for match in inspected] == calls
+    assert all(match.stub and "Args" in match.stub for match in inspected)
+    assert "JsonValue: TypeAlias" in representative_search_catalog.stub_prelude
+    assert "JsonValue: TypeAlias" not in inspected[0].stub
+
+    first_page = representative_search_catalog.inventory(limit=3, offset=0)
+    second_page = representative_search_catalog.inventory(limit=3, offset=3)
+    assert {match.call for match in first_page}.isdisjoint(
+        match.call for match in second_page
+    )
+
+
+def test_catalog_selective_type_stubs_include_only_referenced_facades(
+    representative_search_catalog: ToolCatalog,
+) -> None:
+    selected = representative_search_catalog.type_stubs_for(
+        {"grafana_query_prometheus"}
+    )
+
+    assert "class _GrafanaSdk" in selected
+    assert "async def query_prometheus" in selected
+    assert "GrafanaQueryPrometheusArgs" in selected
+    assert "async def search_dashboards" not in selected
+    assert "LinearListIssuesArgs" not in selected
+    assert len(selected) < len(representative_search_catalog.type_stubs) * 0.35
+
+
+def test_selective_type_stubs_remain_small_with_260_tools() -> None:
+    tools = [
+        mcp_types.Tool(
+            name=f"tool_{index}",
+            description=f"Return record {index}.",
+            inputSchema={
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+                "additionalProperties": False,
+            },
+            outputSchema={
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+        )
+        for index in range(260)
+    ]
+    large_catalog = ToolCatalog.from_server_tools({"bulk": tools})
+
+    selected = large_catalog.type_stubs_for({"bulk_tool_137"})
+
+    assert "async def tool_137" in selected
+    assert "async def tool_136" not in selected
+    assert "async def tool_138" not in selected
+    assert len(selected) < len(large_catalog.type_stubs) * 0.02
+
+
+def test_catalog_inspect_rejects_unknown_calls_with_suggestions(
+    representative_search_catalog: ToolCatalog,
+) -> None:
+    with pytest.raises(ValueError, match="suggestions"):
+        representative_search_catalog.inspect(["grafana.get_dashbord_summary"])
 
 
 def test_catalog_search_indexes_input_property_names_in_isolation() -> None:

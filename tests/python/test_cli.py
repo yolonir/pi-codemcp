@@ -117,7 +117,14 @@ def test_cli_execute_and_saved_chain_commands_are_json(
     )
 
     assert code == 0
-    assert executed == {"ok": True, "result": {"value": 7}, "calls_made": 0}
+    assert executed["ok"] is True
+    assert executed["result"] == {"value": 7}
+    assert executed["calls_made"] == 0
+    assert set(executed["timings"]) == {
+        "typecheck_ms",
+        "execution_ms",
+        "serialization_ms",
+    }
 
     input_schema = {
         "type": "object",
@@ -190,7 +197,14 @@ def test_cli_execute_and_saved_chain_commands_are_json(
     )
 
     assert code == 0
-    assert chain_result == {"ok": True, "result": {"value": 9}, "calls_made": 0}
+    assert chain_result["ok"] is True
+    assert chain_result["result"] == {"value": 9}
+    assert chain_result["calls_made"] == 0
+    assert set(chain_result["timings"]) == {
+        "typecheck_ms",
+        "execution_ms",
+        "serialization_ms",
+    }
 
     code, revalidated = run_json_cli(
         capsys,

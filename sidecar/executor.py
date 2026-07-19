@@ -3,9 +3,13 @@ from __future__ import annotations
 import ast
 import asyncio
 import hashlib
+import heapq
 import textwrap
+import time
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
+from itertools import islice
 from typing import TYPE_CHECKING, Literal, Self, assert_never, override
 
 import pydantic_monty
@@ -20,6 +24,7 @@ from pydantic import (
 from pydantic_core import to_json
 
 from .json_types import JSON_VALUE_ADAPTER, JsonObject, JsonValue
+from .tool_catalog import referenced_calls, schema_path_summary
 
 if TYPE_CHECKING:
     from .chains import SavedChainManifest
@@ -27,7 +32,23 @@ if TYPE_CHECKING:
 
 RESULT_BYTE_LIMIT = 16 * 1024
 SHAPE_FIELD_LIMIT = 20
+INSPECT_SAMPLE_LIMIT = 3
+INSPECT_DEPTH_LIMIT = 6
+INSPECT_COLLECTION_LIMIT = 10
+INSPECT_STRING_LIMIT = 200
+INSPECT_KEY_LIMIT = 120
+INSPECT_BYTE_LIMIT = 8 * 1024
 CHAIN_INPUT_EXTERNAL = "__codemcp_saved_chain_input"
+INSPECT_JSON_EXTERNAL = "__codemcp_inspect_json"
+
+
+class ExecutionMetrics(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    typecheck_ms: float = Field(default=0.0, ge=0)
+    runtime_ms: float = Field(default=0.0, ge=0)
+    serialization_ms: float = Field(default=0.0, ge=0)
+    result_bytes: int = Field(default=0, ge=0)
 
 
 class ExecutionContext:
@@ -44,6 +65,7 @@ class ExecutionContext:
         self.deadline = deadline
         self.calls_made = 0
         self.chain_calls = 0
+        self.metrics = ExecutionMetrics()
         self.chain_stack: ContextVar[tuple[str, ...]] = ContextVar(
             "codemcp_chain_stack",
             default=(),
@@ -75,6 +97,7 @@ class ExecutionResponse(BaseModel):
     shape: JsonObject | None = None
     calls_made: int = Field(default=0, ge=0)
     chain_calls: int = Field(default=0, ge=0)
+    metrics: ExecutionMetrics = Field(default_factory=ExecutionMetrics, exclude=True)
 
     @classmethod
     def success(
@@ -140,6 +163,12 @@ class ExecutionResponse(BaseModel):
                 response["shape"] = self.shape
         if self.chain_calls > 0:
             response["chain_calls"] = self.chain_calls
+        timings: JsonObject = {
+            "typecheck_ms": round(self.metrics.typecheck_ms, 3),
+            "execution_ms": round(self.metrics.runtime_ms, 3),
+            "serialization_ms": round(self.metrics.serialization_ms, 3),
+        }
+        response["timings"] = timings
         return response
 
 
@@ -265,7 +294,8 @@ class MontyExecutor:
             output_type=spec.output_type_name,
             typed=True,
         )
-        type_stubs = _chain_type_stubs(catalog, spec.input_type_name)
+        referenced = referenced_calls(code, catalog.facade_calls)
+        type_stubs = catalog.type_stubs_for(referenced, include=spec.name)
         async with self._execution_lock:
             await self._type_check(wrapped, catalog, type_stubs)
 
@@ -303,27 +333,32 @@ class MontyExecutor:
             output_type=output_type,
             typed=True,
         )
-        type_stubs = (
-            _chain_type_stubs(context.catalog, input_type)
-            if input_type is not None
-            else context.catalog.type_stubs
+        referenced = referenced_calls(code, context.catalog.facade_calls)
+        type_stubs = context.catalog.type_stubs_for(
+            referenced,
+            include=output_spec_name,
         )
+        typecheck_started = time.perf_counter()
         try:
             await self._type_check(typed_code, context.catalog, type_stubs)
         except pydantic_monty.MontyTypingError as error:
+            context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
             return self._failure(
                 context,
                 "preflight",
                 error.display("concise", color=False).strip(),
             )
         except pydantic_monty.MontySyntaxError as error:
+            context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
             return self._failure(context, "preflight", error.display("type-msg").strip())
         except RuntimeError as error:
+            context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
             return self._failure(
                 context,
                 "preflight",
                 f"Type-check setup failed: {error}",
             )
+        context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
 
         runtime_wrapped = _wrap_code(code, typed=False, has_input=has_input)
         runtime_code = _rewrite_sdk_calls(runtime_wrapped, context.catalog)
@@ -364,6 +399,30 @@ class MontyExecutor:
                 return await context.call_tool(name, validated, context)
 
         external_functions: dict[str, ExternalFunction] = {}
+
+        async def inspect_json_external(
+            value: JsonValue,
+            *,
+            samples: JsonValue = 2,
+            max_depth: JsonValue = 3,
+        ) -> JsonValue:
+            await asyncio.sleep(0)
+            if not isinstance(samples, int) or isinstance(samples, bool):
+                raise TypeError("inspect_json samples must be an integer")
+            if not isinstance(max_depth, int) or isinstance(max_depth, bool):
+                raise TypeError("inspect_json max_depth must be an integer")
+            if not 1 <= samples <= INSPECT_SAMPLE_LIMIT:
+                raise ValueError(f"inspect_json samples must be from 1 to {INSPECT_SAMPLE_LIMIT}")
+            if not 1 <= max_depth <= INSPECT_DEPTH_LIMIT:
+                raise ValueError(f"inspect_json max_depth must be from 1 to {INSPECT_DEPTH_LIMIT}")
+            return _inspect_json(
+                value,
+                samples=samples,
+                max_depth=max_depth,
+                byte_limit=_inspection_byte_limit(context.settings.result_byte_limit),
+            )
+
+        external_functions[INSPECT_JSON_EXTERNAL] = inspect_json_external
         for spec in context.catalog.tools.values():
 
             async def sdk_method(
@@ -393,6 +452,7 @@ class MontyExecutor:
             "max_duration_secs": remaining,
             "max_memory": context.settings.max_memory_bytes,
         }
+        runtime_started = time.perf_counter()
         try:
             async with asyncio.timeout(remaining + 0.1):
                 result = JSON_VALUE_ADAPTER.validate_python(
@@ -404,18 +464,21 @@ class MontyExecutor:
         except asyncio.CancelledError:
             raise
         except TimeoutError:
+            context.metrics.runtime_ms += _elapsed_ms(runtime_started)
             return self._failure(
                 context,
                 "timeout",
                 f"Execution timed out after {context.settings.timeout_seconds:g}s",
             )
         except ValidationError as error:
+            context.metrics.runtime_ms += _elapsed_ms(runtime_started)
             return self._failure(
                 context,
                 "result",
                 f"Returned value is not JSON-compatible: {error.errors()[0]['msg']}",
             )
         except pydantic_monty.MontyRuntimeError as error:
+            context.metrics.runtime_ms += _elapsed_ms(runtime_started)
             message = error.display("type-msg").strip()
             lowered = message.lower()
             stage: Literal["runtime", "timeout"] = (
@@ -424,35 +487,48 @@ class MontyExecutor:
                 else "runtime"
             )
             return self._failure(context, stage, message)
+        context.metrics.runtime_ms += _elapsed_ms(runtime_started)
 
         if output_spec_name is not None:
             try:
                 result = context.catalog.validate_saved_chain_result(output_spec_name, result)
             except (TypeError, ValidationError, ValueError) as error:
+                spec = context.catalog.tools[output_spec_name]
                 return self._failure(
                     context,
                     "result",
-                    f"Saved chain result violates its output schema: {error}",
+                    _saved_chain_result_error(error, spec.output_schema or {}),
                 )
 
-        if enforce_result_limit:
-            result_bytes = len(to_json(result))
-            if result_bytes >= context.settings.result_byte_limit:
-                return ExecutionResponse.failure(
-                    failure_stage="result",
-                    error=(
-                        f"Returned value is {result_bytes} bytes; reduce it below "
-                        f"{context.settings.result_byte_limit} bytes"
-                    ),
-                    shape=_summarize_shape(result),
-                    calls_made=context.calls_made,
-                    chain_calls=context.chain_calls,
-                )
-        return ExecutionResponse.success(
+        serialization_started = time.perf_counter()
+        result_bytes = len(to_json(result))
+        context.metrics.serialization_ms += _elapsed_ms(serialization_started)
+        context.metrics.result_bytes = result_bytes
+        if enforce_result_limit and result_bytes >= context.settings.result_byte_limit:
+            response = ExecutionResponse.failure(
+                failure_stage="result",
+                error=(
+                    f"Returned value is {result_bytes} bytes; reduce it below "
+                    f"{context.settings.result_byte_limit} bytes"
+                ),
+                shape=_inspect_json(
+                    result,
+                    samples=2,
+                    max_depth=3,
+                    byte_limit=_inspection_byte_limit(context.settings.result_byte_limit),
+                ),
+                calls_made=context.calls_made,
+                chain_calls=context.chain_calls,
+            )
+            response.metrics = context.metrics.model_copy()
+            return response
+        response = ExecutionResponse.success(
             result=result,
             calls_made=context.calls_made,
             chain_calls=context.chain_calls,
         )
+        response.metrics = context.metrics.model_copy()
+        return response
 
     async def _type_check(
         self,
@@ -486,28 +562,257 @@ class MontyExecutor:
         stage: Literal["preflight", "runtime", "timeout", "cancelled", "result"],
         error: str,
     ) -> ExecutionResponse:
-        return ExecutionResponse.failure(
+        response = ExecutionResponse.failure(
             failure_stage=stage,
             error=error,
             calls_made=context.calls_made,
             chain_calls=context.chain_calls,
         )
+        response.metrics = context.metrics.model_copy()
+        return response
 
 
-def _chain_type_stubs(catalog: ToolCatalog, _input_type: str) -> str:
-    return catalog.type_stubs
+def _saved_chain_result_error(
+    error: TypeError | ValidationError | ValueError,
+    output_schema: JsonObject,
+) -> str:
+    expected = "\n".join(f"  - {path}" for path in schema_path_summary(output_schema))
+    if isinstance(error, ValidationError):
+        actual_lines = []
+        for item in error.errors()[:SHAPE_FIELD_LIMIT]:
+            location = "$" + "".join(
+                f"[{part}]" if isinstance(part, int) else f".{part}" for part in item["loc"]
+            )
+            actual_lines.append(
+                f"  - {location}: {item['msg']} (actual {type(item.get('input')).__name__})"
+            )
+        actual = "\n".join(actual_lines)
+    else:
+        actual = f"  - $: {error}"
+    return (
+        "Saved chain result violates outputSchema.\n"
+        f"Expected output paths:\n{expected}\n"
+        f"Actual result paths:\n{actual}"
+    )
 
 
-def _summarize_shape(value: JsonValue) -> JsonObject:
-    if not isinstance(value, dict):
-        return {"result": _shape_label(value)}
+def _elapsed_ms(started: float) -> float:
+    return (time.perf_counter() - started) * 1_000
+
+
+def _inspection_byte_limit(result_byte_limit: int) -> int:
+    return max(256, min(INSPECT_BYTE_LIMIT, result_byte_limit * 3 // 4))
+
+
+def _inspect_json(
+    value: JsonValue,
+    *,
+    samples: int,
+    max_depth: int,
+    byte_limit: int,
+) -> JsonObject:
     summary: JsonObject = {
-        str(key): _shape_label(item) for key, item in list(value.items())[:SHAPE_FIELD_LIMIT]
+        "type": _shape_label(value),
+        "serialized_bytes": len(to_json(value)),
+        "shape": _describe_shape(value, depth=0, max_depth=max_depth),
+        "truncated": _inspection_is_truncated(value, depth=0, max_depth=max_depth),
     }
-    remaining = len(value) - len(summary)
-    if remaining > 0:
-        summary["<remaining>"] = f"{remaining} more fields"
-    return summary
+    cardinality = _cardinality(value)
+    if cardinality is not None:
+        summary["cardinality"] = cardinality
+    if isinstance(value, dict):
+        ranked_fields = heapq.nsmallest(
+            SHAPE_FIELD_LIMIT,
+            ((str(key), len(to_json(item))) for key, item in value.items()),
+            key=lambda item: (-item[1], item[0]),
+        )
+        summary["field_sizes"] = [
+            {"path": f"$.{_bounded_key(key, index)}", "bytes": size}
+            for index, (key, size) in enumerate(ranked_fields)
+        ]
+    scalar_types: dict[str, set[str]] = {}
+    _collect_scalar_types(
+        value,
+        path="$",
+        depth=0,
+        max_depth=max_depth,
+        result=scalar_types,
+    )
+    summary["scalar_types"] = JSON_VALUE_ADAPTER.validate_python({
+        path: sorted(types) for path, types in sorted(scalar_types.items())
+    })
+    if isinstance(value, list):
+        sampled_items = list(islice(value, INSPECT_COLLECTION_LIMIT))
+        object_items = [item for item in sampled_items if isinstance(item, dict)]
+        if object_items:
+            key_counts = Counter(
+                str(key) for item in object_items for key in islice(item, SHAPE_FIELD_LIMIT)
+            )
+            summary["common_keys"] = JSON_VALUE_ADAPTER.validate_python(
+                [
+                    _bounded_key(key, index)
+                    for index, (key, count) in enumerate(
+                        sorted(key_counts.items(), key=lambda item: (-item[1], item[0]))
+                    )
+                    if count == len(object_items)
+                ][:SHAPE_FIELD_LIMIT]
+            )
+        summary["item_types"] = JSON_VALUE_ADAPTER.validate_python(
+            sorted({_shape_label(item) for item in sampled_items})
+        )
+    if samples > 0:
+        raw_samples = value[:samples] if isinstance(value, list) else [value]
+        summary["samples"] = [
+            _bounded_sample(item, depth=0, max_depth=max_depth) for item in raw_samples
+        ]
+    return _fit_inspection_budget(summary, byte_limit)
+
+
+def _fit_inspection_budget(summary: JsonObject, byte_limit: int) -> JsonObject:
+    candidates = [
+        summary,
+        {**summary, "samples": [], "diagnostic_truncated": True},
+        {
+            key: value
+            for key, value in summary.items()
+            if key not in {"samples", "field_sizes", "scalar_types", "common_keys"}
+        }
+        | {"diagnostic_truncated": True},
+        {
+            "type": summary["type"],
+            "serialized_bytes": summary["serialized_bytes"],
+            "shape": summary["type"],
+            "truncated": True,
+            "diagnostic_truncated": True,
+        },
+    ]
+    for candidate in candidates:
+        if len(to_json(candidate)) <= byte_limit:
+            return candidate
+    raise ValueError(f"inspection byte limit must be at least {len(to_json(candidates[-1]))}")
+
+
+def _bounded_key(value: str, index: int) -> str:
+    if len(value) <= INSPECT_KEY_LIMIT:
+        return value
+    suffix = f"…[{index}]"
+    return f"{value[: INSPECT_KEY_LIMIT - len(suffix)]}{suffix}"
+
+
+def _collect_scalar_types(
+    value: JsonValue,
+    *,
+    path: str,
+    depth: int,
+    max_depth: int,
+    result: dict[str, set[str]],
+) -> None:
+    if len(result) >= SHAPE_FIELD_LIMIT:
+        return
+    if depth >= max_depth and isinstance(value, (dict, list)):
+        return
+    if isinstance(value, dict):
+        for index, (key, item) in enumerate(islice(value.items(), INSPECT_COLLECTION_LIMIT)):
+            _collect_scalar_types(
+                item,
+                path=f"{path}.{_bounded_key(str(key), index)}",
+                depth=depth + 1,
+                max_depth=max_depth,
+                result=result,
+            )
+        return
+    if isinstance(value, list):
+        for item in islice(value, INSPECT_COLLECTION_LIMIT):
+            _collect_scalar_types(
+                item,
+                path=f"{path}[]",
+                depth=depth + 1,
+                max_depth=max_depth,
+                result=result,
+            )
+        return
+    result.setdefault(path, set()).add(_shape_label(value))
+
+
+def _describe_shape(value: JsonValue, *, depth: int, max_depth: int) -> JsonValue:
+    if depth >= max_depth:
+        return _shape_label(value)
+    if isinstance(value, dict):
+        fields: JsonObject = {}
+        for index, (key, item) in enumerate(islice(value.items(), SHAPE_FIELD_LIMIT)):
+            fields[_bounded_key(str(key), index)] = _describe_shape(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
+        remaining = len(value) - min(len(value), SHAPE_FIELD_LIMIT)
+        if remaining > 0:
+            fields["<remaining>"] = f"{remaining} more fields"
+        return fields
+    if isinstance(value, list):
+        shapes: list[JsonValue] = []
+        seen: set[str] = set()
+        for item in islice(value, INSPECT_COLLECTION_LIMIT):
+            shape = _describe_shape(item, depth=depth + 1, max_depth=max_depth)
+            fingerprint = to_json(shape).decode()
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            shapes.append(shape)
+        return {"items": shapes, "count": len(value)}
+    return _shape_label(value)
+
+
+def _bounded_sample(value: JsonValue, *, depth: int, max_depth: int) -> JsonValue:
+    if depth >= max_depth:
+        return _shape_label(value)
+    if isinstance(value, str):
+        return value if len(value) <= INSPECT_STRING_LIMIT else f"{value[:INSPECT_STRING_LIMIT]}…"
+    if isinstance(value, dict):
+        object_sample: JsonObject = {}
+        for index, (key, item) in enumerate(islice(value.items(), INSPECT_COLLECTION_LIMIT)):
+            object_sample[_bounded_key(str(key), index)] = _bounded_sample(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
+        if len(value) > INSPECT_COLLECTION_LIMIT:
+            object_sample["<remaining>"] = len(value) - INSPECT_COLLECTION_LIMIT
+        return object_sample
+    if isinstance(value, list):
+        list_sample: list[JsonValue] = [
+            _bounded_sample(item, depth=depth + 1, max_depth=max_depth)
+            for item in islice(value, INSPECT_COLLECTION_LIMIT)
+        ]
+        if len(value) > INSPECT_COLLECTION_LIMIT:
+            list_sample.append(f"<{len(value) - INSPECT_COLLECTION_LIMIT} more items>")
+        return list_sample
+    return value
+
+
+def _inspection_is_truncated(value: JsonValue, *, depth: int, max_depth: int) -> bool:
+    if depth >= max_depth and isinstance(value, (dict, list)):
+        return True
+    if isinstance(value, dict):
+        return len(value) > SHAPE_FIELD_LIMIT or any(
+            len(str(key)) > INSPECT_KEY_LIMIT
+            or _inspection_is_truncated(item, depth=depth + 1, max_depth=max_depth)
+            for key, item in islice(value.items(), SHAPE_FIELD_LIMIT)
+        )
+    if isinstance(value, list):
+        return len(value) > INSPECT_COLLECTION_LIMIT or any(
+            _inspection_is_truncated(item, depth=depth + 1, max_depth=max_depth)
+            for item in islice(value, INSPECT_COLLECTION_LIMIT)
+        )
+    if isinstance(value, str):
+        return len(value) > INSPECT_STRING_LIMIT
+    return False
+
+
+def _cardinality(value: JsonValue) -> int | None:
+    if isinstance(value, (dict, list, str)):
+        return len(value)
+    return None
 
 
 def _shape_label(value: JsonValue) -> str:
@@ -571,6 +876,13 @@ def _rewrite_sdk_calls(code: str, catalog: ToolCatalog) -> str:
         def visit_Call(self, node: ast.Call) -> ast.AST:
             self.generic_visit(node)
             function = node.func
+            if isinstance(function, ast.Name) and function.id == "inspect_json":
+                external_call = ast.Call(
+                    func=ast.Name(id=INSPECT_JSON_EXTERNAL, ctx=ast.Load()),
+                    args=node.args,
+                    keywords=node.keywords,
+                )
+                return ast.copy_location(ast.Await(value=external_call), node)
             if not isinstance(function, ast.Attribute):
                 return node
             if not isinstance(function.value, ast.Name):

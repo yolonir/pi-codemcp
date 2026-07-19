@@ -19,6 +19,7 @@ type JsonObject = Record<string, unknown>;
 
 export type SidecarToolName =
   | "search"
+  | "inspect"
   | "discover"
   | "reload_settings"
   | "apply_manager_changes"
@@ -28,6 +29,7 @@ export type SidecarToolName =
   | "execute_chain"
   | "revalidate_chain"
   | "delete_chain"
+  | "stats"
   | "status";
 
 const LONG_RUNNING_TOOLS = new Set<SidecarToolName>([

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 
 from sidecar import gateway
 from sidecar.chains import ChainEnabledChange
@@ -176,6 +177,37 @@ async def test_force_discover_refreshes_only_the_selected_server(
 
 
 @pytest.mark.asyncio
+async def test_scoped_search_validates_before_discovery_and_connects_only_target(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).parents[2]
+    fixture = root / "tests" / "fixtures" / "upstream_server.py"
+    alpha_pid = tmp_path / "alpha.pid"
+    beta_pid = tmp_path / "beta.pid"
+    config_path = tmp_path / "mcp.json"
+    write_config(config_path, fixture, alpha_pid, beta_pid)
+    runtime = gateway.GatewayRuntime.create(
+        config_path,
+        tmp_path / "oauth",
+        tmp_path / "catalog",
+    )
+
+    try:
+        with pytest.raises(ValueError, match="suggestions"):
+            await runtime.search("number", server="bet")
+        assert not alpha_pid.exists()
+        assert not beta_pid.exists()
+
+        response = await runtime.search("number", server="beta")
+        assert [item.call for item in response.results] == ["beta.save_number"]
+        assert not alpha_pid.exists()
+        assert beta_pid.exists()
+        await wait_for_process_exit(int(beta_pid.read_text()))
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_gateway_lazy_connections_cache_facade_and_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -193,6 +225,7 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
         exposed = {tool.name for tool in await client.list_tools()}
         assert exposed == {
             "search",
+            "inspect",
             "discover",
             "reload_settings",
             "apply_manager_changes",
@@ -202,6 +235,7 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
             "execute_chain",
             "revalidate_chain",
             "delete_chain",
+            "stats",
             "status",
         }
 
@@ -243,17 +277,36 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
         assert [item["name"] for item in beta_search_data["results"]] == [
             "beta_save_number"
         ]
+        assert beta_search_data["detail"] == "signatures"
+        assert beta_search_data["project_scope_available"] is False
+        assert beta_search_data["execution_limits"]["max_calls"] == 50
+
+        inventory = await client.call_tool(
+            "search",
+            {"mode": "inventory", "detail": "names", "limit": 1, "cursor": 0},
+        )
+        inventory_data = structured_data(inventory.structured_content)
+        assert inventory_data["has_more"] is True
+        assert inventory_data["next_cursor"] == 1
+        assert "signature" not in inventory_data["results"][0]
+
+        with pytest.raises(ToolError, match="suggestions"):
+            await client.call_tool("search", {"query": "number", "server": "bet"})
+
         discovery_pids = [int(alpha_pid.read_text()), int(beta_pid.read_text())]
         for pid in discovery_pids:
             await wait_for_process_exit(pid)
         alpha_pid.unlink()
         beta_pid.unlink()
 
-        assert "AlphaGetNumberArgs" in next(
-            item["stub"]
-            for item in search_data["results"]
-            if item["name"] == "alpha_get_number"
-        )
+        assert "JsonValue: TypeAlias" in search_data["prelude"]
+        assert "BetaSaveNumberArgs" in search_data["results"][0]["stub"]
+        assert all("stub" in item for item in search_data["results"][:3])
+        assert all("stub" not in item for item in search_data["results"][3:])
+        inspected = await client.call_tool("inspect", {"calls": ["alpha.get_number"]})
+        inspected_data = structured_data(inspected.structured_content)
+        assert "JsonValue: TypeAlias" in inspected_data["prelude"]
+        assert "AlphaGetNumberArgs" in inspected_data["results"][0]["stub"]
         assert "input_schema" not in search_data["results"][0]
         assert "output_schema" not in search_data["results"][0]
         assert not alpha_pid.exists()
@@ -280,11 +333,15 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
             },
         )
         execution_data = structured_data(executed.structured_content)
-        assert execution_data == {
-            "ok": True,
-            "result": {"identifier": "N-5", "saved": True},
-            "calls_made": 2,
+        assert execution_data["ok"] is True
+        assert execution_data["result"] == {"identifier": "N-5", "saved": True}
+        assert execution_data["calls_made"] == 2
+        assert set(execution_data["timings"]) == {
+            "typecheck_ms",
+            "execution_ms",
+            "serialization_ms",
         }
+        assert all(value >= 0 for value in execution_data["timings"].values())
         assert beta_pid.exists()
         connected_pids = [int(alpha_pid.read_text()), int(beta_pid.read_text())]
 
@@ -302,6 +359,40 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
         await cached_client.call_tool("search", {"query": "number"})
         assert not alpha_pid.exists()
         assert not beta_pid.exists()
+
+
+@pytest.mark.asyncio
+async def test_execute_telemetry_records_discovery_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(json.dumps({"mcpServers": {}}))
+    runtime = gateway.GatewayRuntime.create(
+        config_path,
+        tmp_path / "oauth",
+        tmp_path / "catalog",
+    )
+
+    async def fail_discovery(_: object) -> None:
+        raise RuntimeError("discovery failed")
+
+    monkeypatch.setattr(runtime, "_ensure_servers_discovered", fail_discovery)
+    try:
+        with pytest.raises(RuntimeError, match="discovery failed"):
+            await runtime.execute("return 1")
+        snapshot = runtime.stats_store.snapshot()
+        operations = snapshot["operations"]
+        failures = snapshot["failures"]
+        assert isinstance(operations, dict)
+        assert isinstance(failures, dict)
+        execute = operations["execute"]
+        assert isinstance(execute, dict)
+        assert execute["count"] == 1
+        assert execute["failure"] == 1
+        assert failures["discovery"] == 1
+    finally:
+        await runtime.close()
 
 
 @pytest.mark.asyncio
@@ -408,6 +499,20 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
     }
 
     try:
+        with pytest.raises(ValueError) as invalid_chain:
+            await runtime.chains.save(
+                scope="global",
+                name="invalid_countdown",
+                description="Return an invalid output shape.",
+                code='return {"value": "wrong"}',
+                input_schema=integer_input,
+                output_schema=integer_output,
+            )
+        validation_message = str(invalid_chain.value)
+        assert "failed preflight against outputSchema" in validation_message
+        assert "$.value: integer (required)" in validation_message
+        assert "Actual type-check result" in validation_message
+
         saved = await runtime.chains.save(
             scope="global",
             name="countdown",
@@ -497,6 +602,75 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
             if view.chain.name == "double_countdown"
         )
         assert dependent.status == "stale"
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_saved_chain_nested_generated_output_types_execute_without_name_errors(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(json.dumps({"mcpServers": {}}))
+    runtime = gateway.GatewayRuntime.create(
+        config_path,
+        tmp_path / "oauth",
+        tmp_path / "catalog",
+    )
+    nested_output = {
+        "type": "object",
+        "properties": {
+            "positions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string"},
+                        "legs": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "exchange": {"type": "string"},
+                                    "size": {"type": "number"},
+                                },
+                                "required": ["exchange", "size"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                    "required": ["symbol", "legs"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["positions"],
+        "additionalProperties": False,
+    }
+    try:
+        await runtime.chains.save(
+            scope="global",
+            name="nested_positions",
+            description="Return nested generated output types.",
+            code='return {"positions": [{"symbol": "BTC", "legs": [{"exchange": "alpha", "size": 1.5}]}]}',
+            input_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            output_schema=nested_output,
+        )
+        native = await runtime.chains.execute("nested_positions", {})
+        assert native.ok is True
+        assert native.result == {
+            "positions": [
+                {"symbol": "BTC", "legs": [{"exchange": "alpha", "size": 1.5}]}
+            ]
+        }
+        nested = await runtime.execute("return await chains.nested_positions({})")
+        assert nested.ok is True
+        assert nested.result == native.result
+        assert not (nested.error and "NameError" in nested.error)
     finally:
         await runtime.close()
 
