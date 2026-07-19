@@ -48,7 +48,8 @@
   "pi": {
     "extensions": [
       "./extensions/index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/yolonir/pi-codemcp/main/media/preview.png"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0"
