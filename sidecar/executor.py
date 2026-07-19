@@ -312,7 +312,7 @@ class MontyExecutor:
             deadline=loop.time() + self.settings.timeout_seconds,
         )
 
-    async def _execute_program(  # noqa: C901, PLR0915
+    async def _execute_program(  # ruff:ignore[complex-structure, too-many-statements]
         self,
         code: str,
         context: ExecutionContext,
@@ -436,7 +436,7 @@ class MontyExecutor:
 
         if input_value is not None:
 
-            async def chain_input() -> JsonValue:  # noqa: RUF029
+            async def chain_input() -> JsonValue:  # ruff:ignore[unused-async]
                 return input_value
 
             external_functions[CHAIN_INPUT_EXTERNAL] = chain_input

@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.3/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.5.4/schema.json",
   "formatter": {
     "enabled": true,
     "indentStyle": "space",
@@ -14,12 +14,11 @@
   },
   "files": {
     "includes": [
-      "**",
-      "!**/node_modules",
-      "!**/dist",
-      "!sidecar/.venv",
-      "!sidecar/uv.lock",
-      "!bun.lock"
+      "extensions/**/*.ts",
+      "src/**/*.ts",
+      "tests/**/*.ts",
+      "*.json",
+      ".release-please-manifest.json"
     ]
   }
 }

@@ -9,7 +9,7 @@ updates:
       typescript-dependencies:
         patterns: ["*"]
 
-  - package-ecosystem: pip
+  - package-ecosystem: uv
     directory: /sidecar
     schedule:
       interval: weekly

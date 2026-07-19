@@ -1197,7 +1197,7 @@ async def lifespan(_: FastMCP[None]) -> AsyncIterator[None]:
         global_chains_dir,
         project_chains_dir,
     ) = _runtime_paths()
-    _runtime_state.runtime = GatewayRuntime.create(
+    runtime = GatewayRuntime.create(
         config_path,
         oauth_dir,
         catalog_dir,
@@ -1205,10 +1205,10 @@ async def lifespan(_: FastMCP[None]) -> AsyncIterator[None]:
         global_chain_dir=global_chains_dir,
         project_chain_dir=project_chains_dir,
     )
+    _runtime_state.runtime = runtime
     try:
         yield
     finally:
-        runtime = _runtime_state.runtime
         _runtime_state.runtime = None
         await runtime.close()
 

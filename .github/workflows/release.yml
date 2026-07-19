@@ -30,7 +30,7 @@ jobs:
     steps:
       - name: Update release pull request or create release
         id: release
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           target-branch: main
           config-file: release-please-config.json
@@ -58,12 +58,12 @@ jobs:
 
     steps:
       - name: Check out release tag
-        uses: actions/checkout@v5
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.release_please.outputs.tag_name }}
 
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.19.0
           registry-url: https://registry.npmjs.org
@@ -72,7 +72,7 @@ jobs:
         run: npm install --global npm@11.17.0
 
       - name: Install Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.10
 

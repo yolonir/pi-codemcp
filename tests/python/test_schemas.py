@@ -6,11 +6,13 @@ from pathlib import Path
 import httpx
 import pytest
 from fastmcp.client.auth import OAuth
+from fastmcp.mcp_config import RemoteMCPServer, StdioMCPServer
 from mcp import types as mcp_types
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import ValidationError
 
 from sidecar.chains import ChainStore
+from sidecar.json_types import JsonObject
 from sidecar.mcp_config import normalize_mcp_config
 from sidecar.models import NormalizedServerInfo
 from sidecar.tool_catalog import ToolCatalog
@@ -38,8 +40,8 @@ def test_normalized_server_info_rejects_unknown_transport_and_fields() -> None:
 
 def make_tool(
     name: str,
-    input_schema: dict,
-    output_schema: dict | None = None,
+    input_schema: JsonObject,
+    output_schema: JsonObject | None = None,
     description: str | None = None,
 ) -> mcp_types.Tool:
     return mcp_types.Tool(
@@ -103,12 +105,15 @@ def test_normalize_config_supports_transports_and_skips_disabled(
         False,
     ]
     stdio = normalized.config.mcpServers["stdio"]
+    assert isinstance(stdio, StdioMCPServer)
     assert stdio.command == "example-server"
     assert stdio.env["EXPLICIT_VALUE"] == "configured"
     assert stdio.env["CODEMCP_TEST_TOKEN"] == "secret-token"
     assert "UNLISTED_CODEMCP_SECRET" not in stdio.env
+    assert stdio.model_extra is not None
     assert "directTools" not in stdio.model_extra
     http_server = normalized.config.mcpServers["http"]
+    assert isinstance(http_server, RemoteMCPServer)
     assert http_server.headers["authorization"] == "Bearer secret-token"
 
 
@@ -116,7 +121,7 @@ def test_normalize_config_supports_transports_and_skips_disabled(
 async def test_oauth_uses_native_fastmcp_persistence_and_refresh(
     tmp_path: Path,
 ) -> None:
-    raw = {
+    raw: JsonObject = {
         "linear": {
             "type": "http",
             "url": "https://mcp.linear.app/mcp",
@@ -124,7 +129,9 @@ async def test_oauth_uses_native_fastmcp_persistence_and_refresh(
         }
     }
     first = normalize_mcp_config(raw, oauth_storage_dir=tmp_path)
-    first_auth = first.config.mcpServers["linear"].auth
+    first_server = first.config.mcpServers["linear"]
+    assert isinstance(first_server, RemoteMCPServer)
+    first_auth = first_server.auth
     assert isinstance(first_auth, OAuth)
 
     await first_auth.token_storage_adapter.set_client_info(
@@ -167,7 +174,9 @@ async def test_oauth_uses_native_fastmcp_persistence_and_refresh(
         await flow.asend(httpx.Response(200, request=protected_request))
 
     second = normalize_mcp_config(raw, oauth_storage_dir=tmp_path)
-    second_auth = second.config.mcpServers["linear"].auth
+    second_server = second.config.mcpServers["linear"]
+    assert isinstance(second_server, RemoteMCPServer)
+    second_auth = second_server.auth
     assert isinstance(second_auth, OAuth)
     restored = await second_auth.token_storage_adapter.get_tokens()
     assert restored is not None
@@ -214,11 +223,15 @@ def test_catalog_namespaces_single_server_and_searches_compactly() -> None:
     matches = catalog.search("work id", detail="full")
     assert [match.name for match in matches] == ["linear_get_issue"]
     assert matches[0].call == "linear.get_issue"
-    assert matches[0].signature.startswith("await linear.get_issue(")
+    signature = matches[0].signature
+    assert signature is not None
+    assert signature.startswith("await linear.get_issue(")
     assert "call_tool" not in catalog.type_stubs
     assert "inputSchema" not in matches[0].model_dump_json()
 
-    assert "LinearGetIssueArgs" in matches[0].stub
+    stub = matches[0].stub
+    assert stub is not None
+    assert "LinearGetIssueArgs" in stub
     assert "input_schema" not in matches[0].model_dump_json()
     assert "output_schema" not in matches[0].model_dump_json()
 
@@ -246,7 +259,7 @@ def test_untyped_schema_uses_recursive_json_value_instead_of_any() -> None:
 
 
 def test_recursive_json_schema_refs_stop_at_json_value() -> None:
-    recursive_value = {
+    recursive_value: JsonObject = {
         "anyOf": [
             {"type": "string"},
             {"type": "number"},
@@ -622,7 +635,9 @@ def test_catalog_progressively_discloses_and_paginates_inventory(
     assert [match.call for match in inspected] == calls
     assert all(match.stub and "Args" in match.stub for match in inspected)
     assert "JsonValue: TypeAlias" in representative_search_catalog.stub_prelude
-    assert "JsonValue: TypeAlias" not in inspected[0].stub
+    inspected_stub = inspected[0].stub
+    assert inspected_stub is not None
+    assert "JsonValue: TypeAlias" not in inspected_stub
 
     first_page = representative_search_catalog.inventory(limit=3, offset=0)
     second_page = representative_search_catalog.inventory(limit=3, offset=3)
@@ -758,7 +773,7 @@ def test_catalog_validates_arguments_and_unknown_schema_names() -> None:
 
 
 def test_sdk_facade_aliases_are_valid_stable_and_collision_free() -> None:
-    empty_schema = {
+    empty_schema: JsonObject = {
         "type": "object",
         "properties": {},
         "additionalProperties": False,

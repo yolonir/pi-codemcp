@@ -14,12 +14,12 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-  "mypy==2.2.0",
-  "prek==0.4.8",
-  "pytest==8.4.2",
+  "mypy==2.3.0",
+  "prek==0.4.10",
+  "pytest==9.1.1",
   "pytest-asyncio==1.4.0",
-  "ruff==0.15.21",
-  "ty==0.0.58",
+  "ruff==0.15.22",
+  "ty==0.0.61",
 ]
 
 [tool.pytest.ini_options]
@@ -27,7 +27,7 @@ asyncio_mode = "auto"
 pythonpath = [".."]
 
 [tool.ruff]
-required-version = "==0.15.21"
+required-version = "==0.15.22"
 target-version = "py313"
 line-length = 100
 src = ["sidecar"]
@@ -37,23 +37,23 @@ force-exclude = true
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-  "COM812", # Conflicts with the formatter.
-  "CPY001", # Legal copyright text is not configured.
-  "D100",   # Internal modules do not need module docstrings.
-  "D101",   # Pydantic catalog models are self-describing.
-  "D102",   # Internal methods are covered by types and focused class documentation.
-  "D103",   # Internal functions are covered by types and focused module documentation.
-  "D104",   # Internal packages do not need package docstrings beyond sidecar/__init__.py.
-  "D105",   # Magic methods do not need docstrings.
-  "D107",   # Constructor contracts are expressed by typed fields.
-  "D203",   # Incompatible with D211.
-  "D213",   # Incompatible with D212.
-  "DOC201", # Return types are explicit and checked.
-  "DOC501", # Repeating raised exception types in docstrings reduces readability.
-  "EM101",  # Inline exception messages are clearer at the failure site.
-  "EM102",  # Inline contextual exception messages are clearer at the failure site.
-  "FBT001", # JSON Schema itself may be boolean; these are not boolean control arguments.
-  "TRY003", # Custom exception wrappers would obscure concise boundary failures.
+  "missing-trailing-comma", # Conflicts with the formatter.
+  "missing-copyright-notice", # Legal copyright text is not configured.
+  "undocumented-public-module",   # Internal modules do not need module docstrings.
+  "undocumented-public-class",   # Pydantic catalog models are self-describing.
+  "undocumented-public-method",   # Internal methods are covered by types and focused class documentation.
+  "undocumented-public-function",   # Internal functions are covered by types and focused module documentation.
+  "undocumented-public-package",   # Internal packages do not need package docstrings beyond sidecar/__init__.py.
+  "undocumented-magic-method",   # Magic methods do not need docstrings.
+  "undocumented-public-init",   # Constructor contracts are expressed by typed fields.
+  "incorrect-blank-line-before-class",   # Incompatible with D211.
+  "multi-line-summary-second-line",   # Incompatible with D212.
+  "docstring-missing-returns", # Return types are explicit and checked.
+  "docstring-missing-exception", # Repeating raised exception types in docstrings reduces readability.
+  "raw-string-in-exception",  # Inline exception messages are clearer at the failure site.
+  "f-string-in-exception",  # Inline contextual exception messages are clearer at the failure site.
+  "boolean-type-hint-positional-argument", # JSON Schema itself may be boolean; these are not boolean control arguments.
+  "raise-vanilla-args", # Custom exception wrappers would obscure concise boundary failures.
 ]
 
 [tool.ruff.lint.isort]
@@ -83,24 +83,19 @@ docstring-code-line-length = 100
 "tests/**/*.py" = [
   "ANN",
   "D",
-  "PLR2004",
-  "S101",
-  "S105",
-  "S106",
-  "SLF001",
+  "magic-value-comparison",
+  "assert",
+  "hardcoded-password-string",
+  "hardcoded-password-func-arg",
+  "private-member-access",
 ]
-"tests/fixtures/**/*.py" = ["T201"]
+"tests/fixtures/**/*.py" = ["print"]
 
 [tool.mypy]
 python_version = "3.13"
 plugins = ["pydantic.mypy"]
 strict = true
-files = [
-  "sidecar",
-  "tests/python/test_executor.py",
-  "tests/python/test_settings.py",
-  "tests/python/test_cli.py",
-]
+files = ["sidecar", "tests/python"]
 pretty = true
 show_error_codes = true
 show_error_code_links = true
@@ -128,9 +123,6 @@ init_forbid_extra = true
 init_typed = true
 warn_required_dynamic_aliases = true
 warn_untyped_fields = true
-
-[tool.ty.environment]
-python-version = "3.13"
 
 [tool.ty.rules]
 all = "error"

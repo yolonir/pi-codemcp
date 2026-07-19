@@ -1,5 +1,5 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
-set quiet
+set quiet := true
 
 default: check
 
@@ -51,13 +51,11 @@ lint-python:
     uv run --project sidecar ruff check sidecar tests/python tests/fixtures
 
 typecheck-python:
-    uv run --project sidecar mypy --config-file sidecar/pyproject.toml \
-        sidecar tests/python/test_executor.py tests/python/test_settings.py tests/python/test_cli.py
-    uv run --project sidecar ty check --project sidecar --extra-search-path . \
-        sidecar tests/python/test_executor.py tests/python/test_settings.py tests/python/test_cli.py
+    uv run --project sidecar mypy --config-file sidecar/pyproject.toml
+    uv run --project sidecar ty check
 
 test-python:
-    uv run --project sidecar pytest tests/python -q
+    uv run --project sidecar pytest -c sidecar/pyproject.toml tests/python -q
 
 check-python: format-check-python lint-python typecheck-python test-python
 
@@ -69,7 +67,20 @@ check-type-suppressions:
         exit 1; \
     fi
 
-check: check-locks check-typescript check-python check-type-suppressions
+check-fast: lint-typescript format-check-python lint-python check-type-suppressions
+
+check: check-locks check-type-suppressions
+    #!/usr/bin/env bash
+    set -uo pipefail
+    printf '%s\n' 'Running TypeScript and Python gates in parallel'
+    just check-typescript &
+    typescript_pid=$!
+    just check-python &
+    python_pid=$!
+    status=0
+    wait "$typescript_pid" || status=1
+    wait "$python_pid" || status=1
+    exit "$status"
 
 release-check:
     #!/usr/bin/env bash
@@ -110,6 +121,9 @@ release-check:
         "$bun_path" tests/release/package-smoke.ts "$package_root" "$temporary/agent"
 
 precommit:
-    uv run --project sidecar prek run --all-files
+    uv run --project sidecar prek run --stage pre-commit --all-files
+
+prepush:
+    uv run --project sidecar prek run --stage pre-push --all-files
 
 alias quality-check := check

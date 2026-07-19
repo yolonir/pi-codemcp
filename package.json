@@ -41,7 +41,7 @@
     "lint": "biome check .",
     "prepublishOnly": "just check && just release-check",
     "test": "bun run test:ts && bun run test:python",
-    "test:python": "uv run --project sidecar pytest tests/python -q",
+    "test:python": "uv run --project sidecar pytest -c sidecar/pyproject.toml tests/python -q",
     "test:ts": "bun test tests/typescript",
     "typecheck": "tsc --noEmit"
   },
@@ -79,11 +79,11 @@
     }
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.3",
-    "@earendil-works/pi-agent-core": "0.80.7",
-    "@earendil-works/pi-ai": "0.80.7",
-    "@earendil-works/pi-coding-agent": "0.80.7",
-    "@earendil-works/pi-tui": "0.80.7",
+    "@biomejs/biome": "2.5.4",
+    "@earendil-works/pi-agent-core": "0.80.10",
+    "@earendil-works/pi-ai": "0.80.10",
+    "@earendil-works/pi-coding-agent": "0.80.10",
+    "@earendil-works/pi-tui": "0.80.10",
     "@types/bun": "1.3.14",
     "typebox": "1.3.6",
     "typescript": "5.9.3"

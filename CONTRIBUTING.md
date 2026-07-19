@@ -8,7 +8,7 @@ Requirements: Bun 1.3.10, uv 0.8.13, just, and Python 3.13.
 just init
 ```
 
-This installs locked TypeScript and Python dependencies and installs the `prek` Git hook.
+This installs locked TypeScript and Python dependencies and installs the `prek` pre-commit and pre-push Git hooks.
 
 ## Workflow
 
@@ -25,9 +25,10 @@ just check
 just release-check
 ```
 
-Use `just format` for safe automatic formatting and lint fixes. Do not bypass hooks with
-`--no-verify`. Repository administrators must also enable GitHub branch protection for `main`,
-require pull requests, and require the `Quality / Locks, TypeScript, Python, and tests` check.
+Use `just format` for safe automatic formatting and lint fixes. Pre-commit runs fast hygiene,
+format, and lint checks; pre-push runs the complete quality gate. Do not bypass hooks with
+`--no-verify`. GitHub rulesets protect `main`, require pull requests, and require every Quality
+check.
 
 ## Commands
 
@@ -35,7 +36,8 @@ require pull requests, and require the `Quality / Locks, TypeScript, Python, and
 just sync          Install exactly what the lockfiles specify
 just format        Format TypeScript and Python, then apply safe lint fixes
 just check         Run lock, lint, type, and test gates
-just precommit     Run every prek hook against the repository
+just precommit     Run fast pre-commit hooks against the repository
+just prepush       Run the complete pre-push quality gate
 just release-check Pack, install, and smoke-test the production npm artifact
 ```
 

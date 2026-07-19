@@ -16,9 +16,6 @@
     "verbatimModuleSyntax": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "outDir": "dist",
-    "rootDir": ".",
-    "declaration": true,
     "noEmit": true,
     "types": ["bun"]
   },
