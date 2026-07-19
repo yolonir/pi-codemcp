@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0](https://github.com/yolonir/pi-codemcp/compare/v1.0.0...v1.1.0) (2026-07-19)
+
+
+### Features
+
+* improve CodeMCP discovery, diagnostics, and telemetry ([#9](https://github.com/yolonir/pi-codemcp/issues/9)) ([f114282](https://github.com/yolonir/pi-codemcp/commit/f11428291c524bc361be312af7454ea30116636b))
+* **sidecar:** add stable codemcp CLI ([#10](https://github.com/yolonir/pi-codemcp/issues/10)) ([53b59b8](https://github.com/yolonir/pi-codemcp/commit/53b59b87bb03d0a0750b1b696edef73f0751b065))
+
+
+### Performance Improvements
+
+* streamline quality and release checks ([fd29b00](https://github.com/yolonir/pi-codemcp/commit/fd29b004ce49463b6b04653699af2408db13866c))
+* streamline quality and release checks ([4665777](https://github.com/yolonir/pi-codemcp/commit/4665777a823b91fadb1730752969c1225fb10f1f))
+
 ## [1.0.0](https://github.com/yolonir/pi-codemcp/compare/v0.1.0...v1.0.0) (2026-07-18)
 
 
