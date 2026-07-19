@@ -757,7 +757,7 @@ class ServerManagerModal implements Component, Focusable {
     const cacheTotal = stats.cacheHits + stats.cacheMisses;
     const cacheRate = cacheTotal > 0 ? `${Math.round((100 * stats.cacheHits) / cacheTotal)}%` : "—";
     const lines = [
-      this.theme.fg("accent", this.theme.bold("LOCAL TELEMETRY")),
+      this.theme.fg("dim", this.theme.bold("LOCAL TELEMETRY")),
       this.theme.fg(
         "muted",
         `Updated ${stats.updatedAt > 0 ? new Date(stats.updatedAt * 1_000).toLocaleString() : "never"} · bounded rollups`,
