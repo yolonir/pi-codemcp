@@ -124,6 +124,7 @@ interface ManagerSaveResult {
 }
 
 type UnsavedAction = "save" | "discard" | "cancel";
+export type ServerManagerResult = "report-problem" | undefined;
 
 interface ServerManagerOptions {
   servers: ServerModalState[];
@@ -158,6 +159,11 @@ const OVERLAY_OPTIONS = {
   minWidth: 72,
   maxHeight: "85%",
 } as const;
+
+const PROBLEM_REPORT_LABEL = "Extension is broken!";
+const PROBLEM_REPORT_DESCRIPTION =
+  "Well, that sucks. With this button you can ask the agent to describe the problem and prepare a GitHub issue for review. The goal is to make pi-codemcp usable for everyone, don't be lazy - submit an issue. Don't worry, you will see all prompts, this is a transparent process.";
+const PROBLEM_REPORT_SHORTCUT = "Report issue: R";
 
 const SETTING_DEFINITIONS: SettingDefinition[] = [
   {
@@ -214,18 +220,18 @@ const SETTING_DEFINITIONS: SettingDefinition[] = [
 export async function showServerManagerModal(
   ctx: ExtensionCommandContext,
   options: ServerManagerOptions,
-): Promise<void> {
+): Promise<ServerManagerResult> {
   if (ctx.mode !== "tui") {
     throw new Error("CodeMCP server manager requires interactive mode");
   }
 
-  await ctx.ui.custom<void>(
+  return ctx.ui.custom<ServerManagerResult>(
     (tui, theme, keybindings, done) =>
       new ServerManagerModal(
         options,
         theme,
         keybindings,
-        () => done(undefined),
+        (result) => done(result),
         () => tui.requestRender(),
       ),
     { overlay: true, overlayOptions: OVERLAY_OPTIONS },
@@ -352,7 +358,7 @@ class ServerManagerModal implements Component, Focusable {
     private readonly options: ServerManagerOptions,
     private readonly theme: Theme,
     private readonly keybindings: Keybindings,
-    private readonly close: () => void,
+    private readonly close: (result?: ServerManagerResult) => void,
     private readonly requestRender: () => void,
   ) {
     this.savedSettings = cloneSettings(options.settings);
@@ -400,6 +406,11 @@ class ServerManagerModal implements Component, Focusable {
       return;
     }
     if (this.settingsBusy || this.closePromptBusy) return;
+    if (data === "R") {
+      this.focusProblemReport();
+      this.requestRender();
+      return;
+    }
     if (this.keybindings.matches(data, "tui.select.cancel") || matchesKey(data, Key.escape)) {
       if (this.activeTab !== "settings" && this.search.getValue()) {
         this.search.setValue("");
@@ -504,7 +515,7 @@ class ServerManagerModal implements Component, Focusable {
       this.selectedSettingIndex = cycleIndex(
         this.selectedSettingIndex,
         -1,
-        SETTING_DEFINITIONS.length,
+        SETTING_DEFINITIONS.length + 1,
       );
       return;
     }
@@ -512,8 +523,12 @@ class ServerManagerModal implements Component, Focusable {
       this.selectedSettingIndex = cycleIndex(
         this.selectedSettingIndex,
         1,
-        SETTING_DEFINITIONS.length,
+        SETTING_DEFINITIONS.length + 1,
       );
+      return;
+    }
+    if (this.selectedSettingIndex === SETTING_DEFINITIONS.length) {
+      if (matchesKey(data, Key.enter) || data === " ") this.openProblemReport();
       return;
     }
     if (matchesKey(data, Key.left)) this.cycleSelectedSetting(-1);
@@ -820,27 +835,50 @@ class ServerManagerModal implements Component, Focusable {
         ),
       );
     }
+    const problemReportSelected = this.selectedSettingIndex === SETTING_DEFINITIONS.length;
+    const problemReportPrefix = problemReportSelected ? this.theme.fg("accent", "→") : " ";
+    left.push(
+      "",
+      truncateToWidth(
+        `${problemReportPrefix} ${
+          problemReportSelected
+            ? this.theme.fg("accent", PROBLEM_REPORT_LABEL)
+            : PROBLEM_REPORT_LABEL
+        }`,
+        leftWidth,
+      ),
+    );
     const definition = SETTING_DEFINITIONS[this.selectedSettingIndex];
-    const right = definition
+    const right = problemReportSelected
       ? [
-          this.theme.fg("accent", this.theme.bold(definition.label)),
-          this.theme.fg("muted", settingLabel(definition, this.draftSettings[definition.key])),
+          this.theme.fg("accent", this.theme.bold(PROBLEM_REPORT_LABEL)),
           "",
-          ...wrapPlainText(definition.description, rightWidth).map((line) =>
+          ...wrapPlainText(PROBLEM_REPORT_DESCRIPTION, rightWidth).map((line) =>
             this.theme.fg("muted", line),
           ),
           "",
-          this.theme.fg("dim", "←/→ change · enter next · ctrl+s save"),
-          ...(this.settingsBusy
-            ? ["", this.theme.fg("warning", "Saving staged changes…")]
-            : this.hasUnsavedChanges()
-              ? ["", this.theme.fg("warning", "Unsaved changes")]
-              : []),
-          ...(this.settingsError
-            ? ["", this.theme.fg("warning", `Error: ${this.settingsError}`)]
-            : []),
+          this.theme.fg("dim", "enter describe the problem"),
         ]
-      : [];
+      : definition
+        ? [
+            this.theme.fg("accent", this.theme.bold(definition.label)),
+            this.theme.fg("muted", settingLabel(definition, this.draftSettings[definition.key])),
+            "",
+            ...wrapPlainText(definition.description, rightWidth).map((line) =>
+              this.theme.fg("muted", line),
+            ),
+            "",
+            this.theme.fg("dim", "←/→ change · enter next · ctrl+s save"),
+            ...(this.settingsBusy
+              ? ["", this.theme.fg("warning", "Saving staged changes…")]
+              : this.hasUnsavedChanges()
+                ? ["", this.theme.fg("warning", "Unsaved changes")]
+                : []),
+            ...(this.settingsError
+              ? ["", this.theme.fg("warning", `Error: ${this.settingsError}`)]
+              : []),
+          ]
+        : [];
     const lines: string[] = [];
     for (let index = 0; index < splitHeight; index += 1) {
       lines.push(
@@ -852,16 +890,17 @@ class ServerManagerModal implements Component, Focusable {
 
   private footer(): string {
     const pending = this.hasUnsavedChanges() ? " · * unsaved · ctrl+s save" : "";
+    const report = ` · ${PROBLEM_REPORT_SHORTCUT}`;
     if (this.activeTab === "settings") {
-      return `tab servers · ↑/↓ navigate · ←/→/enter change · ctrl+s save · esc close${pending}`;
+      return `tab servers · ↑/↓ navigate · ←/→ change · enter select · ctrl+s save · esc close${pending}${report}`;
     }
     if (this.activeTab === "chains") {
-      return `tab stats · ↑/↓ navigate · space toggle · r revalidate · del delete · esc close${pending}`;
+      return `tab stats · ↑/↓ navigate · space toggle · r revalidate · del delete · esc close${pending}${report}`;
     }
     if (this.activeTab === "stats") {
-      return `tab settings · bounded local rollups · esc close${pending}`;
+      return `tab settings · bounded local rollups · esc close${pending}${report}`;
     }
-    return `tab chains · ←/→ pane · ↑/↓ navigate · space toggle · d discover · esc close${pending}`;
+    return `tab chains · ←/→ pane · ↑/↓ navigate · space toggle · d discover · esc close${pending}${report}`;
   }
 
   private moveSelection(direction: -1 | 1): void {
@@ -1053,17 +1092,29 @@ class ServerManagerModal implements Component, Focusable {
     }
   }
 
-  private resolveUnsavedClose(): void {
+  private focusProblemReport(): void {
+    this.activeTab = "settings";
+    this.selectedSettingIndex = SETTING_DEFINITIONS.length;
+    this.search.setValue("");
+    this.search.focused = false;
+  }
+
+  private openProblemReport(): void {
+    if (this.hasUnsavedChanges()) this.resolveUnsavedClose("report-problem");
+    else this.close("report-problem");
+  }
+
+  private resolveUnsavedClose(result?: ServerManagerResult): void {
     if (this.closePromptBusy || this.settingsBusy) return;
     this.closePromptBusy = true;
     void this.options
       .onResolveUnsaved()
       .then(async (action) => {
         if (action === "discard") {
-          this.close();
+          this.close(result);
           return;
         }
-        if (action === "save" && (await this.persistDraft())) this.close();
+        if (action === "save" && (await this.persistDraft())) this.close(result);
       })
       .catch((error: unknown) => {
         this.settingsError = summarizeError(error);

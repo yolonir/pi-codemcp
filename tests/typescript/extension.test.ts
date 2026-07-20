@@ -3,10 +3,40 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createCodeMcpExtension, saveManagerChanges } from "../../extensions/index.js";
+import {
+  createCodeMcpExtension,
+  promptForProblemReport,
+  saveManagerChanges,
+} from "../../extensions/index.js";
 import { DEFAULT_CODEMCP_SETTINGS, loadCodeMcpSettings } from "../../src/settings.js";
 
 describe("Pi extension registration", () => {
+  test("problem report asks for a description and sends the agent an issue-preparation prompt", async () => {
+    const messages: string[] = [];
+    const fakePi = {
+      sendUserMessage(content: string) {
+        messages.push(content);
+      },
+    } as unknown as ExtensionAPI;
+    const ctx = {
+      ui: {
+        async editor(title: string, initial: string) {
+          expect(title).toBe("What went wrong?");
+          expect(initial).toBe("");
+          return "OAuth fails after reconnect";
+        },
+      },
+    } as unknown as Parameters<typeof promptForProblemReport>[1];
+
+    await promptForProblemReport(fakePi, ctx);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("User's description:\nOAuth fails after reconnect");
+    expect(messages[0]).toContain("https://github.com/yolonir/pi-codemcp");
+    expect(messages[0]).toContain("prepare a GitHub issue");
+    expect(messages[0]).toContain("Do not autosumbit issue without clear approval");
+  });
+
   test("registers search, inspect, execute, save, and one manager command", () => {
     const tools: Array<{ name: string; description?: string; parameters?: unknown }> = [];
     const commands: string[] = [];
