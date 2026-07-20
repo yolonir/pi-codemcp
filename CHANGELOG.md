@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.0](https://github.com/yolonir/pi-codemcp/compare/v1.1.2...v1.2.0) (2026-07-20)
+
+
+### Features
+
+* add assisted issue reporting ([9c4806c](https://github.com/yolonir/pi-codemcp/commit/9c4806c57af7de46cdd2d9bfad4b578ea4fb4a8b))
+* add assisted issue reporting ([c8ee585](https://github.com/yolonir/pi-codemcp/commit/c8ee585fc3bff4c9515995e1631392726bdb6b24))
+
+
+### Bug Fixes
+
+* validate saved chains against Monty runtime ([dec3453](https://github.com/yolonir/pi-codemcp/commit/dec34539db77bed0d1dff466463297776592fb62))
+* validate saved chains against Monty runtime ([f723471](https://github.com/yolonir/pi-codemcp/commit/f723471b0c124f09825fd2250470f9cfbc173adf))
+
 ## [1.1.2](https://github.com/yolonir/pi-codemcp/compare/v1.1.1...v1.1.2) (2026-07-20)
 
 
