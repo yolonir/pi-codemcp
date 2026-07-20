@@ -133,6 +133,7 @@ async def test_oauth_uses_native_fastmcp_persistence_and_refresh(
     assert isinstance(first_server, RemoteMCPServer)
     first_auth = first_server.auth
     assert isinstance(first_auth, OAuth)
+    assert first_auth.context.client_metadata.token_endpoint_auth_method == "none"
 
     await first_auth.token_storage_adapter.set_client_info(
         OAuthClientInformationFull(
@@ -154,7 +155,9 @@ async def test_oauth_uses_native_fastmcp_persistence_and_refresh(
     )
     refresh_request = await anext(flow)
     assert str(refresh_request.url) == "https://mcp.linear.app/token"
+    assert "Authorization" not in refresh_request.headers
     assert b"grant_type=refresh_token" in refresh_request.content
+    assert b"client_id=test-client" in refresh_request.content
     assert b"refresh_token=refresh-token" in refresh_request.content
 
     protected_request = await flow.asend(

@@ -235,6 +235,7 @@ def normalize_mcp_config(
                     mcp_url=url,
                     client_name=oauth_client_name,
                     token_storage=oauth_storage,
+                    additional_client_metadata={"token_endpoint_auth_method": "none"},
                 )
                 auth_kind = "oauth"
             elif isinstance(raw_auth, str):
