@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.1.2](https://github.com/yolonir/pi-codemcp/compare/v1.1.1...v1.1.2) (2026-07-20)
+
+
+### Bug Fixes
+
+* allow OAuth discovery to await callbacks ([6613d6b](https://github.com/yolonir/pi-codemcp/commit/6613d6b9d829716f298334d3eee1c41afa5dfeac))
+* correct sidecar cwd and OAuth handling ([85f0c75](https://github.com/yolonir/pi-codemcp/commit/85f0c75d6b5df4e867e4dd1683ac0c301ac44129))
+* preserve project cwd for sidecar ([3ec98e7](https://github.com/yolonir/pi-codemcp/commit/3ec98e70d448b7b755245e2578c4ffc52b0ebf64))
+* register OAuth clients as public PKCE clients ([28499a6](https://github.com/yolonir/pi-codemcp/commit/28499a6c9508a934b55c32479068f1ea6ec47dbc))
+
 ## [1.1.1](https://github.com/yolonir/pi-codemcp/compare/v1.1.0...v1.1.1) (2026-07-19)
 
 
