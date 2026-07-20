@@ -26,6 +26,10 @@ pid_file = os.environ.get("TEST_PID_FILE")
 if pid_file:
     Path(pid_file).write_text(str(os.getpid()), encoding="utf-8")
 
+cwd_file = os.environ.get("TEST_CWD_FILE")
+if cwd_file:
+    Path(cwd_file).write_text(os.getcwd(), encoding="utf-8")
+
 mcp = FastMCP(f"fixture-{args.role}")
 
 if args.role == "alpha":

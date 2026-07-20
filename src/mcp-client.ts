@@ -8,7 +8,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -44,6 +44,7 @@ export interface SidecarClientOptions {
   agentDir?: string;
   environment?: Record<string, string>;
   projectChainsPath?: string;
+  workingDirectory?: string;
 }
 
 export class SidecarClient {
@@ -51,6 +52,7 @@ export class SidecarClient {
   private readonly packageVersion: string;
   private readonly agentDir: string;
   private readonly environment: Record<string, string>;
+  private readonly workingDirectory: string;
   private client: Client | undefined;
   private transport: StdioClientTransport | undefined;
   private startPromise: Promise<void> | undefined;
@@ -64,10 +66,11 @@ export class SidecarClient {
     );
     this.packageVersion = readPackageVersion(this.packageRoot);
     this.agentDir = resolve(options.agentDir ?? getAgentDir());
+    this.workingDirectory = resolve(options.workingDirectory ?? process.cwd());
     this.projectChainsDirectory = options.projectChainsPath
       ? resolve(options.projectChainsPath)
       : undefined;
-    this.environment = {
+    const environment: Record<string, string> = {
       ...definedProcessEnvironment(),
       ...(options.environment ?? {}),
       PI_CODEMCP_AGENT_DIR: this.agentDir,
@@ -75,6 +78,12 @@ export class SidecarClient {
         ? {}
         : { PI_CODEMCP_PROJECT_CHAINS_DIR: this.projectChainsDirectory }),
       UV_PROJECT_ENVIRONMENT: join(this.agentDir, "pi-codemcp", "runtime", "venv"),
+    };
+    this.environment = {
+      ...environment,
+      PYTHONPATH: environment.PYTHONPATH
+        ? `${this.packageRoot}${delimiter}${environment.PYTHONPATH}`
+        : this.packageRoot,
     };
     if (this.projectChainsDirectory === undefined) {
       delete this.environment.PI_CODEMCP_PROJECT_CHAINS_DIR;
@@ -183,7 +192,7 @@ export class SidecarClient {
         "run",
         ...(isTruthy(process.env.PI_OFFLINE) ? ["--offline"] : []),
         "--project",
-        "sidecar",
+        join(this.packageRoot, "sidecar"),
         "--frozen",
         "--no-dev",
         "-m",
@@ -191,7 +200,7 @@ export class SidecarClient {
         "serve",
         "--stdio",
       ],
-      cwd: this.packageRoot,
+      cwd: this.workingDirectory,
       env: this.environment,
       stderr: "pipe",
     });

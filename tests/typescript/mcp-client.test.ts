@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,9 +22,11 @@ async function waitForExit(pid: number): Promise<void> {
 
 test("stdio client runs typed search/chains, forwards cancellation, and cleans up", async () => {
   const temporary = await mkdtemp(join(tmpdir(), "pi-codemcp-ts-"));
+  const workingDirectory = await realpath(temporary);
   const configPath = join(temporary, "mcp.json");
   const projectChainsPath = join(temporary, "project", ".pi", "pi-codemcp", "chains");
   const alphaPidPath = join(temporary, "alpha.pid");
+  const alphaCwdPath = join(temporary, "alpha.cwd");
   const betaPidPath = join(temporary, "beta.pid");
   const fixture = join(root, "tests", "fixtures", "upstream_server.py");
   const sidecarProject = join(root, "sidecar");
@@ -35,7 +37,7 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
         alpha: {
           command: "uv",
           args: ["run", "--project", sidecarProject, "--frozen", fixture, "alpha"],
-          env: { TEST_PID_FILE: alphaPidPath },
+          env: { TEST_PID_FILE: alphaPidPath, TEST_CWD_FILE: alphaCwdPath },
         },
         beta: {
           command: "uv",
@@ -51,6 +53,7 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     packageRoot: root,
     agentDir: temporary,
     projectChainsPath,
+    workingDirectory,
   });
   let sidecarPid: number | null = null;
   let upstreamPids: number[] = [];
@@ -95,6 +98,7 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
         execute: { count: 1, success: 1, calls: 2 },
       },
     });
+    expect(await readFile(alphaCwdPath, "utf8")).toBe(workingDirectory);
 
     const savedChain = await client.call("save_chain", {
       scope: "project",
