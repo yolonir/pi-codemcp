@@ -38,6 +38,31 @@ const LONG_RUNNING_TOOLS = new Set<SidecarToolName>([
   "execute_chain",
   "revalidate_chain",
 ]);
+const OAUTH_CAPABLE_TOOLS = new Set<SidecarToolName>([
+  "search",
+  "inspect",
+  "discover",
+  ...LONG_RUNNING_TOOLS,
+]);
+const DEFAULT_TOOL_TIMEOUT_MS = 30_000;
+const OAUTH_CALLBACK_TIMEOUT_SECONDS = 300;
+const TOOL_TIMEOUT_GRACE_MS = 5_000;
+
+export function sidecarToolTimeoutMs(
+  name: SidecarToolName,
+  executionTimeoutSeconds: number,
+): number {
+  if (OAUTH_CAPABLE_TOOLS.has(name)) {
+    return (
+      Math.max(executionTimeoutSeconds, OAUTH_CALLBACK_TIMEOUT_SECONDS) * 1_000 +
+      TOOL_TIMEOUT_GRACE_MS
+    );
+  }
+  if (LONG_RUNNING_TOOLS.has(name)) {
+    return executionTimeoutSeconds * 1_000 + TOOL_TIMEOUT_GRACE_MS;
+  }
+  return DEFAULT_TOOL_TIMEOUT_MS;
+}
 
 export interface SidecarClientOptions {
   packageRoot?: string;
@@ -129,9 +154,11 @@ export class SidecarClient {
     await this.ensureStarted(signal);
     const client = this.client;
     if (!client) throw new Error("Sidecar client failed to initialize");
-    const timeout = LONG_RUNNING_TOOLS.has(name)
-      ? loadCodeMcpSettings(this.settingsPath).executionTimeoutSeconds * 1_000 + 5_000
-      : 30_000;
+    const needsExecutionTimeout = LONG_RUNNING_TOOLS.has(name) || OAUTH_CAPABLE_TOOLS.has(name);
+    const executionTimeoutSeconds = needsExecutionTimeout
+      ? loadCodeMcpSettings(this.settingsPath).executionTimeoutSeconds
+      : 0;
+    const timeout = sidecarToolTimeoutMs(name, executionTimeoutSeconds);
     const result = await client.callTool({ name, arguments: args }, undefined, {
       timeout,
       ...(signal === undefined ? {} : { signal }),

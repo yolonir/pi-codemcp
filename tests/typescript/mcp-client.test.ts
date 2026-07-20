@@ -3,7 +3,7 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SidecarClient } from "../../src/mcp-client.js";
+import { SidecarClient, type SidecarToolName, sidecarToolTimeoutMs } from "../../src/mcp-client.js";
 
 const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
@@ -19,6 +19,22 @@ async function waitForExit(pid: number): Promise<void> {
   }
   throw new Error(`process ${pid} did not exit`);
 }
+
+test("OAuth-capable calls outlive the interactive callback window", () => {
+  const oauthCapable: SidecarToolName[] = [
+    "search",
+    "inspect",
+    "discover",
+    "execute",
+    "save_chain",
+    "execute_chain",
+    "revalidate_chain",
+  ];
+  for (const name of oauthCapable) {
+    expect(sidecarToolTimeoutMs(name, 30)).toBe(305_000);
+  }
+  expect(sidecarToolTimeoutMs("status", 30)).toBe(30_000);
+});
 
 test("stdio client runs typed search/chains, forwards cancellation, and cleans up", async () => {
   const temporary = await mkdtemp(join(tmpdir(), "pi-codemcp-ts-"));
