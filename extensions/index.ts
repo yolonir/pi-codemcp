@@ -45,7 +45,7 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
             return;
           }
 
-          await showServerManagerModal(ctx, {
+          const managerResult = await showServerManagerModal(ctx, {
             servers,
             chains: chainStatesFromViews(savedChains),
             settings,
@@ -74,6 +74,7 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
             onDeleteChain: async (chain) =>
               chainStatesFromViews(await chains.delete(chain.name, chain.scope)),
           });
+          if (managerResult === "report-problem") await promptForProblemReport(pi, ctx);
         } catch (error) {
           ctx.ui.notify(summarizeError(error), "error");
         }
@@ -162,6 +163,23 @@ export async function saveManagerChanges(
 }
 
 export default createCodeMcpExtension();
+
+export async function promptForProblemReport(
+  pi: Pick<ExtensionAPI, "sendUserMessage">,
+  ctx: Pick<ExtensionCommandContext, "ui">,
+): Promise<void> {
+  const description = await ctx.ui.editor("What went wrong?", "");
+  if (description?.trim()) pi.sendUserMessage(formatProblemReportPrompt(description.trim()));
+}
+
+export function formatProblemReportPrompt(description: string): string {
+  return `Something went wrong with pi-codemcp.
+
+User's description:
+${description}
+
+Investigate the problem in current pi setup. Inspect the available pi-codemcp configuration, environment, and installed package as needed. Determine the likely cause, then prepare a GitHub issue for https://github.com/yolonir/pi-codemcp. Do not include any personal or sensitive information in the issue. Do not autosumbit issue without clear approval.`;
+}
 
 function requireServerStatus(
   status: Record<string, unknown>,

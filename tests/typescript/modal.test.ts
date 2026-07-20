@@ -5,6 +5,7 @@ import {
   type ChainEnabledChange,
   type ChainModalState,
   type ServerEnabledChange,
+  type ServerManagerResult,
   type ServerModalState,
   serverStatesFromStatus,
   showServerManagerModal,
@@ -16,7 +17,7 @@ type ModalFactory = (
   tui: { requestRender(): void },
   theme: Theme,
   keybindings: { matches(data: string, id: string): boolean },
-  done: () => void,
+  done: (result?: ServerManagerResult) => void,
 ) => Component;
 
 const theme = {
@@ -218,6 +219,7 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   let unsavedAction: "save" | "discard" | "cancel" = "cancel";
   let unsavedPrompts = 0;
   let closed = 0;
+  let modalResult: ServerManagerResult;
 
   const ctx = {
     mode: "tui",
@@ -225,8 +227,9 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
       notify() {},
       async custom(factory: ModalFactory, options: Record<string, unknown>) {
         overlayOptions = options;
-        component = factory({ requestRender() {} }, theme, { matches: () => false }, () => {
+        component = factory({ requestRender() {} }, theme, { matches: () => false }, (result) => {
           closed += 1;
+          modalResult = result;
         });
       },
     },
@@ -312,6 +315,15 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   expect(header).toContain("CodeMCP");
   expect(lines.join("\n")).toContain("grafana");
   expect(lines.join("\n")).toContain("[d] Discover tools");
+  expect(lines.join("\n")).toContain("Report issue: R");
+
+  component?.handleInput?.("R");
+  const problemReportLines = renderWithRows(component, 90, 60).join("\n");
+  expect(problemReportLines).toContain("[Settings]");
+  expect(problemReportLines).toContain("→ Extension is broken!");
+  expect(problemReportLines).toContain("Well, that sucks.");
+  for (let index = 0; index < 7; index += 1) component?.handleInput?.("\u001b[A");
+  component?.handleInput?.("\t");
 
   component?.handleInput?.("d");
   await Bun.sleep(0);
@@ -326,6 +338,7 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   const narrowLines = renderWithRows(component, 90, 60);
   const narrowFooter = narrowLines.findIndex((line) => line.includes("tab chains"));
   expect(narrowLines[narrowFooter - 1]).toContain("╰──");
+  expect(narrowLines.join("\n")).toContain("Report issue: R");
 
   component?.handleInput?.("\u001b[C");
   component?.handleInput?.("\r");
@@ -393,6 +406,7 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
 
   component?.handleInput?.("\t");
   expect((component?.render(90) ?? []).join("\n")).toContain("[Settings]");
+  expect((component?.render(90) ?? []).join("\n")).toContain("Extension is broken!");
   component?.handleInput?.("\u001b[C");
   await Bun.sleep(0);
   expect(savedChanges).toEqual([]);
@@ -426,4 +440,10 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   expect(savedChanges[1]?.serverChanges).toEqual([]);
   expect(savedChanges[1]?.chainChanges).toEqual([]);
   expect(closed).toBe(1);
+
+  for (let index = 0; index < 7; index += 1) component?.handleInput?.("\u001b[B");
+  expect((component?.render(90) ?? []).join("\n")).toContain("Well, that sucks.");
+  component?.handleInput?.("\r");
+  expect(closed).toBe(2);
+  expect(modalResult).toBe("report-problem");
 });
