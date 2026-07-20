@@ -727,11 +727,22 @@ class GatewayRuntime:
         spec = candidate_catalog.tools[candidate.public_name]
         try:
             await self.executor.validate_saved_chain(code, candidate_catalog, spec)
-        except (pydantic_monty.MontyTypingError, pydantic_monty.MontySyntaxError) as error:
+        except (
+            pydantic_monty.MontyTypingError,
+            pydantic_monty.MontySyntaxError,
+            pydantic_monty.MontyRuntimeError,
+            NotImplementedError,
+            RuntimeError,
+        ) as error:
             if isinstance(error, pydantic_monty.MontyTypingError):
                 message = error.display("concise", color=False).strip()
-            else:
+            elif isinstance(
+                error,
+                (pydantic_monty.MontySyntaxError, pydantic_monty.MontyRuntimeError),
+            ):
                 message = error.display("type-msg").strip()
+            else:
+                message = f"Sandbox compilation failed: {error}"
             raise ValueError(_saved_chain_preflight_error(message, output_schema)) from error
         dependencies = self._chain_dependencies(code, candidate_catalog)
         saved = ChainStore.build(
@@ -790,11 +801,22 @@ class GatewayRuntime:
         spec = candidate_catalog.tools[current.public_name]
         try:
             await self.executor.validate_saved_chain(current.code, candidate_catalog, spec)
-        except (pydantic_monty.MontyTypingError, pydantic_monty.MontySyntaxError) as error:
+        except (
+            pydantic_monty.MontyTypingError,
+            pydantic_monty.MontySyntaxError,
+            pydantic_monty.MontyRuntimeError,
+            NotImplementedError,
+            RuntimeError,
+        ) as error:
             if isinstance(error, pydantic_monty.MontyTypingError):
                 message = error.display("concise", color=False).strip()
-            else:
+            elif isinstance(
+                error,
+                (pydantic_monty.MontySyntaxError, pydantic_monty.MontyRuntimeError),
+            ):
                 message = error.display("type-msg").strip()
+            else:
+                message = f"Sandbox compilation failed: {error}"
             raise ValueError(
                 _saved_chain_preflight_error(message, current.output_schema)
             ) from error
