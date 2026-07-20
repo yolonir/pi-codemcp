@@ -298,6 +298,7 @@ class MontyExecutor:
         type_stubs = catalog.type_stubs_for(referenced, include=spec.name)
         async with self._execution_lock:
             await self._type_check(wrapped, catalog, type_stubs)
+            await self._compile_runtime(code, catalog, has_input=True)
 
     def _new_context(
         self,
@@ -351,6 +352,9 @@ class MontyExecutor:
         except pydantic_monty.MontySyntaxError as error:
             context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
             return self._failure(context, "preflight", error.display("type-msg").strip())
+        except pydantic_monty.MontyRuntimeError as error:
+            context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
+            return self._failure(context, "preflight", error.display("type-msg").strip())
         except RuntimeError as error:
             context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
             return self._failure(
@@ -360,18 +364,22 @@ class MontyExecutor:
             )
         context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
 
-        runtime_wrapped = _wrap_code(code, typed=False, has_input=has_input)
-        runtime_code = _rewrite_sdk_calls(runtime_wrapped, context.catalog)
         try:
-            monty = await pydantic_monty.Monty.acreate(
-                runtime_code,
-                script_name="codemcp_execute.py",
+            monty = await self._compile_runtime(
+                code,
+                context.catalog,
+                has_input=has_input,
             )
-        except (pydantic_monty.MontySyntaxError, RuntimeError) as error:
+        except (
+            pydantic_monty.MontySyntaxError,
+            pydantic_monty.MontyRuntimeError,
+            RuntimeError,
+            NotImplementedError,
+        ) as error:
             return self._failure(
                 context,
                 "preflight",
-                f"SDK facade compilation failed: {error}",
+                f"Sandbox compilation failed: {error}",
             )
 
         async def dispatch_wrapper(name: str, arguments: JsonObject) -> JsonValue:
@@ -529,6 +537,20 @@ class MontyExecutor:
         )
         response.metrics = context.metrics.model_copy()
         return response
+
+    @staticmethod
+    async def _compile_runtime(
+        code: str,
+        catalog: ToolCatalog,
+        *,
+        has_input: bool,
+    ) -> pydantic_monty.Monty:
+        runtime_wrapped = _wrap_code(code, typed=False, has_input=has_input)
+        runtime_code = _rewrite_sdk_calls(runtime_wrapped, catalog)
+        return await pydantic_monty.Monty.acreate(
+            runtime_code,
+            script_name="codemcp_execute.py",
+        )
 
     async def _type_check(
         self,

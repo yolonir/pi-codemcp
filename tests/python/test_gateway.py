@@ -555,6 +555,16 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
         assert "$.value: integer (required)" in validation_message
         assert "Actual type-check result" in validation_message
 
+        with pytest.raises(ValueError, match="class definitions"):
+            await runtime.chains.save(
+                scope="global",
+                name="unsupported_class",
+                description="Reject code the runtime cannot compile.",
+                code='class Item:\n    pass\nreturn {"value": 1}',
+                input_schema=integer_input,
+                output_schema=integer_output,
+            )
+
         saved = await runtime.chains.save(
             scope="global",
             name="countdown",
