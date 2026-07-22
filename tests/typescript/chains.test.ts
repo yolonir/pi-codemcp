@@ -128,11 +128,8 @@ test("saved manifests defer runtime actions and new saves activate immediately",
       if (name === "delete_chain") {
         return { chains: [view("echo_value", true, "global")] };
       }
-      if (name === "apply_manager_changes") {
-        return {
-          status: { connected: true, tool_count: 1, upstreams: [] },
-          chains: [view("echo_value", true, "global"), view("new_chain", false, "project")],
-        };
+      if (name === "set_chain_enabled") {
+        return view("new_chain", Boolean(args.enabled), "project");
       }
       throw new Error(`Unexpected request: ${name}`);
     },
@@ -195,11 +192,8 @@ test("saved manifests defer runtime actions and new saves activate immediately",
     expect(tools.map((tool) => tool.name)).toEqual(["mcp_chain_echo_value", "mcp_chain_new_chain"]);
     expect(active).toContain("mcp_chain_new_chain");
 
-    const applied = await manager.applyEnabled([
-      { name: "new_chain", scope: "project", enabled: false },
-    ]);
-    expect(applied.status).toMatchObject({ connected: true, tool_count: 1 });
-    expect(applied.chains.find((item) => item.chain.name === "new_chain")?.status).toBe("disabled");
+    const disabled = await manager.setEnabled("new_chain", "project", false);
+    expect(disabled.status).toBe("disabled");
     expect(active).not.toContain("mcp_chain_new_chain");
   } finally {
     await rm(temporary, { recursive: true, force: true });

@@ -4,7 +4,8 @@ import hashlib
 import json
 import os
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
+from urllib.parse import urlsplit
 
 from fastmcp.client.auth import OAuth
 from fastmcp.mcp_config import (
@@ -56,6 +57,30 @@ class NormalizedConfig(BaseModel):
 
     config: MCPConfig
     servers: list[NormalizedServerInfo]
+
+
+class PersistentCallbackOAuth(OAuth):
+    """Reuse the callback registered with a persisted dynamic OAuth client."""
+
+    @override
+    async def _initialize(self) -> None:
+        await super()._initialize()
+        client_info = self.context.client_info
+        if client_info is None or not client_info.redirect_uris:
+            return
+        redirect_uri = client_info.redirect_uris[0]
+        parsed = urlsplit(str(redirect_uri))
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+            or parsed.port is None
+        ):
+            return
+        if parsed.path != "/callback" or parsed.query or parsed.fragment:
+            return
+        self.redirect_port = parsed.port
+        self._callback_host = parsed.hostname
+        self.context.client_metadata.redirect_uris = [redirect_uri]
 
 
 def load_mcp_json(path: Path) -> JsonObject:
@@ -231,7 +256,7 @@ def normalize_mcp_config(
             auth: str | httpx.Auth | None
             auth_kind: ServerAuth | None = None
             if raw_auth == "oauth":
-                auth = OAuth(
+                auth = PersistentCallbackOAuth(
                     mcp_url=url,
                     client_name=oauth_client_name,
                     token_storage=oauth_storage,

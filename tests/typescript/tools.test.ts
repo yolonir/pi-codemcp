@@ -65,9 +65,9 @@ function captureTools(options: {
       calls.push("list");
       return [view];
     },
-    async applyEnabled(changes: Array<{ enabled: boolean }>) {
-      calls.push(changes[0]?.enabled ? "enable" : "disable");
-      return { chains: [view], status: {} };
+    async setEnabled(_name: string, _scope: string, enabled: boolean) {
+      calls.push(enabled ? "enable" : "disable");
+      return view;
     },
     async revalidate() {
       calls.push("revalidate");
@@ -162,7 +162,7 @@ test("chain management lists freely and requires explicit mutation confirmation"
     undefined,
     undefined,
   );
-  expect(calls).toEqual(["list", "disable"]);
+  expect(calls).toEqual(["list", "disable", "list"]);
 });
 
 test("project chain saves fail before persistence when scope is unavailable", async () => {

@@ -5,17 +5,14 @@ import json
 import os
 import re
 import time
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from typing import Literal, NamedTuple
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .json_types import JSON_OBJECT_ADAPTER, JsonObject
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
 
 CHAIN_NAME_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
 CHAIN_STORE_VERSION: Literal[1] = 1
@@ -74,14 +71,6 @@ class SavedChainManifest(BaseModel):
     @property
     def native_tool(self) -> str:
         return f"mcp_chain_{self.name}"
-
-
-class ChainEnabledChange(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    name: str = Field(pattern=CHAIN_NAME_PATTERN)
-    scope: ChainScope
-    enabled: bool
 
 
 class ChainStatusView(BaseModel):
@@ -187,6 +176,12 @@ class ChainStore:
         temporary.chmod(0o600)
         temporary.replace(path)
 
+    def set_enabled(self, name: str, enabled: bool) -> SavedChainManifest:
+        current = self.get(name)
+        updated = current.model_copy(update={"enabled": enabled, "updated_at": time.time()})
+        self.save(updated)
+        return updated
+
     def delete(self, name: str) -> None:
         self._validate_name(name)
         try:
@@ -256,38 +251,16 @@ class ScopedChainStore:
     def save(self, scope: ChainScope, chain: SavedChainManifest) -> None:
         self._store(scope).save(chain)
 
-    @contextmanager
-    def enabled_transaction(self, changes: list[ChainEnabledChange]) -> Iterator[None]:
-        keys = [(change.scope, change.name) for change in changes]
-        if len(keys) != len(set(keys)):
-            raise ValueError("Duplicate scoped saved-chain enable change")
-        previous = [self.get(change.name, change.scope) for change in changes]
-        applied: list[ScopedChain] = []
-        try:
-            self._apply_enabled_changes(changes, previous, applied)
-            yield
-        except BaseException:
-            self._restore(applied)
-            raise
-
-    def _apply_enabled_changes(
+    def set_enabled(
         self,
-        changes: list[ChainEnabledChange],
-        previous: list[ScopedChain],
-        applied: list[ScopedChain],
-    ) -> None:
-        for change, current in zip(changes, previous, strict=True):
-            if current.chain.enabled == change.enabled:
-                continue
-            updated = current.chain.model_copy(
-                update={"enabled": change.enabled, "updated_at": time.time()}
-            )
-            self.save(change.scope, updated)
-            applied.append(current)
-
-    def _restore(self, chains: list[ScopedChain]) -> None:
-        for item in reversed(chains):
-            self.save(item.scope, item.chain)
+        scope: ChainScope,
+        name: str,
+        enabled: bool,
+    ) -> ScopedChain:
+        return ScopedChain(
+            scope=scope,
+            chain=self._store(scope).set_enabled(name, enabled),
+        )
 
     def delete(self, scope: ChainScope, name: str) -> None:
         self._store(scope).delete(name)

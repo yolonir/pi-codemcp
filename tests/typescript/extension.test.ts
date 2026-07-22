@@ -5,10 +5,9 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   createCodeMcpExtension,
+  discoverServerFromManager,
   promptForProblemReport,
-  saveManagerChanges,
 } from "../../extensions/index.js";
-import { DEFAULT_CODEMCP_SETTINGS, loadCodeMcpSettings } from "../../src/settings.js";
 
 describe("Pi extension registration", () => {
   test("problem report asks for a description and sends the agent an issue-preparation prompt", async () => {
@@ -92,101 +91,54 @@ describe("Pi extension registration", () => {
     });
   });
 
-  test("manager batch-save applies settings, servers, and chains together", async () => {
-    const temporary = await mkdtemp(join(tmpdir(), "pi-codemcp-manager-save-"));
+  test("discovering a disabled server enables it without an extra step", async () => {
+    const temporary = await mkdtemp(join(tmpdir(), "pi-codemcp-enable-"));
     const configPath = join(temporary, "mcp.json");
-    const settingsPath = join(temporary, "settings.json");
-    const reloads: string[] = [];
-    const chainBatches: unknown[] = [];
     try {
       await writeFile(
         configPath,
-        JSON.stringify({ mcpServers: { alpha: { command: "alpha", enabled: true } } }),
+        JSON.stringify({ mcpServers: { alpha: { command: "alpha", disabled: true } } }),
+        "utf8",
       );
-      const result = await saveManagerChanges(
-        {
-          configPath,
-          settingsPath,
-          loadSettings: () => loadCodeMcpSettings(settingsPath),
-          async reload() {
-            reloads.push("reload");
-          },
+      const calls: string[] = [];
+      const lifecycle = {
+        configPath,
+        async reload() {
+          calls.push("reload");
         },
-        {
-          async applyEnabled(changes) {
-            chainBatches.push(changes);
-            return {
-              status: {
-                connected: false,
-                tool_count: 0,
-                upstreams: [
-                  {
-                    name: "alpha",
-                    transport: "stdio",
-                    enabled: false,
-                    discovered: false,
-                    tool_count: 0,
-                    total_tool_count: 0,
-                    tools: [],
-                  },
-                ],
+        async request(name: "discover" | "status") {
+          calls.push(name);
+          return {
+            upstreams: [
+              {
+                name: "alpha",
+                transport: "stdio",
+                enabled: true,
+                discovered: true,
+                tool_count: 1,
+                total_tool_count: 1,
+                tools: [{ name: "run", enabled: true }],
               },
-              chains: [],
-            };
-          },
+            ],
+          };
         },
-        { ...DEFAULT_CODEMCP_SETTINGS, backgroundWarmup: false },
-        [{ name: "alpha", previousEnabled: true, enabled: false }],
-        [{ name: "daily", scope: "project", previousEnabled: true, enabled: false }],
-      );
+      };
 
-      expect(reloads).toEqual(["reload"]);
-      expect(chainBatches).toEqual([[{ name: "daily", scope: "project", enabled: false }]]);
-      expect(result.settings.backgroundWarmup).toBe(false);
-      expect(result.servers[0]).toMatchObject({ name: "alpha", enabled: false });
-      expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
-        mcpServers: { alpha: { command: "alpha", enabled: false } },
+      const updated = await discoverServerFromManager(lifecycle, {
+        name: "alpha",
+        transport: "stdio",
+        enabled: false,
+        connected: false,
+        discovered: false,
+        toolCount: 0,
+        totalToolCount: 0,
+        tools: [],
       });
-    } finally {
-      await rm(temporary, { recursive: true, force: true });
-    }
-  });
 
-  test("manager batch-save rolls files and runtime back on failure", async () => {
-    const temporary = await mkdtemp(join(tmpdir(), "pi-codemcp-manager-rollback-"));
-    const configPath = join(temporary, "mcp.json");
-    const settingsPath = join(temporary, "settings.json");
-    let reloads = 0;
-    try {
-      await writeFile(
-        configPath,
-        JSON.stringify({ mcpServers: { alpha: { command: "alpha", enabled: true } } }),
-      );
-      await expect(
-        saveManagerChanges(
-          {
-            configPath,
-            settingsPath,
-            loadSettings: () => loadCodeMcpSettings(settingsPath),
-            async reload() {
-              reloads += 1;
-            },
-          },
-          {
-            async applyEnabled() {
-              throw new Error("chain batch failed");
-            },
-          },
-          { ...DEFAULT_CODEMCP_SETTINGS, backgroundWarmup: false },
-          [{ name: "alpha", previousEnabled: true, enabled: false }],
-          [{ name: "daily", scope: "project", previousEnabled: true, enabled: false }],
-        ),
-      ).rejects.toThrow("chain batch failed");
-
-      expect(reloads).toBe(2);
-      expect(loadCodeMcpSettings(settingsPath).backgroundWarmup).toBe(true);
+      expect(calls).toEqual(["reload", "discover"]);
+      expect(updated).toMatchObject({ enabled: true, discovered: true, toolCount: 1 });
       expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
-        mcpServers: { alpha: { command: "alpha", enabled: true } },
+        mcpServers: { alpha: { command: "alpha", disabled: false } },
       });
     } finally {
       await rm(temporary, { recursive: true, force: true });
