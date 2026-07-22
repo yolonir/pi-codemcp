@@ -211,7 +211,7 @@ Rendered Pi output is separately truncated by `outputLimitKiB`; the full oversiz
 
 FastMCP owns MCP transports, runtime validation, and OAuth. [Pydantic Monty](https://github.com/pydantic/monty) type-checks and executes agent-written Python without host filesystem, environment, network, or subprocess access. Code Mode can only call the typed MCP tool and saved-chain facades exposed in the generated stubs.
 
-`/codemcp` configures servers, saved chains, per-tool policy, timeouts, call limits, output limits, cache TTL, and warmup, and shows bounded lifetime/recent telemetry in its Stats tab. Server, chain, tool-policy, and setting toggles stay local and instantaneous until one `Ctrl+S` batch save/reload. Discovery, revalidation, and deletion remain explicit immediate actions. The sandbox also has a fixed memory ceiling; executions are serialized per Pi session. There are no automatic retries or cross-service rollback.
+`/codemcp` configures servers, saved chains, per-tool policy, timeouts, call limits, output limits, cache TTL, and warmup, and shows bounded lifetime/recent telemetry in its Stats tab. Server, chain, tool-policy, and setting changes are persisted immediately. Discovery, revalidation, and deletion remain explicit immediate actions. The sandbox also has a fixed memory ceiling; executions are serialized per Pi session. There are no automatic retries or cross-service rollback.
 
 Enabled tools retain their upstream permissions. Saved chains never bypass server or per-tool policy and are checked against the current enabled catalog whenever they run. Preflight safety does not make upstream tools transactional: if a later call fails after earlier calls succeeded, pi-codemcp does not roll those upstream side effects back.
 

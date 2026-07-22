@@ -476,11 +476,8 @@ export function registerCodeMcpTools(
           details: undefined,
         });
         if (action === "enable" || action === "disable") {
-          const applied = await chains.applyEnabled(
-            [{ name: params.name, scope, enabled: action === "enable" }],
-            signal,
-          );
-          views = applied.chains;
+          await chains.setEnabled(params.name, scope, action === "enable", signal);
+          views = await chains.list(signal);
         } else if (action === "revalidate") {
           await chains.revalidate(params.name, scope, signal);
           views = await chains.list(signal);

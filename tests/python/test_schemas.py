@@ -118,7 +118,7 @@ def test_normalize_config_supports_transports_and_skips_disabled(
 
 
 @pytest.mark.asyncio
-async def test_oauth_uses_native_fastmcp_persistence_and_refresh(
+async def test_oauth_persists_tokens_and_registered_callback(
     tmp_path: Path,
 ) -> None:
     raw: JsonObject = {
@@ -135,10 +135,15 @@ async def test_oauth_uses_native_fastmcp_persistence_and_refresh(
     assert isinstance(first_auth, OAuth)
     assert first_auth.context.client_metadata.token_endpoint_auth_method == "none"
 
+    registered_callback = "http://localhost:54321/callback"
+    registered_metadata = first_auth.context.client_metadata.model_dump(
+        exclude_none=True
+    )
+    registered_metadata["redirect_uris"] = [registered_callback]
     await first_auth.token_storage_adapter.set_client_info(
         OAuthClientInformationFull(
             client_id="test-client",
-            **first_auth.context.client_metadata.model_dump(exclude_none=True),
+            **registered_metadata,
         )
     )
     await first_auth.token_storage_adapter.set_tokens(
@@ -154,6 +159,10 @@ async def test_oauth_uses_native_fastmcp_persistence_and_refresh(
         httpx.Request("POST", "https://mcp.linear.app/mcp")
     )
     refresh_request = await anext(flow)
+    assert first_auth.redirect_port == 54321
+    first_redirects = first_auth.context.client_metadata.redirect_uris
+    assert first_redirects is not None
+    assert str(first_redirects[0]) == registered_callback
     assert str(refresh_request.url) == "https://mcp.linear.app/token"
     assert "Authorization" not in refresh_request.headers
     assert b"grant_type=refresh_token" in refresh_request.content
@@ -181,6 +190,11 @@ async def test_oauth_uses_native_fastmcp_persistence_and_refresh(
     assert isinstance(second_server, RemoteMCPServer)
     second_auth = second_server.auth
     assert isinstance(second_auth, OAuth)
+    await second_auth._initialize()
+    assert second_auth.redirect_port == 54321
+    second_redirects = second_auth.context.client_metadata.redirect_uris
+    assert second_redirects is not None
+    assert str(second_redirects[0]) == registered_callback
     restored = await second_auth.token_storage_adapter.get_tokens()
     assert restored is not None
     assert restored.access_token == "refreshed-access"

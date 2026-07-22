@@ -160,21 +160,22 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
       chain_calls: 1,
     });
 
-    const disabled = await client.call("apply_manager_changes", {
-      changes: [{ name: "increment", scope: "project", enabled: false }],
+    const disabled = await client.call("set_chain_enabled", {
+      name: "increment",
+      scope: "project",
+      enabled: false,
     });
-    expect(disabled).toMatchObject({
-      status: { connected: true, tool_count: 3 },
-      chains: [{ scope: "project", status: "disabled" }],
-    });
+    expect(disabled).toMatchObject({ scope: "project", status: "disabled" });
     expect(
       await client.call("execute_chain", {
         name: "increment",
         arguments: { seed: 1 },
       }),
     ).toMatchObject({ ok: false, failure_stage: "preflight" });
-    await client.call("apply_manager_changes", {
-      changes: [{ name: "increment", scope: "project", enabled: true }],
+    await client.call("set_chain_enabled", {
+      name: "increment",
+      scope: "project",
+      enabled: true,
     });
 
     const controller = new AbortController();

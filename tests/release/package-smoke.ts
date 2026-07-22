@@ -77,12 +77,13 @@ try {
   if (executed.ok !== true || JSON.stringify(executed.result) !== JSON.stringify({ value: 7 })) {
     throw new Error(`project chain execution failed: ${JSON.stringify(executed)}`);
   }
-  const applied = await client.call("apply_manager_changes", {
-    changes: [{ name: "release_echo", scope: "project", enabled: false }],
+  const disabled = await client.call("set_chain_enabled", {
+    name: "release_echo",
+    scope: "project",
+    enabled: false,
   });
-  const chains = applied.chains;
-  if (!Array.isArray(chains) || chains[0]?.status !== "disabled") {
-    throw new Error(`staged chain change was not applied: ${JSON.stringify(applied)}`);
+  if (disabled.status !== "disabled") {
+    throw new Error(`chain was not disabled immediately: ${JSON.stringify(disabled)}`);
   }
   const blocked = await client.call("execute_chain", {
     name: "release_echo",

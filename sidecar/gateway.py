@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, cast
 import pydantic_monty
 from fastmcp import Client, FastMCP
 from fastmcp.mcp_config import RemoteMCPServer, StdioMCPServer
-from pydantic import BaseModel, ConfigDict
 from pydantic_core import to_json
 from rapidfuzz import fuzz, process
 
@@ -18,7 +17,6 @@ from . import json_types
 from .catalog_cache import CatalogCache
 from .chains import (
     ChainDependency,
-    ChainEnabledChange,
     ChainListResponse,
     ChainScope,
     ChainStatusView,
@@ -60,13 +58,6 @@ MAX_INSPECT_CALLS = 20
 type ServerConfig = StdioMCPServer | RemoteMCPServer
 type JsonObject = json_types.JsonObject
 type JsonValue = json_types.JsonValue
-
-
-class ManagerApplyResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    status: StatusResponse
-    chains: list[ChainStatusView]
 
 
 class ServerHandle:
@@ -187,6 +178,7 @@ class SavedChainHandlers(NamedTuple):
     execute: Callable[[str, JsonObject], Awaitable[ExecutionResponse]]
     save: SaveChainHandler
     list: Callable[[], ChainListResponse]
+    set_enabled: Callable[[str, ChainScope, bool], Awaitable[ChainStatusView]]
     revalidate: Callable[[str, ChainScope], Awaitable[ChainStatusView]]
     delete: Callable[[str, ChainScope], Awaitable[ChainListResponse]]
 
@@ -219,6 +211,14 @@ class SavedChainRuntime:
 
     def list(self) -> ChainListResponse:
         return self.handlers.list()
+
+    async def set_enabled(
+        self,
+        name: str,
+        scope: ChainScope,
+        enabled: bool,
+    ) -> ChainStatusView:
+        return await self.handlers.set_enabled(name, scope, enabled)
 
     async def revalidate(self, name: str, scope: ChainScope) -> ChainStatusView:
         return await self.handlers.revalidate(name, scope)
@@ -256,6 +256,7 @@ class GatewayRuntime:
                 execute=self._execute_chain,
                 save=self._save_chain,
                 list=self._list_chains,
+                set_enabled=self._set_chain_enabled,
                 revalidate=self._revalidate_chain,
                 delete=self._delete_chain,
             )
@@ -778,6 +779,33 @@ class GatewayRuntime:
         )
         return response
 
+    async def _set_chain_enabled(
+        self,
+        name: str,
+        scope: ChainScope,
+        enabled: bool,
+    ) -> ChainStatusView:
+        started = time.perf_counter()
+        try:
+            self.chain_store.set_enabled(scope, name, enabled)
+            await self._rebuild_catalog()
+            response = self._chain_view(name, scope)
+        except BaseException:
+            self.stats_store.record_operation(
+                "set_chain_enabled",
+                duration_ms=_elapsed_ms(started),
+                success=False,
+                failure_stage="error",
+            )
+            raise
+        self.stats_store.record_operation(
+            "set_chain_enabled",
+            duration_ms=_elapsed_ms(started),
+            success=True,
+            output_bytes=len(to_json(response.model_dump(mode="json"))),
+        )
+        return response
+
     async def _revalidate_chain(self, name: str, scope: ChainScope) -> ChainStatusView:
         started = time.perf_counter()
         try:
@@ -923,27 +951,6 @@ class GatewayRuntime:
         self._load_settings()
         await self._rebuild_catalog()
         return self.status()
-
-    async def apply_manager_changes(
-        self,
-        changes: list[ChainEnabledChange],
-    ) -> ManagerApplyResponse:
-        previous_settings = self.settings
-        try:
-            with self.chain_store.enabled_transaction(changes):
-                self._load_settings()
-                await self._rebuild_catalog()
-        except BaseException:
-            self.settings = previous_settings
-            for handle in self.handles.values():
-                handle.cache.max_age_seconds = previous_settings.cache_ttl_seconds
-            self.executor.settings = previous_settings.execution_settings()
-            await self._rebuild_catalog()
-            raise
-        return ManagerApplyResponse(
-            status=self.status(),
-            chains=self._chain_views(),
-        )
 
     def _load_settings(self) -> None:
         self.settings = load_settings(self.settings_path)
@@ -1316,11 +1323,13 @@ async def reload_settings() -> StatusResponse:
 
 
 @mcp.tool
-async def apply_manager_changes(
-    changes: list[ChainEnabledChange],
-) -> ManagerApplyResponse:
-    """Apply staged settings and saved-chain enable changes with one catalog rebuild."""
-    return await _require_runtime().apply_manager_changes(changes)
+async def set_chain_enabled(
+    name: str,
+    scope: ChainScope,
+    enabled: bool,
+) -> ChainStatusView:
+    """Enable or disable one saved chain in its storage scope."""
+    return await _require_runtime().chains.set_enabled(name, scope, enabled)
 
 
 @mcp.tool
