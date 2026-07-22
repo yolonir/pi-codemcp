@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.2](https://github.com/yolonir/pi-codemcp/compare/v1.2.1...v1.2.2) (2026-07-22)
+
+
+### Bug Fixes
+
+* simplify manager UX and stabilize OAuth callbacks ([c30d00a](https://github.com/yolonir/pi-codemcp/commit/c30d00a1ee337697dbc390d54fe9651e018e3805))
+* simplify manager UX and stabilize OAuth callbacks ([227f56d](https://github.com/yolonir/pi-codemcp/commit/227f56d22ee512da7308c095964cf489a5ec3276))
+
 ## [1.2.1](https://github.com/yolonir/pi-codemcp/compare/v1.2.0...v1.2.1) (2026-07-22)
 
 
