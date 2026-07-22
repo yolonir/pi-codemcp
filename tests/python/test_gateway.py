@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Never
 
 import pytest
 from fastmcp import Client
@@ -233,6 +234,46 @@ async def test_scoped_search_validates_before_discovery_and_connects_only_target
         assert not alpha_pid.exists()
         assert beta_pid.exists()
         await wait_for_process_exit(int(beta_pid.read_text()))
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_unscoped_search_returns_partial_results_when_discovery_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(__file__).parents[2]
+    fixture = root / "tests" / "fixtures" / "upstream_server.py"
+    alpha_pid = tmp_path / "alpha.pid"
+    beta_pid = tmp_path / "beta.pid"
+    config_path = tmp_path / "mcp.json"
+    write_config(config_path, fixture, alpha_pid, beta_pid)
+    runtime = gateway.GatewayRuntime.create(
+        config_path,
+        tmp_path / "oauth",
+        tmp_path / "catalog",
+    )
+
+    async def fail_discovery() -> list[Never]:
+        raise RuntimeError("beta is unavailable")
+
+    monkeypatch.setattr(runtime.handles["beta"], "discover", fail_discovery)
+    try:
+        response = await runtime.search("number")
+        assert [item.call for item in response.results] == [
+            "alpha.get_number",
+            "alpha.slow_number",
+        ]
+        assert [failure.model_dump() for failure in response.discovery_failures] == [
+            {"server": "beta", "error": "beta is unavailable"}
+        ]
+        assert alpha_pid.exists()
+        assert not beta_pid.exists()
+
+        with pytest.raises(RuntimeError, match="beta is unavailable"):
+            await runtime.search("number", server="beta")
+        await wait_for_process_exit(int(alpha_pid.read_text()))
     finally:
         await runtime.close()
 

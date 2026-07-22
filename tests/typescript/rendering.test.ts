@@ -50,6 +50,34 @@ function render(component: Component): string {
   return component.render(160).join("\n");
 }
 
+describe("codemcp_search rendering", () => {
+  test("marks partial results and names unavailable servers", () => {
+    const tool = captureTool("codemcp_search");
+    const result = render(
+      tool.renderResult?.(
+        {
+          content: [{ type: "text", text: "{}" }],
+          details: {
+            matchCount: 1,
+            detail: "signatures",
+            totalToolCount: 60,
+            serverCount: 1,
+            hasMore: false,
+            preview: ["grafana.check_health"],
+            discoveryFailures: ["marimo-research"],
+          },
+        },
+        { expanded: false, isPartial: false },
+        plainTheme,
+      ) as Component,
+    );
+
+    expect(result).toContain("1 unavailable");
+    expect(result).toContain("unavailable: marimo-research");
+    expect(result).toContain("grafana.check_health");
+  });
+});
+
 describe("codemcp_execute rendering", () => {
   test("separates expanded agent code from successful output", () => {
     const tool = captureExecuteTool();

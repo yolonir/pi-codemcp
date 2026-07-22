@@ -63,6 +63,13 @@ class ServerToolSummary(BaseModel):
     tool_count: int
 
 
+class ServerDiscoveryFailure(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    server: str
+    error: str
+
+
 class ExecutionLimitsView(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -85,6 +92,7 @@ class SearchResponse(BaseModel):
     has_more: bool = False
     project_scope_available: bool
     execution_limits: ExecutionLimitsView
+    discovery_failures: list[ServerDiscoveryFailure] = Field(default_factory=list)
     prelude: str | None = None
     results: list[ToolSchemaView]
 
