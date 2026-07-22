@@ -42,6 +42,7 @@ const view: SavedChainView = {
 function captureTools(options: {
   projectAvailable: boolean;
   executeResult?: Record<string, unknown>;
+  searchResult?: Record<string, unknown>;
 }) {
   const tools = new Map<string, RegisteredTool>();
   const pi = {
@@ -54,6 +55,7 @@ function captureTools(options: {
     loadSettings: () => ({ ...DEFAULT_CODEMCP_SETTINGS, disabledTools: {} }),
     async request(name: string) {
       if (name === "execute" && options.executeResult) return options.executeResult;
+      if (name === "search" && options.searchResult) return options.searchResult;
       throw new Error("unexpected sidecar request");
     },
   };
@@ -104,6 +106,29 @@ test("execute sends only compact result while keeping metadata in details", asyn
     callsMade: 1,
     chainCalls: 0,
     timings: { typecheck_ms: 4, execution_ms: 8, serialization_ms: 1 },
+  });
+});
+
+test("search exposes unavailable servers as partial-result metadata", async () => {
+  const { tools } = captureTools({
+    projectAvailable: true,
+    searchResult: {
+      mode: "search",
+      detail: "signatures",
+      total_tool_count: 1,
+      servers: [{ name: "grafana", tool_count: 1 }],
+      discovery_failures: [{ server: "marimo-research", error: "All connection attempts failed" }],
+      results: [{ call: "grafana.check_health" }],
+    },
+  });
+  const search = tools.get("codemcp_search");
+  const result = await search?.execute("id", { query: "health" }, undefined, undefined);
+  expect(result?.content[0]?.text).toContain('"discovery_failures"');
+  expect(result?.details).toMatchObject({
+    matchCount: 1,
+    totalToolCount: 1,
+    serverCount: 1,
+    discoveryFailures: ["marimo-research"],
   });
 });
 

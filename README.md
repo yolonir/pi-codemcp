@@ -148,7 +148,7 @@ The Python sidecar enforces catalog cache TTL, execution timeout, per-tool timeo
 
 ## Search and execute flow
 
-The agent searches for a capability, inspects the selected exact stub when needed, and executes a compact plan:
+The agent searches for a capability, inspects the selected exact stub when needed, and executes a compact plan. Unscoped searches discover stale or missing server catalogs independently: available servers still return results, while `discovery_failures` explicitly reports unavailable servers. Server-scoped searches remain fail-fast.
 
 ```python
 issues = await linear.list_issues({"assignee": "me", "limit": 50})

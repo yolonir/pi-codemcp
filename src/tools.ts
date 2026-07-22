@@ -30,6 +30,7 @@ interface SearchRenderDetails extends CodeMcpOutputDetails {
   nextCursor?: number;
   detail: string;
   preview: string[];
+  discoveryFailures: string[];
 }
 
 const SearchParameters = Type.Object({
@@ -154,7 +155,7 @@ export function registerCodeMcpTools(
     name: "codemcp_search",
     label: "MCP Search",
     description:
-      "Search configured MCP capabilities or page through compact inventory. Default signature search includes exact stubs for up to three top matches plus compact alternatives; codemcp_inspect loads other selected stubs. Returns ranking evidence, pagination, scope, and execution limits; invalid server names fail with suggestions.",
+      "Search configured MCP capabilities or page through compact inventory. Default signature search includes exact stubs for up to three top matches plus compact alternatives; codemcp_inspect loads other selected stubs. Unscoped searches return available results plus explicit discovery failures; scoped searches remain fail-fast. Returns ranking evidence, pagination, scope, and execution limits; invalid server names fail with suggestions.",
     promptSnippet: "Discover compact MCP capabilities or inventory",
     promptGuidelines: [...SEARCH_PROMPT_GUIDELINES],
     parameters: SearchParameters,
@@ -186,6 +187,11 @@ export function registerCodeMcpTools(
             return [`${String(item.name)} ${String(item.tool_count ?? 0)}`];
           })
         : [];
+      const discoveryFailures = Array.isArray(result.discovery_failures)
+        ? result.discovery_failures.flatMap((item) =>
+            isRecord(item) && typeof item.server === "string" ? [item.server] : [],
+          )
+        : [];
       return {
         content: [{ type: "text", text: output.text }],
         details: {
@@ -197,6 +203,7 @@ export function registerCodeMcpTools(
           nextCursor: typeof result.next_cursor === "number" ? result.next_cursor : undefined,
           detail: typeof result.detail === "string" ? result.detail : "signatures",
           preview,
+          discoveryFailures,
         },
       };
     },
@@ -212,12 +219,17 @@ export function registerCodeMcpTools(
       if (isPartial) return new Text(theme.fg("warning", "Searching catalog..."), 0, 0);
       if (expanded) return renderExpandedJson(result.content);
       const details = result.details as SearchRenderDetails | undefined;
+      const discoveryFailures = details?.discoveryFailures ?? [];
+      const unavailable = discoveryFailures.length;
       let text = theme.fg(
-        "success",
-        `${details?.matchCount ?? 0} matches · ${details?.detail ?? "signatures"} · ${details?.totalToolCount ?? 0} tools · ${details?.serverCount ?? 0} servers`,
+        unavailable > 0 ? "warning" : "success",
+        `${details?.matchCount ?? 0} matches · ${details?.detail ?? "signatures"} · ${details?.totalToolCount ?? 0} tools · ${details?.serverCount ?? 0} servers${unavailable > 0 ? ` · ${unavailable} unavailable` : ""}`,
       );
       for (const name of details?.preview ?? []) {
         text += `\n${theme.fg("dim", `  ${name}`)}`;
+      }
+      for (const server of discoveryFailures) {
+        text += `\n${theme.fg("warning", `  unavailable: ${server}`)}`;
       }
       if (details?.hasMore) {
         text += `\n${theme.fg("muted", `  more at cursor ${details.nextCursor ?? "?"}`)}`;

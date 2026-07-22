@@ -36,6 +36,7 @@ from .models import (
     SearchDetail,
     SearchMode,
     SearchResponse,
+    ServerDiscoveryFailure,
     ServerToolSummary,
     StatusResponse,
     UpstreamStatus,
@@ -377,7 +378,11 @@ class GatewayRuntime:
             discovery_servers = ()
         else:
             discovery_servers = (server,)
-        await self._ensure_servers_discovered(discovery_servers)
+        if server is None:
+            discovery_failures = await self._discover_servers_for_unscoped_search(discovery_servers)
+        else:
+            await self._ensure_servers_discovered(discovery_servers)
+            discovery_failures = []
         self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
         bounded_limit = min(max(limit, 1), 20)
         bounded_cursor = max(cursor, 0)
@@ -439,6 +444,7 @@ class GatewayRuntime:
             has_more=next_cursor is not None,
             project_scope_available=self.chain_store.project_store is not None,
             execution_limits=self._execution_limits_view(),
+            discovery_failures=discovery_failures,
             prelude=self.catalog.stub_prelude if include_prelude else None,
             results=results,
         )
@@ -981,6 +987,36 @@ class GatewayRuntime:
     async def _ensure_catalog_complete(self) -> None:
         await self._ensure_servers_discovered(self.handles.keys())
 
+    async def _discover_servers_for_unscoped_search(
+        self,
+        server_names: Iterable[str],
+    ) -> list[ServerDiscoveryFailure]:
+        requested = set(server_names)
+        missing = [
+            (name, handle)
+            for name, handle in self.handles.items()
+            if name in requested and handle.tools is None
+        ]
+        if not missing:
+            return []
+        results = await asyncio.gather(
+            *(handle.discover() for _, handle in missing),
+            return_exceptions=True,
+        )
+        failures: list[ServerDiscoveryFailure] = []
+        for (name, _handle), result in zip(missing, results, strict=True):
+            if isinstance(result, Exception):
+                failures.append(
+                    ServerDiscoveryFailure(
+                        server=name,
+                        error=_discovery_error_message(result),
+                    )
+                )
+            elif isinstance(result, BaseException):
+                raise result
+        await self._rebuild_catalog()
+        return failures
+
     async def _ensure_servers_discovered(self, server_names: Iterable[str]) -> None:
         requested = set(server_names)
         missing = [
@@ -1168,6 +1204,10 @@ def _saved_chain_preflight_error(message: str, output_schema: JsonObject) -> str
 
 def _elapsed_ms(started: float) -> float:
     return (time.perf_counter() - started) * 1_000
+
+
+def _discovery_error_message(error: Exception) -> str:
+    return str(error).strip() or type(error).__name__
 
 
 def _parse_code(code: str) -> ast.AST | None:
