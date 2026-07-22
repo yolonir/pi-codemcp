@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.1](https://github.com/yolonir/pi-codemcp/compare/v1.2.0...v1.2.1) (2026-07-22)
+
+
+### Bug Fixes
+
+* tolerate unavailable servers during unscoped search ([51203a2](https://github.com/yolonir/pi-codemcp/commit/51203a243a6496918dc931d90dd1ae7a8f54b7e7))
+* tolerate unavailable servers during unscoped search ([011eef7](https://github.com/yolonir/pi-codemcp/commit/011eef737d5d64a3c32cfccfc6f960c0ea38270a))
+
 ## [1.2.0](https://github.com/yolonir/pi-codemcp/compare/v1.1.2...v1.2.0) (2026-07-20)
 
 
