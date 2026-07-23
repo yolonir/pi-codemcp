@@ -159,7 +159,7 @@ export function registerCodeMcpTools(
     promptSnippet: "Discover compact MCP capabilities or inventory",
     promptGuidelines: [...SEARCH_PROMPT_GUIDELINES],
     parameters: SearchParameters,
-    async execute(_toolCallId, params, signal, onUpdate) {
+    async execute(toolCallId, params, signal, onUpdate) {
       onUpdate?.({
         content: [{ type: "text", text: "Searching MCP tools..." }],
         details: undefined,
@@ -173,6 +173,7 @@ export function registerCodeMcpTools(
           limit: params.limit ?? 5,
           cursor: params.cursor ?? 0,
           ...(params.server === undefined ? {} : { server: params.server }),
+          trace_id: toolCallId,
         },
         signal,
       );
@@ -247,12 +248,16 @@ export function registerCodeMcpTools(
     promptSnippet: "Load exact typed contracts for selected MCP calls",
     promptGuidelines: [...INSPECT_PROMPT_GUIDELINES],
     parameters: InspectParameters,
-    async execute(_toolCallId, params, signal, onUpdate) {
+    async execute(toolCallId, params, signal, onUpdate) {
       onUpdate?.({
         content: [{ type: "text", text: "Inspecting MCP tool contracts..." }],
         details: undefined,
       });
-      const result = await lifecycle.request("inspect", { calls: params.calls }, signal);
+      const result = await lifecycle.request(
+        "inspect",
+        { calls: params.calls, trace_id: toolCallId },
+        signal,
+      );
       const output = formatCodeMcpOutput(result, outputLimits(lifecycle));
       const results = Array.isArray(result.results) ? result.results : [];
       return {
@@ -296,12 +301,16 @@ export function registerCodeMcpTools(
     promptSnippet: "Run a bounded typed MCP workflow and return a compact result",
     promptGuidelines: [...EXECUTE_PROMPT_GUIDELINES],
     parameters: ExecuteParameters,
-    async execute(_toolCallId, params, signal, onUpdate) {
+    async execute(toolCallId, params, signal, onUpdate) {
       onUpdate?.({
         content: [{ type: "text", text: "Type-checking MCP chain..." }],
         details: undefined,
       });
-      const result = await lifecycle.request("execute", { code: params.code }, signal);
+      const result = await lifecycle.request(
+        "execute",
+        { code: params.code, trace_id: toolCallId },
+        signal,
+      );
       const ok = result.ok === true;
       const modelValue = ok
         ? result.result
@@ -365,7 +374,7 @@ export function registerCodeMcpTools(
     promptSnippet: "Save a repeated MCP execution as a typed reusable native tool",
     promptGuidelines: [...SAVE_CHAIN_PROMPT_GUIDELINES],
     parameters: SaveChainParameters,
-    async execute(_toolCallId, params, signal, onUpdate) {
+    async execute(toolCallId, params, signal, onUpdate) {
       const scope = requireChainScope(params.scope ?? "project");
       if (scope === "project" && lifecycle.projectChainsPath === undefined) {
         throw new Error(
@@ -385,6 +394,7 @@ export function registerCodeMcpTools(
           inputSchema: params.inputSchema,
           outputSchema: params.outputSchema,
         },
+        toolCallId,
         signal,
       );
       const result = {
@@ -455,11 +465,11 @@ export function registerCodeMcpTools(
     promptSnippet: "List or explicitly manage saved MCP chains",
     promptGuidelines: [...MANAGE_CHAIN_PROMPT_GUIDELINES],
     parameters: ManageChainsParameters,
-    async execute(_toolCallId, params, signal, onUpdate) {
+    async execute(toolCallId, params, signal, onUpdate) {
       const action = params.action;
       let views: SavedChainView[];
       if (action === "list") {
-        views = await chains.list(signal);
+        views = await chains.list(toolCallId, signal);
       } else {
         if (params.confirmedByUser !== true) {
           throw new Error(`${action} requires confirmedByUser=true after explicit user approval`);
@@ -476,13 +486,13 @@ export function registerCodeMcpTools(
           details: undefined,
         });
         if (action === "enable" || action === "disable") {
-          await chains.setEnabled(params.name, scope, action === "enable", signal);
-          views = await chains.list(signal);
+          await chains.setEnabled(params.name, scope, action === "enable", toolCallId, signal);
+          views = await chains.list(toolCallId, signal);
         } else if (action === "revalidate") {
-          await chains.revalidate(params.name, scope, signal);
-          views = await chains.list(signal);
+          await chains.revalidate(params.name, scope, toolCallId, signal);
+          views = await chains.list(toolCallId, signal);
         } else {
-          views = await chains.delete(params.name, scope, signal);
+          views = await chains.delete(params.name, scope, toolCallId, signal);
         }
       }
       const result = {

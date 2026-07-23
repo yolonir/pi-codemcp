@@ -37,6 +37,7 @@ test("OAuth-capable calls outlive the interactive callback window", () => {
 });
 
 test("stdio client runs typed search/chains, forwards cancellation, and cleans up", async () => {
+  const traceId = "test:mcp-client";
   const temporary = await mkdtemp(join(tmpdir(), "pi-codemcp-ts-"));
   const workingDirectory = await realpath(temporary);
   const configPath = join(temporary, "mcp.json");
@@ -75,7 +76,7 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
   let upstreamPids: number[] = [];
   try {
     const [search, initialStatus] = await Promise.all([
-      client.call("search", { query: "save number", limit: 5 }),
+      client.call("search", { query: "save number", limit: 5, trace_id: traceId }),
       client.call("status", {}),
     ]);
     const matches = search.results as Array<{ name: string; signature: string; stub?: string }>;
@@ -83,7 +84,10 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     expect(matches[0]?.signature).toContain("BetaSaveNumberArgs");
     expect(matches[0]?.stub).toContain("BetaSaveNumberArgs");
     expect(search.prelude).toContain("JsonValue: TypeAlias");
-    const inspected = await client.call("inspect", { calls: ["beta.save_number"] });
+    const inspected = await client.call("inspect", {
+      calls: ["beta.save_number"],
+      trace_id: traceId,
+    });
     expect(inspected.prelude).toContain("JsonValue: TypeAlias");
     expect((inspected.results as Array<{ stub: string }>)[0]?.stub).toContain("BetaSaveNumberArgs");
     expect(initialStatus).toMatchObject({ connected: true, tool_count: 0 });
@@ -92,6 +96,7 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     ).toContain("version");
 
     const execution = await client.call("execute", {
+      trace_id: traceId,
       code: `
           number = await alpha.get_number({"seed": 9})
           saved = await beta.save_number({"value": number["value"]})
@@ -107,7 +112,7 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
 
     const stats = await client.call("stats", {});
     expect(stats).toMatchObject({
-      version: 1,
+      version: 2,
       operations: {
         search: { count: 1, success: 1 },
         inspect: { count: 1, success: 1 },
@@ -117,6 +122,7 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     expect(await readFile(alphaCwdPath, "utf8")).toBe(workingDirectory);
 
     const savedChain = await client.call("save_chain", {
+      trace_id: traceId,
       scope: "project",
       name: "increment",
       description: "Increment one input through the alpha MCP server.",
@@ -146,11 +152,13 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
       '"name": "increment"',
     );
     const nativeChain = await client.call("execute_chain", {
+      trace_id: traceId,
       name: "increment",
       arguments: { seed: 4 },
     });
     expect(nativeChain).toMatchObject({ ok: true, result: { value: 5 }, calls_made: 1 });
     const composedChain = await client.call("execute", {
+      trace_id: traceId,
       code: 'return await chains.increment({"seed": 7})',
     });
     expect(composedChain).toMatchObject({
@@ -161,6 +169,7 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     });
 
     const disabled = await client.call("set_chain_enabled", {
+      trace_id: traceId,
       name: "increment",
       scope: "project",
       enabled: false,
@@ -168,11 +177,13 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     expect(disabled).toMatchObject({ scope: "project", status: "disabled" });
     expect(
       await client.call("execute_chain", {
+        trace_id: traceId,
         name: "increment",
         arguments: { seed: 1 },
       }),
     ).toMatchObject({ ok: false, failure_stage: "preflight" });
     await client.call("set_chain_enabled", {
+      trace_id: traceId,
       name: "increment",
       scope: "project",
       enabled: true,
@@ -182,6 +193,7 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     const cancelled = client.call(
       "execute",
       {
+        trace_id: traceId,
         code: `return await alpha.slow_number({"delay_seconds": 5.0})`,
       },
       controller.signal,

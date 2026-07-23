@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import os
 import textwrap
 import time
+import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, cast
 
@@ -42,7 +44,7 @@ from .models import (
 )
 from .runtime_paths import resolve_runtime_paths
 from .settings import CodeMcpSettings, load_settings
-from .stats import StatsStore
+from .stats import OperationFailure, OperationObservation, StatsStore
 from .tool_catalog import ToolCatalog, schema_path_summary
 
 if TYPE_CHECKING:
@@ -171,24 +173,30 @@ class SaveChainHandler(Protocol):
         code: str,
         input_schema: JsonObject,
         output_schema: JsonObject,
+        trace_id: str,
     ) -> SaveChainResponse: ...
 
 
 class SavedChainHandlers(NamedTuple):
-    execute: Callable[[str, JsonObject], Awaitable[ExecutionResponse]]
+    execute: Callable[[str, JsonObject, str], Awaitable[ExecutionResponse]]
     save: SaveChainHandler
-    list: Callable[[], ChainListResponse]
-    set_enabled: Callable[[str, ChainScope, bool], Awaitable[ChainStatusView]]
-    revalidate: Callable[[str, ChainScope], Awaitable[ChainStatusView]]
-    delete: Callable[[str, ChainScope], Awaitable[ChainListResponse]]
+    list: Callable[[str], ChainListResponse]
+    set_enabled: Callable[[str, ChainScope, bool, str], Awaitable[ChainStatusView]]
+    revalidate: Callable[[str, ChainScope, str], Awaitable[ChainStatusView]]
+    delete: Callable[[str, ChainScope, str], Awaitable[ChainListResponse]]
 
 
 class SavedChainRuntime:
     def __init__(self, handlers: SavedChainHandlers) -> None:
         self.handlers = handlers
 
-    async def execute(self, name: str, arguments: JsonObject) -> ExecutionResponse:
-        return await self.handlers.execute(name, arguments)
+    async def execute(
+        self,
+        name: str,
+        arguments: JsonObject,
+        trace_id: str,
+    ) -> ExecutionResponse:
+        return await self.handlers.execute(name, arguments, trace_id)
 
     async def save(
         self,
@@ -199,6 +207,7 @@ class SavedChainRuntime:
         code: str,
         input_schema: JsonObject,
         output_schema: JsonObject,
+        trace_id: str,
     ) -> SaveChainResponse:
         return await self.handlers.save(
             scope=scope,
@@ -207,24 +216,36 @@ class SavedChainRuntime:
             code=code,
             input_schema=input_schema,
             output_schema=output_schema,
+            trace_id=trace_id,
         )
 
-    def list(self) -> ChainListResponse:
-        return self.handlers.list()
+    def list(self, trace_id: str) -> ChainListResponse:
+        return self.handlers.list(trace_id)
 
     async def set_enabled(
         self,
         name: str,
         scope: ChainScope,
         enabled: bool,
+        trace_id: str,
     ) -> ChainStatusView:
-        return await self.handlers.set_enabled(name, scope, enabled)
+        return await self.handlers.set_enabled(name, scope, enabled, trace_id)
 
-    async def revalidate(self, name: str, scope: ChainScope) -> ChainStatusView:
-        return await self.handlers.revalidate(name, scope)
+    async def revalidate(
+        self,
+        name: str,
+        scope: ChainScope,
+        trace_id: str,
+    ) -> ChainStatusView:
+        return await self.handlers.revalidate(name, scope, trace_id)
 
-    async def delete(self, name: str, scope: ChainScope) -> ChainListResponse:
-        return await self.handlers.delete(name, scope)
+    async def delete(
+        self,
+        name: str,
+        scope: ChainScope,
+        trace_id: str,
+    ) -> ChainListResponse:
+        return await self.handlers.delete(name, scope, trace_id)
 
 
 class GatewayRuntime:
@@ -248,7 +269,10 @@ class GatewayRuntime:
         self.chain_store = chain_store
         self.catalog = catalog
         self.executor = executor
-        self.stats_store = StatsStore(settings_path.parent / "stats.json")
+        self.stats_store = StatsStore(
+            settings_path.parent / "stats.sqlite3",
+            package_version=os.environ.get("PI_CODEMCP_PACKAGE_VERSION", "unknown"),
+        )
         for handle in handles.values():
             self.stats_store.record_cache(hit=handle.tools is not None)
         self.chains = SavedChainRuntime(
@@ -329,6 +353,8 @@ class GatewayRuntime:
         detail: SearchDetail = "signatures",
         mode: SearchMode = "search",
         cursor: int = 0,
+        *,
+        trace_id: str,
     ) -> SearchResponse:
         started = time.perf_counter()
         input_bytes = len(
@@ -346,18 +372,26 @@ class GatewayRuntime:
         except BaseException:
             self.stats_store.record_operation(
                 "search",
-                duration_ms=_elapsed_ms(started),
-                success=False,
-                failure_stage="error",
-                input_bytes=input_bytes,
+                OperationObservation(
+                    duration_ms=_elapsed_ms(started),
+                    success=False,
+                    input_bytes=input_bytes,
+                    failure=OperationFailure(
+                        stage="error",
+                        subtype="search_error",
+                        trace_id=trace_id,
+                    ),
+                ),
             )
             raise
         self.stats_store.record_operation(
             "search",
-            duration_ms=_elapsed_ms(started),
-            success=True,
-            input_bytes=input_bytes,
-            output_bytes=len(to_json(response.model_dump(mode="json"))),
+            OperationObservation(
+                duration_ms=_elapsed_ms(started),
+                success=True,
+                input_bytes=input_bytes,
+                output_bytes=len(to_json(response.model_dump(mode="json"))),
+            ),
         )
         return response
 
@@ -450,25 +484,37 @@ class GatewayRuntime:
             results=results,
         )
 
-    async def inspect(self, calls: list[str]) -> InspectResponse:
+    async def inspect(
+        self,
+        calls: list[str],
+        trace_id: str,
+    ) -> InspectResponse:
         started = time.perf_counter()
         try:
             response = await self._inspect_impl(calls)
         except BaseException:
             self.stats_store.record_operation(
                 "inspect",
-                duration_ms=_elapsed_ms(started),
-                success=False,
-                failure_stage="error",
-                input_bytes=len(to_json(calls)),
+                OperationObservation(
+                    duration_ms=_elapsed_ms(started),
+                    success=False,
+                    input_bytes=len(to_json(calls)),
+                    failure=OperationFailure(
+                        stage="error",
+                        subtype="inspect_error",
+                        trace_id=trace_id,
+                    ),
+                ),
             )
             raise
         self.stats_store.record_operation(
             "inspect",
-            duration_ms=_elapsed_ms(started),
-            success=True,
-            input_bytes=len(to_json(calls)),
-            output_bytes=len(to_json(response.model_dump(mode="json"))),
+            OperationObservation(
+                duration_ms=_elapsed_ms(started),
+                success=True,
+                input_bytes=len(to_json(calls)),
+                output_bytes=len(to_json(response.model_dump(mode="json"))),
+            ),
         )
         return response
 
@@ -521,7 +567,11 @@ class GatewayRuntime:
             result_limit_bytes=settings.result_byte_limit,
         )
 
-    async def execute(self, code: str) -> ExecutionResponse:
+    async def execute(
+        self,
+        code: str,
+        trace_id: str,
+    ) -> ExecutionResponse:
         started = time.perf_counter()
         input_bytes = len(code.encode())
         discovery_started = time.perf_counter()
@@ -534,6 +584,8 @@ class GatewayRuntime:
                 started,
                 input_bytes,
                 failure_stage="discovery",
+                failure_subtype="discovery",
+                trace_id=trace_id,
             )
             raise
         self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
@@ -541,19 +593,25 @@ class GatewayRuntime:
         try:
             response = await self.executor.execute_graph(code, self._dispatch)
         except BaseException as error:
+            cancelled = isinstance(error, asyncio.CancelledError)
             self._record_operation_exception(
                 "execute",
                 started,
                 input_bytes,
-                failure_stage=(
-                    "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
-                ),
+                failure_stage="cancelled" if cancelled else "error",
+                failure_subtype="cancelled" if cancelled else "internal_error",
+                trace_id=trace_id,
             )
             raise
-        self._record_execution("execute", started, input_bytes, response)
+        self._record_execution("execute", started, input_bytes, response, trace_id)
         return response
 
-    async def _execute_chain(self, name: str, arguments: JsonObject) -> ExecutionResponse:
+    async def _execute_chain(
+        self,
+        name: str,
+        arguments: JsonObject,
+        trace_id: str,
+    ) -> ExecutionResponse:
         started = time.perf_counter()
         input_bytes = len(to_json(arguments))
         try:
@@ -564,6 +622,8 @@ class GatewayRuntime:
                 started,
                 input_bytes,
                 failure_stage="preflight",
+                failure_subtype="saved_chain_lookup",
+                trace_id=trace_id,
             )
             raise
         if not chain.enabled:
@@ -577,6 +637,7 @@ class GatewayRuntime:
                 started,
                 input_bytes,
                 response,
+                trace_id,
             )
             return response
         discovery_started = time.perf_counter()
@@ -589,6 +650,8 @@ class GatewayRuntime:
                 started,
                 input_bytes,
                 failure_stage="discovery",
+                failure_subtype="discovery",
+                trace_id=trace_id,
             )
             raise
         self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
@@ -596,13 +659,14 @@ class GatewayRuntime:
         try:
             response = await self.executor.execute_saved_chain(chain, arguments, self._dispatch)
         except BaseException as error:
+            cancelled = isinstance(error, asyncio.CancelledError)
             self._record_operation_exception(
                 "execute_chain",
                 started,
                 input_bytes,
-                failure_stage=(
-                    "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
-                ),
+                failure_stage="cancelled" if cancelled else "error",
+                failure_subtype="cancelled" if cancelled else "internal_error",
+                trace_id=trace_id,
             )
             raise
         self._record_execution(
@@ -610,6 +674,7 @@ class GatewayRuntime:
             started,
             input_bytes,
             response,
+            trace_id,
         )
         return response
 
@@ -620,13 +685,21 @@ class GatewayRuntime:
         input_bytes: int,
         *,
         failure_stage: str,
+        failure_subtype: str,
+        trace_id: str,
     ) -> None:
         self.stats_store.record_operation(
             operation,
-            duration_ms=_elapsed_ms(started),
-            success=False,
-            failure_stage=failure_stage,
-            input_bytes=input_bytes,
+            OperationObservation(
+                duration_ms=_elapsed_ms(started),
+                success=False,
+                input_bytes=input_bytes,
+                failure=OperationFailure(
+                    stage=failure_stage,
+                    subtype=failure_subtype,
+                    trace_id=trace_id,
+                ),
+            ),
         )
 
     def _record_execution(
@@ -635,16 +708,28 @@ class GatewayRuntime:
         started: float,
         input_bytes: int,
         response: ExecutionResponse,
+        trace_id: str,
     ) -> None:
+        failure = (
+            OperationFailure(
+                stage=response.failure_stage or "error",
+                subtype=_execution_failure_subtype(response),
+                trace_id=trace_id,
+            )
+            if not response.ok
+            else None
+        )
         self.stats_store.record_operation(
             operation,
-            duration_ms=_elapsed_ms(started),
-            success=response.ok,
-            failure_stage=response.failure_stage,
-            input_bytes=input_bytes,
-            output_bytes=response.metrics.result_bytes,
-            calls=response.calls_made,
-            chain_calls=response.chain_calls,
+            OperationObservation(
+                duration_ms=_elapsed_ms(started),
+                success=response.ok,
+                input_bytes=input_bytes,
+                output_bytes=response.metrics.result_bytes,
+                calls=response.calls_made,
+                chain_calls=response.chain_calls,
+                failure=failure,
+            ),
         )
         metrics = response.metrics
         for phase, duration in (
@@ -664,6 +749,7 @@ class GatewayRuntime:
         code: str,
         input_schema: JsonObject,
         output_schema: JsonObject,
+        trace_id: str,
     ) -> SaveChainResponse:
         started = time.perf_counter()
         input_bytes = len(
@@ -688,18 +774,26 @@ class GatewayRuntime:
         except BaseException:
             self.stats_store.record_operation(
                 "save_chain",
-                duration_ms=_elapsed_ms(started),
-                success=False,
-                failure_stage="validation",
-                input_bytes=input_bytes,
+                OperationObservation(
+                    duration_ms=_elapsed_ms(started),
+                    success=False,
+                    input_bytes=input_bytes,
+                    failure=OperationFailure(
+                        stage="validation",
+                        subtype="saved_chain_validation",
+                        trace_id=trace_id,
+                    ),
+                ),
             )
             raise
         self.stats_store.record_operation(
             "save_chain",
-            duration_ms=_elapsed_ms(started),
-            success=True,
-            input_bytes=input_bytes,
-            output_bytes=len(to_json(response.model_dump(mode="json"))),
+            OperationObservation(
+                duration_ms=_elapsed_ms(started),
+                success=True,
+                input_bytes=input_bytes,
+                output_bytes=len(to_json(response.model_dump(mode="json"))),
+            ),
         )
         return response
 
@@ -768,14 +862,31 @@ class GatewayRuntime:
             created=previous is None,
         )
 
-    def _list_chains(self) -> ChainListResponse:
+    def _list_chains(self, trace_id: str) -> ChainListResponse:
         started = time.perf_counter()
-        response = ChainListResponse(chains=self._chain_views())
+        try:
+            response = ChainListResponse(chains=self._chain_views())
+        except BaseException:
+            self.stats_store.record_operation(
+                "list_chains",
+                OperationObservation(
+                    duration_ms=_elapsed_ms(started),
+                    success=False,
+                    failure=OperationFailure(
+                        stage="error",
+                        subtype="saved_chain_list",
+                        trace_id=trace_id,
+                    ),
+                ),
+            )
+            raise
         self.stats_store.record_operation(
             "list_chains",
-            duration_ms=_elapsed_ms(started),
-            success=True,
-            output_bytes=len(to_json(response.model_dump(mode="json"))),
+            OperationObservation(
+                duration_ms=_elapsed_ms(started),
+                success=True,
+                output_bytes=len(to_json(response.model_dump(mode="json"))),
+            ),
         )
         return response
 
@@ -784,6 +895,7 @@ class GatewayRuntime:
         name: str,
         scope: ChainScope,
         enabled: bool,
+        trace_id: str,
     ) -> ChainStatusView:
         started = time.perf_counter()
         try:
@@ -793,36 +905,57 @@ class GatewayRuntime:
         except BaseException:
             self.stats_store.record_operation(
                 "set_chain_enabled",
-                duration_ms=_elapsed_ms(started),
-                success=False,
-                failure_stage="error",
+                OperationObservation(
+                    duration_ms=_elapsed_ms(started),
+                    success=False,
+                    failure=OperationFailure(
+                        stage="error",
+                        subtype="saved_chain_update",
+                        trace_id=trace_id,
+                    ),
+                ),
             )
             raise
         self.stats_store.record_operation(
             "set_chain_enabled",
-            duration_ms=_elapsed_ms(started),
-            success=True,
-            output_bytes=len(to_json(response.model_dump(mode="json"))),
+            OperationObservation(
+                duration_ms=_elapsed_ms(started),
+                success=True,
+                output_bytes=len(to_json(response.model_dump(mode="json"))),
+            ),
         )
         return response
 
-    async def _revalidate_chain(self, name: str, scope: ChainScope) -> ChainStatusView:
+    async def _revalidate_chain(
+        self,
+        name: str,
+        scope: ChainScope,
+        trace_id: str,
+    ) -> ChainStatusView:
         started = time.perf_counter()
         try:
             response = await self._revalidate_chain_impl(name, scope)
         except BaseException:
             self.stats_store.record_operation(
                 "revalidate_chain",
-                duration_ms=_elapsed_ms(started),
-                success=False,
-                failure_stage="validation",
+                OperationObservation(
+                    duration_ms=_elapsed_ms(started),
+                    success=False,
+                    failure=OperationFailure(
+                        stage="validation",
+                        subtype="saved_chain_validation",
+                        trace_id=trace_id,
+                    ),
+                ),
             )
             raise
         self.stats_store.record_operation(
             "revalidate_chain",
-            duration_ms=_elapsed_ms(started),
-            success=True,
-            output_bytes=len(to_json(response.model_dump(mode="json"))),
+            OperationObservation(
+                duration_ms=_elapsed_ms(started),
+                success=True,
+                output_bytes=len(to_json(response.model_dump(mode="json"))),
+            ),
         )
         return response
 
@@ -864,27 +997,45 @@ class GatewayRuntime:
         await self._rebuild_catalog()
         return self._chain_view(name, scope)
 
-    async def _delete_chain(self, name: str, scope: ChainScope) -> ChainListResponse:
+    async def _delete_chain(
+        self,
+        name: str,
+        scope: ChainScope,
+        trace_id: str,
+    ) -> ChainListResponse:
         started = time.perf_counter()
         try:
-            response = await self._delete_chain_impl(name, scope)
+            response = await self._delete_chain_impl(name, scope, trace_id)
         except BaseException:
             self.stats_store.record_operation(
                 "delete_chain",
-                duration_ms=_elapsed_ms(started),
-                success=False,
-                failure_stage="error",
+                OperationObservation(
+                    duration_ms=_elapsed_ms(started),
+                    success=False,
+                    failure=OperationFailure(
+                        stage="error",
+                        subtype="saved_chain_delete",
+                        trace_id=trace_id,
+                    ),
+                ),
             )
             raise
         self.stats_store.record_operation(
             "delete_chain",
-            duration_ms=_elapsed_ms(started),
-            success=True,
-            output_bytes=len(to_json(response.model_dump(mode="json"))),
+            OperationObservation(
+                duration_ms=_elapsed_ms(started),
+                success=True,
+                output_bytes=len(to_json(response.model_dump(mode="json"))),
+            ),
         )
         return response
 
-    async def _delete_chain_impl(self, name: str, scope: ChainScope) -> ChainListResponse:
+    async def _delete_chain_impl(
+        self,
+        name: str,
+        scope: ChainScope,
+        trace_id: str,
+    ) -> ChainListResponse:
         effective = self.chain_store.get(name)
         called_by = self._called_by().get(name, []) if effective.scope == scope else []
         if called_by:
@@ -893,7 +1044,7 @@ class GatewayRuntime:
             )
         self.chain_store.delete(scope, name)
         await self._rebuild_catalog()
-        return self._list_chains()
+        return self._list_chains(trace_id)
 
     async def _dispatch(
         self,
@@ -1213,6 +1364,32 @@ def _elapsed_ms(started: float) -> float:
     return (time.perf_counter() - started) * 1_000
 
 
+def new_trace_id(source: str) -> str:
+    return f"{source}:{uuid.uuid4()}"
+
+
+def _execution_failure_subtype(response: ExecutionResponse) -> str:
+    stage = response.failure_stage or "error"
+    error = response.error or ""
+    if stage == "preflight":
+        return "preflight_typecheck"
+    if stage == "result" and error.startswith("Returned value is "):
+        return "result_too_large"
+    if stage == "result":
+        return "result_validation"
+    if stage == "timeout":
+        return "upstream_timeout"
+    if stage == "cancelled":
+        return "cancelled"
+    if "Connection closed" in error:
+        return "upstream_transport"
+    if error.startswith("ValueError: inspect_json"):
+        return "sandbox_contract"
+    if stage == "runtime":
+        return "upstream_runtime"
+    return "internal_error"
+
+
 def _discovery_error_message(error: Exception) -> str:
     return str(error).strip() or type(error).__name__
 
@@ -1293,6 +1470,8 @@ mcp = FastMCP(
 
 @mcp.tool
 async def search(
+    trace_id: str,
+    *,
     query: str | None = None,
     limit: int = 5,
     server: str | None = None,
@@ -1301,13 +1480,21 @@ async def search(
     cursor: int = 0,
 ) -> SearchResponse:
     """Search or page through configured upstream MCP tools and saved chains."""
-    return await _require_runtime().search(query, limit, server, detail, mode, cursor)
+    return await _require_runtime().search(
+        query,
+        limit,
+        server,
+        detail,
+        mode,
+        cursor,
+        trace_id=trace_id,
+    )
 
 
 @mcp.tool
-async def inspect(calls: list[str]) -> InspectResponse:
+async def inspect(trace_id: str, calls: list[str]) -> InspectResponse:
     """Return exact typed SDK stubs for selected call identifiers."""
-    return await _require_runtime().inspect(calls)
+    return await _require_runtime().inspect(calls, trace_id)
 
 
 @mcp.tool
@@ -1324,22 +1511,25 @@ async def reload_settings() -> StatusResponse:
 
 @mcp.tool
 async def set_chain_enabled(
+    trace_id: str,
     name: str,
     scope: ChainScope,
     enabled: bool,
 ) -> ChainStatusView:
     """Enable or disable one saved chain in its storage scope."""
-    return await _require_runtime().chains.set_enabled(name, scope, enabled)
+    return await _require_runtime().chains.set_enabled(name, scope, enabled, trace_id)
 
 
 @mcp.tool
-async def execute(code: str) -> ExecutionResponse:
+async def execute(trace_id: str, code: str) -> ExecutionResponse:
     """Type-check and run one sandboxed Python MCP SDK chain."""
-    return await _require_runtime().execute(code)
+    return await _require_runtime().execute(code, trace_id)
 
 
 @mcp.tool
 async def save_chain(
+    trace_id: str,
+    *,
     name: str,
     description: str,
     code: str,
@@ -1355,38 +1545,51 @@ async def save_chain(
         code=code,
         input_schema=json_types.JSON_OBJECT_ADAPTER.validate_python(input_schema),
         output_schema=json_types.JSON_OBJECT_ADAPTER.validate_python(output_schema),
+        trace_id=trace_id,
     )
 
 
 @mcp.tool
-def list_chains() -> ChainListResponse:
+def list_chains(trace_id: str) -> ChainListResponse:
     """List saved chains and their dependency state."""
-    return _require_runtime().chains.list()
+    return _require_runtime().chains.list(trace_id)
 
 
 @mcp.tool
-async def execute_chain(name: str, arguments: JsonObject) -> ExecutionResponse:
+async def execute_chain(
+    trace_id: str,
+    name: str,
+    arguments: JsonObject,
+) -> ExecutionResponse:
     """Execute one saved chain through its typed input contract."""
     validated_arguments = json_types.JSON_OBJECT_ADAPTER.validate_python(arguments)
-    return await _require_runtime().chains.execute(name, validated_arguments)
+    return await _require_runtime().chains.execute(name, validated_arguments, trace_id)
 
 
 @mcp.tool
-async def revalidate_chain(name: str, scope: ChainScope) -> ChainStatusView:
+async def revalidate_chain(
+    trace_id: str,
+    name: str,
+    scope: ChainScope,
+) -> ChainStatusView:
     """Revalidate one scoped saved chain against the current callable catalog."""
-    return await _require_runtime().chains.revalidate(name, scope)
+    return await _require_runtime().chains.revalidate(name, scope, trace_id)
 
 
 @mcp.tool
-async def delete_chain(name: str, scope: ChainScope) -> ChainListResponse:
+async def delete_chain(
+    trace_id: str,
+    name: str,
+    scope: ChainScope,
+) -> ChainListResponse:
     """Delete an unused saved chain from its storage scope."""
-    return await _require_runtime().chains.delete(name, scope)
+    return await _require_runtime().chains.delete(name, scope, trace_id)
 
 
 @mcp.tool
-def stats() -> JsonObject:
+async def stats() -> JsonObject:
     """Return bounded local CodeMCP telemetry rollups."""
-    return _require_runtime().stats_store.snapshot()
+    return await _require_runtime().stats_store.snapshot()
 
 
 @mcp.tool

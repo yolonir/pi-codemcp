@@ -134,6 +134,7 @@ test("stats parser converts bounded rollups for the modal", () => {
           ],
         },
       },
+      outcomes: { success: 4, upstream_failure: 1 },
       failures: { runtime: 2 },
       servers: { grafana: { output_bytes: 500 } },
       tools: { "grafana.query": {} },
@@ -155,6 +156,10 @@ test("stats parser converts bounded rollups for the modal", () => {
     recent: { count: 2, success: 2 },
     operations: [{ name: "execute", rollup: { count: 5 } }],
     phases: [{ name: "typecheck", count: 5, averageMs: 4, p50Ms: 5, p95Ms: 10, maxMs: 9 }],
+    outcomes: [
+      { name: "success", count: 4 },
+      { name: "upstream_failure", count: 1 },
+    ],
     failures: [{ stage: "runtime", count: 2 }],
     upstreamOutputBytes: 500,
     cacheHits: 3,
@@ -253,6 +258,7 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
       phases: {
         typecheck: { count: 5, average: 4, max: 9, buckets: [{ le: 5, count: 5 }] },
       },
+      outcomes: { success: 4, upstream_failure: 1 },
       failures: { runtime: 1 },
       servers: { grafana: { output_bytes: 500 } },
       cache: { hits: 3, misses: 1 },
@@ -411,6 +417,7 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   expect(statsLines).toContain("LOCAL TELEMETRY");
   expect(statsLines).toContain("execute");
   expect(statsLines).toContain("Withheld");
+  expect(statsLines).toContain("upstream_failure");
   expect(statsLines).toContain("runtime");
   expect(statsLines).toContain("typecheck");
   expect(statsLines).toContain("100,000 runs");

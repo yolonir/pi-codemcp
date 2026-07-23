@@ -99,6 +99,7 @@ export class SidecarClient {
       ...definedProcessEnvironment(),
       ...(options.environment ?? {}),
       PI_CODEMCP_AGENT_DIR: this.agentDir,
+      PI_CODEMCP_PACKAGE_VERSION: this.packageVersion,
       ...(this.projectChainsDirectory === undefined
         ? {}
         : { PI_CODEMCP_PROJECT_CHAINS_DIR: this.projectChainsDirectory }),

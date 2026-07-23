@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type ExtensionAPI, highlightCode, type Theme } from "@earendil-works/pi-coding-agent";
@@ -67,6 +68,10 @@ interface LoadedChains {
 
 const CHAIN_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 
+export function newCodeMcpTraceId(source: string): string {
+  return `${source}:${randomUUID()}`;
+}
+
 export class SavedChainManager {
   readonly startupErrors: string[] = [];
   private readonly manifests = new Map<string, ScopedSavedChain>();
@@ -94,7 +99,11 @@ export class SavedChainManager {
     }
   }
 
-  async save(input: SaveChainInput, signal?: AbortSignal): Promise<SavedChainView> {
+  async save(
+    input: SaveChainInput,
+    traceId: string,
+    signal?: AbortSignal,
+  ): Promise<SavedChainView> {
     assertChainName(input.name);
     this.assertToolNameAvailable(input.name);
     const result = await this.lifecycle.request(
@@ -106,6 +115,7 @@ export class SavedChainManager {
         code: input.code,
         input_schema: input.inputSchema,
         output_schema: input.outputSchema,
+        trace_id: traceId,
       },
       signal,
     );
@@ -116,8 +126,8 @@ export class SavedChainManager {
     return view;
   }
 
-  async list(signal?: AbortSignal): Promise<SavedChainView[]> {
-    const result = await this.lifecycle.request("list_chains", {}, signal);
+  async list(traceId: string, signal?: AbortSignal): Promise<SavedChainView[]> {
+    const result = await this.lifecycle.request("list_chains", { trace_id: traceId }, signal);
     const views = parseViewList(result.chains, "list_chains.chains");
     this.synchronizeViews(views);
     return views;
@@ -127,11 +137,12 @@ export class SavedChainManager {
     name: string,
     scope: ChainScope,
     enabled: boolean,
+    traceId: string,
     signal?: AbortSignal,
   ): Promise<SavedChainView> {
     const result = await this.lifecycle.request(
       "set_chain_enabled",
-      { name, scope, enabled },
+      { name, scope, enabled, trace_id: traceId },
       signal,
     );
     const view = parseSavedChainView(result, "set_chain_enabled");
@@ -140,16 +151,34 @@ export class SavedChainManager {
     return view;
   }
 
-  async revalidate(name: string, scope: ChainScope, signal?: AbortSignal): Promise<SavedChainView> {
-    const result = await this.lifecycle.request("revalidate_chain", { name, scope }, signal);
+  async revalidate(
+    name: string,
+    scope: ChainScope,
+    traceId: string,
+    signal?: AbortSignal,
+  ): Promise<SavedChainView> {
+    const result = await this.lifecycle.request(
+      "revalidate_chain",
+      { name, scope, trace_id: traceId },
+      signal,
+    );
     const view = parseSavedChainView(result, "revalidate_chain");
     this.upsertView(view);
     this.refreshNativeTools();
     return view;
   }
 
-  async delete(name: string, scope: ChainScope, signal?: AbortSignal): Promise<SavedChainView[]> {
-    const result = await this.lifecycle.request("delete_chain", { name, scope }, signal);
+  async delete(
+    name: string,
+    scope: ChainScope,
+    traceId: string,
+    signal?: AbortSignal,
+  ): Promise<SavedChainView[]> {
+    const result = await this.lifecycle.request(
+      "delete_chain",
+      { name, scope, trace_id: traceId },
+      signal,
+    );
     const views = parseViewList(result.chains, "delete_chain.chains");
     this.synchronizeViews(views);
     return views;
@@ -163,7 +192,7 @@ export class SavedChainManager {
       label: chain.name,
       description: chain.description,
       parameters: chain.inputSchema,
-      async execute(_toolCallId, params, signal, onUpdate) {
+      async execute(toolCallId, params, signal, onUpdate) {
         onUpdate?.({
           content: [{ type: "text", text: `Running saved MCP chain ${chain.name}...` }],
           details: undefined,
@@ -171,7 +200,7 @@ export class SavedChainManager {
         const arguments_ = requireRecord(params, `${chain.name} arguments`);
         const result = await manager.lifecycle.request(
           "execute_chain",
-          { name: chain.name, arguments: arguments_ },
+          { name: chain.name, arguments: arguments_, trace_id: toolCallId },
           signal,
         );
         if (result.ok !== true) {

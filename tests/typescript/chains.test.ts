@@ -165,34 +165,37 @@ test("saved manifests defer runtime actions and new saves activate immediately",
     expect(compact).not.toContain('"ok"');
     expect(requests[0]).toEqual({
       name: "execute_chain",
-      args: { name: "echo_value", arguments: { value: 4 } },
+      args: { name: "echo_value", arguments: { value: 4 }, trace_id: "call-1" },
     });
 
-    await manager.delete("echo_value", "project");
+    await manager.delete("echo_value", "project", "delete-trace");
     expect(tools.find((tool) => tool.name === "mcp_chain_echo_value")?.description).toBe(
       "Run echo_value",
     );
     expect(active).toContain("mcp_chain_echo_value");
 
-    const saved = await manager.save({
-      scope: "project",
-      name: "new_chain",
-      description: "Run new_chain",
-      code: 'return {"value": input["value"]}',
-      inputSchema: {
-        type: "object",
-        properties: { value: { type: "integer" } },
+    const saved = await manager.save(
+      {
+        scope: "project",
+        name: "new_chain",
+        description: "Run new_chain",
+        code: 'return {"value": input["value"]}',
+        inputSchema: {
+          type: "object",
+          properties: { value: { type: "integer" } },
+        },
+        outputSchema: {
+          type: "object",
+          properties: { value: { type: "integer" } },
+        },
       },
-      outputSchema: {
-        type: "object",
-        properties: { value: { type: "integer" } },
-      },
-    });
+      "save-trace",
+    );
     expect(saved.chain.name).toBe("new_chain");
     expect(tools.map((tool) => tool.name)).toEqual(["mcp_chain_echo_value", "mcp_chain_new_chain"]);
     expect(active).toContain("mcp_chain_new_chain");
 
-    const disabled = await manager.setEnabled("new_chain", "project", false);
+    const disabled = await manager.setEnabled("new_chain", "project", false, "disable-trace");
     expect(disabled.status).toBe("disabled");
     expect(active).not.toContain("mcp_chain_new_chain");
   } finally {
