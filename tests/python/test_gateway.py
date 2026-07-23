@@ -505,6 +505,58 @@ async def test_execute_telemetry_records_discovery_failures(
 
 
 @pytest.mark.asyncio
+async def test_execute_consumes_result_reference_and_rejects_foreign_reference(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(json.dumps({"mcpServers": {}}))
+    runtime = gateway.GatewayRuntime.create(
+        config_path,
+        tmp_path / "oauth",
+        tmp_path / "catalog",
+    )
+
+    try:
+        runtime.executor.settings.result_byte_limit = 1_024
+        oversized = await runtime.execute(
+            'return {"payload": "x" * 2_000}',
+            TRACE_ID,
+        )
+        assert oversized.ok is False
+        assert oversized.failure_stage == "result"
+        assert oversized.result_ref is not None
+        assert oversized.expires_in_seconds == 300
+        response = await runtime.execute(
+            """
+            root = expect_object(input)
+            payload = expect_string(root.get("payload"))
+            return {"characters": len(payload)}
+            """,
+            TRACE_ID,
+            oversized.result_ref,
+        )
+        assert response.ok is True
+        assert response.result == {"characters": 2_000}
+        assert response.calls_made == 0
+
+        foreign = await runtime.execute(
+            "return input",
+            TRACE_ID,
+            "result_another_sidecar_reference",
+        )
+        assert foreign.ok is False
+        assert foreign.failure_stage == "preflight"
+        assert foreign.failure is not None
+        assert foreign.failure.kind == "result_reference"
+        assert foreign.failure.retryable is False
+        assert "another sidecar" in foreign.failure.message
+        assert foreign.calls_made == 0
+    finally:
+        await runtime.close()
+    assert runtime.refinement_cache.entry_count == 0
+
+
+@pytest.mark.asyncio
 async def test_first_execute_discovers_and_connects_only_referenced_server(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -34,7 +34,8 @@ test("agent prompt policy is lean, decision-based, and non-contradictory", () =>
   expect(new Set(allGuidelines).size).toBe(allGuidelines.length);
   expect(rendered).toContain("deterministically");
   expect(rendered).toContain("approval");
-  expect(rendered).toContain("smallest result");
+  expect(rendered).toContain("smallest answer");
+  expect(rendered).toContain("inputRef instead of repeating upstream calls");
   expect(rendered).toContain("do not return raw payloads");
   expect(rendered).toContain("prebound globals");
   expect(rendered).toContain("must not be imported");

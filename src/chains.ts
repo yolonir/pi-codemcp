@@ -212,6 +212,8 @@ export class SavedChainManager {
                   ? result.error
                   : `Saved chain ${chain.name} failed`,
               failure: result.failure,
+              result_ref: result.result_ref,
+              expires_in_seconds: result.expires_in_seconds,
               calls_made: result.calls_made,
               chain_calls: result.chain_calls,
             }),

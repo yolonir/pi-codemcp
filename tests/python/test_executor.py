@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from sidecar.executor import ExecutionResponse, ExecutionSettings, MontyExecutor
 from sidecar.json_types import JsonObject, JsonValue
+from sidecar.refinement_cache import RefinementCache
 from sidecar.tool_catalog import ToolCatalog
 
 
@@ -288,6 +289,85 @@ async def test_oversized_result_fails_with_shape_without_retry() -> None:
     assert isinstance(panels, list)
     assert isinstance(panels[0], str) and panels[0].endswith("…")
     assert len(response.model_dump_json().encode()) < 1_024
+    assert response.calls_made == calls == 1
+
+
+@pytest.mark.asyncio
+async def test_oversized_result_reference_refines_without_repeating_calls() -> None:
+    calls = 0
+    cache = RefinementCache(
+        entry_byte_limit=10_000,
+        total_byte_limit=20_000,
+    )
+
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        nonlocal calls
+        calls += 1
+        return {"summary": {"title": "large"}, "panels": ["x" * 2_000]}
+
+    executor = MontyExecutor(
+        catalog(),
+        settings=ExecutionSettings(result_byte_limit=1_024),
+    )
+    oversized = await executor.execute(
+        "return await alpha.dynamic({})",
+        call,
+        retain_result=cache.retain,
+    )
+
+    assert oversized.ok is False
+    assert oversized.failure_stage == "result"
+    assert oversized.result is None
+    assert oversized.result_ref is not None
+    assert oversized.expires_in_seconds == 300
+    assert "x" * 2_000 not in oversized.model_dump_json()
+    assert len(oversized.model_dump_json().encode()) < 1_024
+    assert oversized.calls_made == calls == 1
+
+    retained = cache.resolve(oversized.result_ref)
+    refined = await executor.execute(
+        """
+        root = expect_object(input)
+        summary = expect_object(root.get("summary"))
+        panels = expect_list(root.get("panels"))
+        return {"title": expect_string(summary.get("title")), "panel_count": len(panels)}
+        """,
+        call,
+        input_value=retained,
+        retain_result=cache.retain,
+    )
+
+    assert refined.ok is True
+    assert refined.result == {"title": "large", "panel_count": 1}
+    assert refined.calls_made == 0
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_value_above_refinement_ceiling_remains_shape_only() -> None:
+    calls = 0
+    cache = RefinementCache(entry_byte_limit=1_500, total_byte_limit=3_000)
+
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        nonlocal calls
+        calls += 1
+        return {"payload": "x" * 2_000}
+
+    response = await MontyExecutor(
+        catalog(),
+        settings=ExecutionSettings(result_byte_limit=1_024),
+    ).execute(
+        "return await alpha.dynamic({})",
+        call,
+        retain_result=cache.retain,
+    )
+
+    assert response.ok is False
+    assert response.failure_stage == "result"
+    assert response.result_ref is None
+    assert response.expires_in_seconds is None
+    assert response.shape is not None
+    assert cache.entry_count == 0
     assert response.calls_made == calls == 1
 
 

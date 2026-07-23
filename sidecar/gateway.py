@@ -48,6 +48,7 @@ from .models import (
     UpstreamStatus,
     UpstreamToolStatus,
 )
+from .refinement_cache import RefinementCache, ResultReferenceError
 from .runtime_paths import resolve_runtime_paths
 from .settings import CodeMcpSettings, load_settings
 from .stats import OperationFailure, OperationObservation, StatsStore
@@ -288,6 +289,7 @@ class GatewayRuntime:
         self.chain_store = chain_store
         self.catalog = catalog
         self.executor = executor
+        self.refinement_cache = RefinementCache()
         self.stats_store = StatsStore(
             settings_path.parent / "stats.sqlite3",
             package_version=os.environ.get("PI_CODEMCP_PACKAGE_VERSION", "unknown"),
@@ -358,6 +360,7 @@ class GatewayRuntime:
         )
 
     async def close(self) -> None:
+        self.refinement_cache.clear()
         await asyncio.gather(
             *(handle.close() for handle in self.handles.values()),
             return_exceptions=True,
@@ -590,9 +593,33 @@ class GatewayRuntime:
         self,
         code: str,
         trace_id: str,
+        input_ref: str | None = None,
     ) -> ExecutionResponse:
         started = time.perf_counter()
-        input_bytes = len(code.encode())
+        input_bytes = len(code.encode()) + len((input_ref or "").encode())
+        input_value: JsonValue = None
+        if input_ref is not None:
+            try:
+                input_value = self.refinement_cache.resolve(input_ref)
+            except ResultReferenceError as error:
+                message = str(error)
+                response = ExecutionResponse.failed(
+                    failure_stage="preflight",
+                    error=message,
+                    failure=ExecutionFailureInfo(
+                        kind="result_reference",
+                        retryable=False,
+                        message=message,
+                    ),
+                )
+                self._record_execution(
+                    "execute",
+                    started,
+                    input_bytes,
+                    response,
+                    trace_id,
+                )
+                return response
         discovery_started = time.perf_counter()
         try:
             await self._ensure_servers_discovered(self._required_servers_for_code(code))
@@ -610,7 +637,12 @@ class GatewayRuntime:
         self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
         self.executor.update_catalog(self.catalog)
         try:
-            response = await self.executor.execute_graph(code, self._dispatch)
+            response = await self.executor.execute_graph(
+                code,
+                self._dispatch,
+                input_value=input_value,
+                retain_result=self.refinement_cache.retain,
+            )
         except BaseException as error:
             cancelled = isinstance(error, asyncio.CancelledError)
             self._record_operation_exception(
@@ -681,7 +713,12 @@ class GatewayRuntime:
         self.stats_store.record_phase("discovery", _elapsed_ms(discovery_started))
         self.executor.update_catalog(self.catalog)
         try:
-            response = await self.executor.execute_saved_chain(chain, arguments, self._dispatch)
+            response = await self.executor.execute_saved_chain(
+                chain,
+                arguments,
+                self._dispatch,
+                retain_result=self.refinement_cache.retain,
+            )
         except BaseException as error:
             cancelled = isinstance(error, asyncio.CancelledError)
             self._record_operation_exception(
@@ -1473,6 +1510,7 @@ def _upstream_failure_message(error: BaseException) -> str:
 def _execution_failure_subtype(response: ExecutionResponse) -> str:
     failure = response.failure
     if failure is not None and failure.kind in {
+        "result_reference",
         "sandbox_timeout",
         "upstream",
         "upstream_transport",
@@ -1631,9 +1669,13 @@ async def set_chain_enabled(
 
 
 @mcp.tool
-async def execute(trace_id: str, code: str) -> ExecutionResponse:
+async def execute(
+    trace_id: str,
+    code: str,
+    input_ref: str | None = None,
+) -> ExecutionResponse:
     """Type-check and run one sandboxed Python MCP SDK chain."""
-    return await _require_runtime().execute(code, trace_id)
+    return await _require_runtime().execute(code, trace_id, input_ref)
 
 
 @mcp.tool

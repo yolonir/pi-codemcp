@@ -10,7 +10,7 @@ export const INSPECT_PROMPT_GUIDELINES = [
 export const EXECUTE_PROMPT_GUIDELINES = [
   "Use bounded execution to deterministically filter, aggregate, sample, join, or reduce upstream data in the sandbox; do not return raw payloads.",
   "Keep a model turn between calls when an intermediate result changes the semantic decision or user approval is required.",
-  "Return the smallest result that answers the request; oversized results fail explicitly with bounded structural inspection data.",
+  "Return the smallest answer. If an oversized result provides result_ref, refine it via inputRef instead of repeating upstream calls.",
   "SDK facades are prebound globals and must not be imported. Use `import asyncio` for `asyncio.gather`; other imports, classes, `asyncio.create_task`, and `__import__` are unsupported.",
 ] as const;
 

@@ -168,6 +168,32 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
       chain_calls: 1,
     });
 
+    const oversized = await client.call("execute", {
+      trace_id: traceId,
+      code: 'return {"payload": "x" * 70000}',
+    });
+    expect(oversized).toMatchObject({
+      ok: false,
+      failure_stage: "result",
+      expires_in_seconds: 300,
+      calls_made: 0,
+    });
+    expect(typeof oversized.result_ref).toBe("string");
+    const refined = await client.call("execute", {
+      trace_id: traceId,
+      input_ref: oversized.result_ref,
+      code: `
+        root = expect_object(input)
+        payload = expect_string(root.get("payload"))
+        return {"characters": len(payload)}
+      `,
+    });
+    expect(refined).toMatchObject({
+      ok: true,
+      result: { characters: 70_000 },
+      calls_made: 0,
+    });
+
     const disabled = await client.call("set_chain_enabled", {
       trace_id: traceId,
       name: "increment",

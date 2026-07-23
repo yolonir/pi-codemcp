@@ -66,6 +66,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Type-check and execute one sandboxed Python MCP call graph.",
     )
     _add_runtime_path_args(execute)
+    execute.add_argument(
+        "--input-ref",
+        help="Opaque retained-result reference to expose as input.",
+    )
     _add_text_input_args(execute, "code", "Sandboxed Python body to execute.")
 
     chain = subcommands.add_parser("chain", help="Manage and run saved MCP chains.")
@@ -165,7 +169,11 @@ async def _dispatch_runtime_command(
             trace_id=trace_id,
         )
     if args.command == "execute":
-        return await runtime.execute(_read_text_input(args, "code"), trace_id)
+        return await runtime.execute(
+            _read_text_input(args, "code"),
+            trace_id,
+            args.input_ref,
+        )
     if args.command == "chain":
         return await _dispatch_chain_command(args, runtime, trace_id)
     raise ValueError(f"unknown command: {args.command}")

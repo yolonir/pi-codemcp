@@ -24,6 +24,7 @@ from pydantic import (
 from pydantic_core import to_json
 
 from .json_types import JSON_VALUE_ADAPTER, JsonObject, JsonValue
+from .refinement_cache import RetainedResult
 from .sandbox_api import (
     EXPECT_INTEGER_NAME,
     EXPECT_LIST_NAME,
@@ -53,6 +54,7 @@ type FailureStage = Literal["preflight", "runtime", "timeout", "cancelled", "res
 type FailureKind = Literal[
     "preflight",
     "result",
+    "result_reference",
     "sandbox_runtime",
     "sandbox_timeout",
     "upstream",
@@ -115,6 +117,7 @@ class ExecutionContext:
 ToolCall = Callable[[str, JsonObject], Awaitable[JsonValue]]
 ContextToolCall = Callable[[str, JsonObject, ExecutionContext], Awaitable[JsonValue]]
 ExternalFunction = Callable[..., Awaitable[JsonValue]]
+ResultRetainer = Callable[[JsonValue], RetainedResult | None]
 
 
 class ExecutionResponse(BaseModel):
@@ -126,6 +129,8 @@ class ExecutionResponse(BaseModel):
     error: str | None = None
     failure: ExecutionFailureInfo | None = None
     shape: JsonObject | None = None
+    result_ref: str | None = None
+    expires_in_seconds: int | None = Field(default=None, ge=1)
     calls_made: int = Field(default=0, ge=0)
     chain_calls: int = Field(default=0, ge=0)
     metrics: ExecutionMetrics = Field(default_factory=ExecutionMetrics, exclude=True)
@@ -155,6 +160,8 @@ class ExecutionResponse(BaseModel):
         calls_made: int = 0,
         chain_calls: int = 0,
         shape: JsonObject | None = None,
+        result_ref: str | None = None,
+        expires_in_seconds: int | None = None,
     ) -> Self:
         return cls(
             ok=False,
@@ -164,22 +171,31 @@ class ExecutionResponse(BaseModel):
             calls_made=calls_made,
             chain_calls=chain_calls,
             shape=shape,
+            result_ref=result_ref,
+            expires_in_seconds=expires_in_seconds,
         )
 
     @model_validator(mode="after")
     def validate_state(self) -> Self:
         if self.ok:
-            if (
-                self.failure_stage is not None
-                or self.error is not None
-                or self.failure is not None
-                or self.shape is not None
-            ):
+            failure_details = (
+                self.failure_stage,
+                self.error,
+                self.failure,
+                self.shape,
+                self.result_ref,
+                self.expires_in_seconds,
+            )
+            if any(detail is not None for detail in failure_details):
                 raise ValueError("successful execution cannot contain failure details")
         elif self.failure_stage is None or self.error is None or self.failure is None:
             raise ValueError("failed execution requires a failure stage, error, and details")
         elif self.result is not None:
             raise ValueError("failed execution cannot contain a result")
+        elif (self.result_ref is None) != (self.expires_in_seconds is None):
+            raise ValueError("result reference and expiry must be provided together")
+        elif self.result_ref is not None and self.failure_stage != "result":
+            raise ValueError("only a result failure can contain a result reference")
         return self
 
     @model_serializer(mode="plain")
@@ -203,6 +219,9 @@ class ExecutionResponse(BaseModel):
             }
             if self.shape is not None:
                 response["shape"] = self.shape
+            if self.result_ref is not None:
+                response["result_ref"] = self.result_ref
+                response["expires_in_seconds"] = self.expires_in_seconds
         if self.chain_calls > 0:
             response["chain_calls"] = self.chain_calls
         timings: JsonObject = {
@@ -242,7 +261,14 @@ class MontyExecutor:
     def update_catalog(self, catalog: ToolCatalog) -> None:
         self.catalog = catalog
 
-    async def execute(self, code: str, call_tool: ToolCall) -> ExecutionResponse:
+    async def execute(
+        self,
+        code: str,
+        call_tool: ToolCall,
+        *,
+        input_value: JsonValue = None,
+        retain_result: ResultRetainer | None = None,
+    ) -> ExecutionResponse:
         async def adapted(
             name: str,
             arguments: JsonObject,
@@ -250,22 +276,39 @@ class MontyExecutor:
         ) -> JsonValue:
             return await call_tool(name, arguments)
 
-        return await self.execute_graph(code, adapted)
+        return await self.execute_graph(
+            code,
+            adapted,
+            input_value=input_value,
+            retain_result=retain_result,
+        )
 
     async def execute_graph(
         self,
         code: str,
         call_tool: ContextToolCall,
+        *,
+        input_value: JsonValue = None,
+        retain_result: ResultRetainer | None = None,
     ) -> ExecutionResponse:
         async with self._execution_lock:
             context = self._new_context(self.catalog, call_tool)
-            return await self._execute_program(code, context, enforce_result_limit=True)
+            return await self._execute_program(
+                code,
+                context,
+                input_value=input_value,
+                input_type="JsonValue" if input_value is not None else None,
+                enforce_result_limit=True,
+                retain_result=retain_result,
+            )
 
     async def execute_saved_chain(
         self,
         chain: SavedChainManifest,
         arguments: JsonObject,
         call_tool: ContextToolCall,
+        *,
+        retain_result: ResultRetainer | None = None,
     ) -> ExecutionResponse:
         async with self._execution_lock:
             catalog = self.catalog
@@ -293,6 +336,7 @@ class MontyExecutor:
                 output_type=spec.output_type_name,
                 output_spec_name=spec.name,
                 enforce_result_limit=True,
+                retain_result=retain_result,
             )
 
     async def execute_nested_chain(
@@ -366,11 +410,12 @@ class MontyExecutor:
         code: str,
         context: ExecutionContext,
         *,
-        input_value: JsonObject | None = None,
+        input_value: JsonValue = None,
         input_type: str | None = None,
         output_type: str | None = None,
         output_spec_name: str | None = None,
         enforce_result_limit: bool,
+        retain_result: ResultRetainer | None = None,
     ) -> ExecutionResponse:
         if not code.strip():
             return self._failure(context, "preflight", "Execution code must not be empty")
@@ -381,6 +426,7 @@ class MontyExecutor:
             input_type=input_type,
             output_type=output_type,
             typed=True,
+            has_input=has_input,
         )
         referenced = referenced_calls(code, context.catalog.facade_calls)
         type_stubs = context.catalog.type_stubs_for(
@@ -605,6 +651,7 @@ class MontyExecutor:
         context.metrics.serialization_ms += _elapsed_ms(serialization_started)
         context.metrics.result_bytes = result_bytes
         if enforce_result_limit and result_bytes >= context.settings.result_byte_limit:
+            retained = retain_result(result) if retain_result is not None else None
             message = (
                 f"Returned value is {result_bytes} bytes; reduce it below "
                 f"{context.settings.result_byte_limit} bytes"
@@ -625,6 +672,8 @@ class MontyExecutor:
                 ),
                 calls_made=context.calls_made,
                 chain_calls=context.chain_calls,
+                result_ref=retained.reference if retained is not None else None,
+                expires_in_seconds=(retained.expires_in_seconds if retained is not None else None),
             )
             response.metrics = context.metrics.model_copy()
             return response
@@ -988,10 +1037,10 @@ def _wrap_code(
     normalized = textwrap.dedent(code).strip("\n")
     uses_input = input_type is not None if has_input is None else has_input
     if typed and uses_input:
-        if input_type is None or output_type is None:
-            raise ValueError("Typed saved-chain code requires input and output types")
+        if input_type is None:
+            raise ValueError("Typed input code requires an input type")
         signature = f"input: {input_type}"
-        return_annotation = f" -> {output_type}"
+        return_annotation = f" -> {output_type}" if output_type is not None else ""
     elif uses_input:
         signature = "input"
         return_annotation = ""

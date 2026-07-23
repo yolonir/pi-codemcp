@@ -144,6 +144,12 @@ const ExecuteParameters = Type.Object({
     description:
       "Sandboxed Python body. Call typed SDK methods such as await linear.list_issues(arguments) and return a compact final value.",
   }),
+  inputRef: Type.Optional(
+    Type.String({
+      minLength: 1,
+      description: "Opaque retained-result reference exposed to sandbox code as input",
+    }),
+  ),
 });
 
 export function registerCodeMcpTools(
@@ -297,7 +303,7 @@ export function registerCodeMcpTools(
     name: "codemcp_execute",
     label: "MCP Execute",
     description:
-      "Type-check and execute one bounded sandboxed Python MCP call graph. Filter, aggregate, or sample upstream data inside the sandbox instead of returning raw payloads; preserve a model turn for semantic decisions or approvals. The sandbox has no host filesystem, environment, network, or subprocess access. Oversized results fail with bounded shape, size, and sample diagnostics.",
+      "Type-check and execute one bounded sandboxed Python MCP call graph. Filter, aggregate, or sample upstream data inside the sandbox instead of returning raw payloads; an optional inputRef exposes a retained oversized value as input without repeating upstream calls. Preserve a model turn for semantic decisions or approvals. The sandbox has no host filesystem, environment, network, or subprocess access. Oversized results fail with bounded shape, size, and sample diagnostics.",
     promptSnippet: "Run a bounded typed MCP workflow and return a compact result",
     promptGuidelines: [...EXECUTE_PROMPT_GUIDELINES],
     parameters: ExecuteParameters,
@@ -308,7 +314,11 @@ export function registerCodeMcpTools(
       });
       const result = await lifecycle.request(
         "execute",
-        { code: params.code, trace_id: toolCallId },
+        {
+          code: params.code,
+          trace_id: toolCallId,
+          ...(params.inputRef === undefined ? {} : { input_ref: params.inputRef }),
+        },
         signal,
       );
       const ok = result.ok === true;
@@ -319,6 +329,8 @@ export function registerCodeMcpTools(
             error: result.error,
             failure: result.failure,
             shape: result.shape,
+            result_ref: result.result_ref,
+            expires_in_seconds: result.expires_in_seconds,
             calls_made: result.calls_made,
             chain_calls: result.chain_calls,
           };

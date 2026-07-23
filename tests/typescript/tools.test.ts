@@ -113,7 +113,7 @@ test("execute sends only compact result while keeping metadata in details", asyn
 });
 
 test("execute exposes structured upstream failure fields", async () => {
-  const { tools } = captureTools({
+  const { tools, requests } = captureTools({
     projectAvailable: true,
     executeResult: {
       ok: false,
@@ -134,10 +134,16 @@ test("execute exposes structured upstream failure fields", async () => {
   const execute = tools.get("codemcp_execute");
   const result = await execute?.execute(
     "call-transport",
-    { code: "return 1" },
+    { code: "return 1", inputRef: "result_1" },
     undefined,
     undefined,
   );
+  expect(requests).toEqual([
+    {
+      name: "execute",
+      args: { code: "return 1", input_ref: "result_1", trace_id: "call-transport" },
+    },
+  ]);
   const payload = JSON.parse(result?.content[0]?.text ?? "null") as Record<string, unknown>;
   expect(payload).toMatchObject({
     failure_stage: "runtime",
