@@ -1,6 +1,6 @@
 # Execution Failure Reduction Micro-Spec
 
-**Status:** proposed
+**Status:** implemented
 **Date:** 2026-07-23
 **Scope:** trustworthy telemetry, typed-sandbox ergonomics, connection recovery, and oversized-result refinement
 
@@ -156,6 +156,8 @@ The refinement cache is:
 - protected by a short TTL;
 - never persisted in telemetry or session-independent storage.
 
+The implemented defaults are eight entries, 1 MiB per entry, 4 MiB total, and a 300-second TTL.
+
 If an oversized value cannot be retained within the cache bounds, return the existing bounded shape diagnostics without a reference.
 
 ## Non-goals
@@ -176,6 +178,17 @@ If an oversized value cannot be retained within the cache bounds, return the exi
 4. `feat: refine oversized results without repeating MCP calls`
 
 Each slice must remain independently reviewable and preserve the existing model-facing behavior outside its stated scope.
+
+Implemented as independently reviewable commits:
+
+1. `19bfd9b fix: make telemetry process-safe and traceable`
+2. `8952ac2 feat: add typed sandbox helpers and exact constraints`
+3. `7c8f504 fix: recover dead upstream connections without replay`
+4. `2fba0e4 feat: refine oversized results without repeating calls`
+
+`173a54d docs: steer executions away from raw payloads` adds the model-facing filtering guidance required by slice four.
+
+Verification is executable through `just check`; the implementation checkpoint passes 86 Python tests and 29 TypeScript tests. The regression coverage includes ten-process SQLite merging, trace propagation from a Pi tool call into failure telemetry, preflight/runtime narrowing behavior, dead-client recovery without replay, and retained-result expiry/eviction/cross-sidecar/shutdown bounds.
 
 ## Acceptance criteria
 
@@ -221,3 +234,5 @@ After the first three implementation slices, rerun a sanitized regression corpus
 - answer correctness and tool-output size.
 
 Raw failure count is not the sole quality metric: preflight rejection is preferable to the same error after side effects, and upstream authorization or semantic failures must remain explicit.
+
+The sanitized automated regression corpus now covers each observed class: typed-sandbox rejection, oversized refinement, invalid upstream/permission failures, dead transport recovery, and cancellation. Production before/after comparisons start with telemetry schema version 2 because the untrustworthy historical JSON counters are intentionally not imported.
