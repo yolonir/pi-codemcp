@@ -48,7 +48,9 @@ if args.role == "alpha":
     @mcp.tool
     def reject_number(seed: int) -> NumberResult:
         """Reject one valid call, for semantic-failure tests."""
-        raise PermissionError(f"HTTP status 403: seed {seed} is forbidden")
+        if seed == 403:
+            raise PermissionError("HTTP status 403: seed is forbidden")
+        raise ValueError(f"invalid query seed: {seed}")
 
 else:
 

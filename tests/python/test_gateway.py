@@ -616,8 +616,28 @@ async def test_upstream_failures_are_structured_and_dead_clients_reconnect_expli
         assert initial.ok is True
         first_pid = int(alpha_pid.read_text())
 
-        rejected = await runtime.execute(
+        invalid = await runtime.execute(
+            'return await alpha.get_number({"seed": "invalid"})',
+            TRACE_ID,
+        )
+        assert invalid.ok is False
+        assert invalid.failure_stage == "preflight"
+        assert invalid.calls_made == 0
+        assert int(alpha_pid.read_text()) == first_pid
+
+        semantic = await runtime.execute(
             'return await alpha.reject_number({"seed": 2})',
+            TRACE_ID,
+        )
+        assert semantic.ok is False
+        assert semantic.failure is not None
+        assert semantic.failure.kind == "upstream"
+        assert semantic.failure.retryable is False
+        assert semantic.failure.status is None
+        assert int(alpha_pid.read_text()) == first_pid
+
+        rejected = await runtime.execute(
+            'return await alpha.reject_number({"seed": 403})',
             TRACE_ID,
         )
         assert rejected.ok is False
