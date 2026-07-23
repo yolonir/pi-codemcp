@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/yolonir/pi-codemcp/compare/v1.2.2...v1.3.0) (2026-07-23)
+
+
+### Features
+
+* reduce CodeMCP execution failures ([9c2ad75](https://github.com/yolonir/pi-codemcp/commit/9c2ad759eae922d2918e8be605489edae4b24f5c))
+
 ## [1.2.2](https://github.com/yolonir/pi-codemcp/compare/v1.2.1...v1.2.2) (2026-07-22)
 
 
