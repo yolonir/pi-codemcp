@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, initTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { SavedChainManager } from "../../src/chains.js";
 import type { CodeMcpLifecycle } from "../../src/lifecycle.js";
@@ -28,6 +28,8 @@ interface RegisteredTool {
     theme: Theme,
   ) => Component;
 }
+
+initTheme(undefined, false);
 
 const plainTheme = {
   fg: (_color: string, text: string) => text,
