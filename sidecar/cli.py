@@ -66,6 +66,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Type-check and execute one sandboxed Python MCP call graph.",
     )
     _add_runtime_path_args(execute)
+    execute.add_argument(
+        "--input-ref",
+        help="Opaque retained-result reference to expose as input.",
+    )
     _add_text_input_args(execute, "code", "Sandboxed Python body to execute.")
 
     chain = subcommands.add_parser("chain", help="Manage and run saved MCP chains.")
@@ -152,27 +156,42 @@ async def _dispatch_runtime_command(
     args: argparse.Namespace,
     runtime: gateway.GatewayRuntime,
 ) -> BaseModel:
+    trace_id = gateway.new_trace_id("cli")
     if args.command == "status":
         return runtime.status()
     if args.command == "discover":
         return await runtime.discover(args.server)
     if args.command == "search":
-        return await runtime.search(args.query, args.limit, args.server)
+        return await runtime.search(
+            args.query,
+            args.limit,
+            args.server,
+            trace_id=trace_id,
+        )
     if args.command == "execute":
-        return await runtime.execute(_read_text_input(args, "code"))
+        return await runtime.execute(
+            _read_text_input(args, "code"),
+            trace_id,
+            args.input_ref,
+        )
     if args.command == "chain":
-        return await _dispatch_chain_command(args, runtime)
+        return await _dispatch_chain_command(args, runtime, trace_id)
     raise ValueError(f"unknown command: {args.command}")
 
 
 async def _dispatch_chain_command(
     args: argparse.Namespace,
     runtime: gateway.GatewayRuntime,
+    trace_id: str,
 ) -> BaseModel:
     if args.chain_command == "list":
-        return runtime.chains.list()
+        return runtime.chains.list(trace_id)
     if args.chain_command == "run":
-        return await runtime.chains.execute(args.name, _read_json_object_input(args, "input"))
+        return await runtime.chains.execute(
+            args.name,
+            _read_json_object_input(args, "input"),
+            trace_id,
+        )
     if args.chain_command == "save":
         return await runtime.chains.save(
             scope=args.scope,
@@ -181,11 +200,12 @@ async def _dispatch_chain_command(
             code=_read_text_input(args, "code"),
             input_schema=_read_json_object_input(args, "input_schema"),
             output_schema=_read_json_object_input(args, "output_schema"),
+            trace_id=trace_id,
         )
     if args.chain_command == "revalidate":
-        return await runtime.chains.revalidate(args.name, args.scope)
+        return await runtime.chains.revalidate(args.name, args.scope, trace_id)
     if args.chain_command == "delete":
-        return await runtime.chains.delete(args.name, args.scope)
+        return await runtime.chains.delete(args.name, args.scope, trace_id)
     raise ValueError(f"unknown chain command: {args.chain_command}")
 
 

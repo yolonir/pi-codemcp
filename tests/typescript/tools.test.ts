@@ -45,6 +45,7 @@ function captureTools(options: {
   searchResult?: Record<string, unknown>;
 }) {
   const tools = new Map<string, RegisteredTool>();
+  const requests: Array<{ name: string; args: Record<string, unknown> }> = [];
   const pi = {
     registerTool(tool: RegisteredTool) {
       tools.set(tool.name, tool);
@@ -53,7 +54,8 @@ function captureTools(options: {
   const lifecycle = {
     projectChainsPath: options.projectAvailable ? "/project/chains" : undefined,
     loadSettings: () => ({ ...DEFAULT_CODEMCP_SETTINGS, disabledTools: {} }),
-    async request(name: string) {
+    async request(name: string, args: Record<string, unknown>) {
+      requests.push({ name, args });
       if (name === "execute" && options.executeResult) return options.executeResult;
       if (name === "search" && options.searchResult) return options.searchResult;
       throw new Error("unexpected sidecar request");
@@ -83,11 +85,11 @@ function captureTools(options: {
     },
   };
   registerCodeMcpTools(pi, lifecycle as never, chains as never);
-  return { tools, calls };
+  return { tools, calls, requests };
 }
 
 test("execute sends only compact result while keeping metadata in details", async () => {
-  const { tools } = captureTools({
+  const { tools, requests } = captureTools({
     projectAvailable: true,
     executeResult: {
       ok: true,
@@ -99,6 +101,7 @@ test("execute sends only compact result while keeping metadata in details", asyn
   });
   const execute = tools.get("codemcp_execute");
   const result = await execute?.execute("id", { code: "return 2" }, undefined, undefined);
+  expect(requests).toEqual([{ name: "execute", args: { code: "return 2", trace_id: "id" } }]);
   expect(result?.content[0]?.text).toBe('{"value":2}');
   expect(result?.content[0]?.text).not.toContain("calls_made");
   expect(result?.details).toMatchObject({
@@ -109,8 +112,57 @@ test("execute sends only compact result while keeping metadata in details", asyn
   });
 });
 
+test("execute exposes structured upstream failure fields", async () => {
+  const { tools, requests } = captureTools({
+    projectAvailable: true,
+    executeResult: {
+      ok: false,
+      failure_stage: "runtime",
+      error: "Connection closed",
+      failure: {
+        kind: "upstream_transport",
+        server: "grafana",
+        tool: "query",
+        retryable: true,
+        status: null,
+        message: "Upstream connection closed",
+      },
+      calls_made: 1,
+      chain_calls: 0,
+    },
+  });
+  const execute = tools.get("codemcp_execute");
+  const result = await execute?.execute(
+    "call-transport",
+    { code: "return 1", inputRef: "result_1" },
+    undefined,
+    undefined,
+  );
+  expect(requests).toEqual([
+    {
+      name: "execute",
+      args: { code: "return 1", input_ref: "result_1", trace_id: "call-transport" },
+    },
+  ]);
+  const payload = JSON.parse(result?.content[0]?.text ?? "null") as Record<string, unknown>;
+  expect(payload).toMatchObject({
+    failure_stage: "runtime",
+    error: "Connection closed",
+    failure: {
+      kind: "upstream_transport",
+      server: "grafana",
+      tool: "query",
+      retryable: true,
+      status: null,
+      message: "Upstream connection closed",
+    },
+    calls_made: 1,
+    chain_calls: 0,
+  });
+});
+
 test("search exposes unavailable servers as partial-result metadata", async () => {
-  const { tools } = captureTools({
+  const { tools, requests } = captureTools({
     projectAvailable: true,
     searchResult: {
       mode: "search",
@@ -123,6 +175,19 @@ test("search exposes unavailable servers as partial-result metadata", async () =
   });
   const search = tools.get("codemcp_search");
   const result = await search?.execute("id", { query: "health" }, undefined, undefined);
+  expect(requests).toEqual([
+    {
+      name: "search",
+      args: {
+        query: "health",
+        mode: "search",
+        detail: "signatures",
+        limit: 5,
+        cursor: 0,
+        trace_id: "id",
+      },
+    },
+  ]);
   expect(result?.content[0]?.text).toContain('"discovery_failures"');
   expect(result?.details).toMatchObject({
     matchCount: 1,

@@ -651,7 +651,17 @@ def test_catalog_progressively_discloses_and_paginates_inventory(
     inspected = representative_search_catalog.inspect(calls)
     assert [match.call for match in inspected] == calls
     assert all(match.stub and "Args" in match.stub for match in inspected)
-    assert "JsonValue: TypeAlias" in representative_search_catalog.stub_prelude
+    prelude = representative_search_catalog.stub_prelude
+    assert "JsonValue: TypeAlias" in prelude
+    assert "samples: Literal[1, 2, 3]" in prelude
+    assert "max_depth: Literal[1, 2, 3, 4, 5, 6]" in prelude
+    assert "def expect_object" in prelude
+    assert "def expect_list" in prelude
+    assert "def expect_string" in prelude
+    assert "def expect_integer" in prelude
+    assert "Supported: import asyncio; asyncio.gather" in prelude
+    assert "collections.Counter, base64, gzip, asyncio.create_task" in prelude
+    assert "__import__. Use dict counts" in prelude
     inspected_stub = inspected[0].stub
     assert inspected_stub is not None
     assert "JsonValue: TypeAlias" not in inspected_stub

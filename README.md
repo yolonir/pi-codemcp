@@ -36,7 +36,8 @@ I built this because I care a lot about software that is genuinely fast, efficie
 pi-codemcp is deliberately opinionated about operational quality:
 
 - Pi startup does not wait for Python or MCP servers.
-- Each upstream connection is lazy and independent.
+- Each upstream connection is lazy and independent. A dead connection is evicted after the original call fails; that call is never replayed, and the next explicit call reconnects.
+- Upstream failures include stable `kind`, `server`, `tool`, `retryable`, `status`, and `message` fields.
 - Tool catalogs are cached per server and invalidated independently.
 - Agent-written code is type-checked before execution.
 - Time, memory, call count, and output size are bounded.
@@ -172,7 +173,9 @@ return {"number": number["value"], "identifier": saved["identifier"]}
 '
 ```
 
-Incomplete upstream schemas become recursive `JsonValue`, not `Any`; unknown values must be narrowed explicitly before typed use. For unfamiliar outputs, `inspect_json(value, samples=2, max_depth=3)` returns a byte-bounded structural summary, cardinality, field sizes, and samples. Preflight type errors happen before any upstream call is made, and oversized final results fail explicitly with the same actionable inspection data.
+Incomplete upstream schemas become recursive `JsonValue`, not `Any`; use the prebound `expect_object`, `expect_list`, `expect_string`, and `expect_integer` helpers to narrow unknown values explicitly. For unfamiliar outputs, `inspect_json(value, samples=2, max_depth=3)` returns a byte-bounded structural summary, cardinality, field sizes, and samples; `samples` is limited to 1–3 and `max_depth` to 1–6 during preflight. The generated prelude documents the sandbox surface: use `import asyncio` with `asyncio.gather`; unavailable host or stdlib APIs are rejected. Preflight type errors happen before any upstream call is made, and oversized final results fail explicitly with the same actionable inspection data.
+
+When an oversized value fits the bounded in-memory refinement cache, the failure also returns an opaque `result_ref` and expiry. Pass that reference back as `inputRef` on one follow-up `codemcp_execute`; the retained JSON is exposed as `input`, so code can filter or aggregate it without repeating upstream calls. References expire after five minutes, are valid only in the originating sidecar, and are never persisted.
 
 ## Saved-chain CLI flow
 

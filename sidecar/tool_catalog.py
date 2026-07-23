@@ -24,6 +24,7 @@ from .json_types import (
     JsonValue,
 )
 from .models import SearchDetail, ToolSchemaView
+from .sandbox_api import STUB_PRELUDE
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -32,15 +33,6 @@ if TYPE_CHECKING:
 
 SEARCH_SCORE_CUTOFF = 20.0
 MIN_PLURAL_TOKEN_LENGTH = 4
-STUB_IMPORTS = "from typing import Literal, Never, NotRequired, TypeAlias, TypedDict"
-JSON_TYPE_STUBS = (
-    "JsonScalar: TypeAlias = bool | int | float | str | None",
-    'JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]',
-)
-INSPECT_JSON_STUB = (
-    "def inspect_json(value: JsonValue, *, samples: int = 2, max_depth: int = 3) -> JsonValue: ..."
-)
-STUB_PRELUDE = "\n\n".join([STUB_IMPORTS, *JSON_TYPE_STUBS, INSPECT_JSON_STUB])
 
 
 class ToolSpec(BaseModel):

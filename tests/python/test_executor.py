@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from sidecar.executor import ExecutionResponse, ExecutionSettings, MontyExecutor
 from sidecar.json_types import JsonObject, JsonValue
+from sidecar.refinement_cache import RefinementCache
 from sidecar.tool_catalog import ToolCatalog
 
 
@@ -292,18 +293,106 @@ async def test_oversized_result_fails_with_shape_without_retry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_oversized_result_reference_refines_without_repeating_calls() -> None:
+    calls = 0
+    cache = RefinementCache(
+        entry_byte_limit=10_000,
+        total_byte_limit=20_000,
+    )
+
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        nonlocal calls
+        calls += 1
+        return {"summary": {"title": "large"}, "panels": ["x" * 2_000]}
+
+    executor = MontyExecutor(
+        catalog(),
+        settings=ExecutionSettings(result_byte_limit=1_024),
+    )
+    oversized = await executor.execute(
+        "return await alpha.dynamic({})",
+        call,
+        retain_result=cache.retain,
+    )
+
+    assert oversized.ok is False
+    assert oversized.failure_stage == "result"
+    assert oversized.result is None
+    assert oversized.result_ref is not None
+    assert oversized.expires_in_seconds == 300
+    assert "x" * 2_000 not in oversized.model_dump_json()
+    assert len(oversized.model_dump_json().encode()) < 1_024
+    assert oversized.calls_made == calls == 1
+
+    retained = cache.resolve(oversized.result_ref)
+    refined = await executor.execute(
+        """
+        root = expect_object(input)
+        summary = expect_object(root.get("summary"))
+        panels = expect_list(root.get("panels"))
+        return {"title": expect_string(summary.get("title")), "panel_count": len(panels)}
+        """,
+        call,
+        input_value=retained,
+        retain_result=cache.retain,
+    )
+
+    assert refined.ok is True
+    assert refined.result == {"title": "large", "panel_count": 1}
+    assert refined.calls_made == 0
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_value_above_refinement_ceiling_remains_shape_only() -> None:
+    calls = 0
+    cache = RefinementCache(entry_byte_limit=1_500, total_byte_limit=3_000)
+
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        nonlocal calls
+        calls += 1
+        return {"payload": "x" * 2_000}
+
+    response = await MontyExecutor(
+        catalog(),
+        settings=ExecutionSettings(result_byte_limit=1_024),
+    ).execute(
+        "return await alpha.dynamic({})",
+        call,
+        retain_result=cache.retain,
+    )
+
+    assert response.ok is False
+    assert response.failure_stage == "result"
+    assert response.result_ref is None
+    assert response.expires_in_seconds is None
+    assert response.shape is not None
+    assert cache.entry_count == 0
+    assert response.calls_made == calls == 1
+
+
+@pytest.mark.asyncio
 async def test_oversized_diagnostic_truncates_unbounded_json_keys() -> None:
     huge_key = "k" * 100_000
 
     async def call(_: str, __: JsonObject) -> JsonValue:
         return {huge_key: 1}
 
+    cache = RefinementCache(
+        entry_byte_limit=200_000,
+        total_byte_limit=400_000,
+    )
     response = await MontyExecutor(
         catalog(), settings=ExecutionSettings(result_byte_limit=1_024)
-    ).execute("return await alpha.dynamic({})", call)
+    ).execute(
+        "return await alpha.dynamic({})",
+        call,
+        retain_result=cache.retain,
+    )
 
     assert response.ok is False
     assert response.failure_stage == "result"
+    assert response.result_ref is not None
     assert response.shape is not None
     assert response.shape["truncated"] is True
     assert huge_key not in response.model_dump_json()
@@ -348,22 +437,106 @@ async def test_inspect_json_reports_bounded_runtime_shape_and_samples() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "code, message",
+    "option",
     [
-        ("return inspect_json([], samples=0)", "samples must be from"),
-        ("return inspect_json([], samples=4)", "samples must be from"),
-        ("return inspect_json([], max_depth=0)", "max_depth must be from"),
+        "samples=0",
+        "samples=4",
+        "max_depth=0",
+        "max_depth=7",
     ],
 )
-async def test_inspect_json_rejects_unbounded_options(code: str, message: str) -> None:
-    async def call(_: str, __: JsonObject) -> JsonValue:
-        raise AssertionError("no MCP tool call expected")
+async def test_inspect_json_rejects_unbounded_options_during_preflight(
+    option: str,
+) -> None:
+    calls = 0
 
-    response = await MontyExecutor(catalog()).execute(code, call)
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        nonlocal calls
+        calls += 1
+        return []
+
+    response = await MontyExecutor(catalog()).execute(
+        f"value = await alpha.dynamic({{}})\nreturn inspect_json(value, {option})",
+        call,
+    )
+    assert response.ok is False
+    assert response.failure_stage == "preflight"
+    assert response.error and "invalid-argument-type" in response.error
+    assert response.calls_made == calls == 0
+
+
+@pytest.mark.asyncio
+async def test_narrowing_helpers_make_jsonvalue_access_typed_and_explicit() -> None:
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        return {"items": [{"name": "alpha", "count": 2}]}
+
+    response = await MontyExecutor(catalog()).execute(
+        """
+        root = expect_object(await alpha.dynamic({}))
+        items = expect_list(root.get("items"))
+        first = expect_object(items[0])
+        return {
+            "name": expect_string(first.get("name")),
+            "count": expect_integer(first.get("count")),
+        }
+        """,
+        call,
+    )
+
+    assert response.ok is True
+    assert response.result == {"name": "alpha", "count": 2}
+    assert response.calls_made == 1
+
+
+@pytest.mark.asyncio
+async def test_documented_asyncio_gather_surface_executes() -> None:
+    async def call(_: str, arguments: JsonObject) -> JsonValue:
+        return {"value": arguments["id"]}
+
+    response = await MontyExecutor(catalog()).execute(
+        """
+        import asyncio
+        first, second = await asyncio.gather(
+            alpha.get({"id": "one"}),
+            alpha.get({"id": "two"}),
+        )
+        return [first["value"], second["value"]]
+        """,
+        call,
+    )
+
+    assert response.ok is True
+    assert response.result == ["one", "two"]
+    assert response.calls_made == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "helper, value, expected",
+    [
+        ("expect_object", [], "expected object, got array[0]"),
+        ("expect_list", {}, "expected array, got object"),
+        ("expect_string", 1, "expected string, got integer"),
+        ("expect_integer", True, "expected integer, got boolean"),
+    ],
+)
+async def test_narrowing_helpers_reject_wrong_runtime_shape(
+    helper: str,
+    value: JsonValue,
+    expected: str,
+) -> None:
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        return value
+
+    response = await MontyExecutor(catalog()).execute(
+        f"return {helper}(await alpha.dynamic({{}}))",
+        call,
+    )
+
     assert response.ok is False
     assert response.failure_stage == "runtime"
-    assert response.error and message in response.error
-    assert response.calls_made == 0
+    assert response.error and expected in response.error
+    assert response.calls_made == 1
 
 
 @pytest.mark.asyncio
@@ -379,7 +552,38 @@ async def test_timeout_stops_infinite_sandbox_loop() -> None:
     response = await executor.execute("while True:\n    pass", call)
     assert response.ok is False
     assert response.failure_stage == "timeout"
+    assert response.failure is not None
+    assert response.failure.kind == "sandbox_timeout"
+    assert response.failure.retryable is False
     assert response.calls_made == 0
+
+
+@pytest.mark.asyncio
+async def test_upstream_timeout_is_structured_without_replay() -> None:
+    calls = 0
+
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(1)
+        return {"value": 1}
+
+    response = await MontyExecutor(
+        catalog(),
+        settings=ExecutionSettings(
+            timeout_seconds=1,
+            tool_timeout_seconds=0.01,
+        ),
+    ).execute('return await alpha.get({"id": "x"})', call)
+
+    assert response.ok is False
+    assert response.failure_stage == "timeout"
+    assert response.failure is not None
+    assert response.failure.kind == "upstream_timeout"
+    assert response.failure.server == "alpha"
+    assert response.failure.tool == "get"
+    assert response.failure.retryable is True
+    assert response.calls_made == calls == 1
 
 
 @pytest.mark.asyncio

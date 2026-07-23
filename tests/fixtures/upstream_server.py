@@ -45,6 +45,13 @@ if args.role == "alpha":
         await asyncio.sleep(delay_seconds)
         return NumberResult(value=1)
 
+    @mcp.tool
+    def reject_number(seed: int) -> NumberResult:
+        """Reject one valid call, for semantic-failure tests."""
+        if seed == 403:
+            raise PermissionError("HTTP status 403: seed is forbidden")
+        raise ValueError(f"invalid query seed: {seed}")
+
 else:
 
     @mcp.tool

@@ -24,6 +24,15 @@ from pydantic import (
 from pydantic_core import to_json
 
 from .json_types import JSON_VALUE_ADAPTER, JsonObject, JsonValue
+from .refinement_cache import RetainedResult
+from .sandbox_api import (
+    EXPECT_INTEGER_NAME,
+    EXPECT_LIST_NAME,
+    EXPECT_OBJECT_NAME,
+    EXPECT_STRING_NAME,
+    INSPECT_JSON_NAME,
+    SANDBOX_FUNCTION_EXTERNALS,
+)
 from .tool_catalog import referenced_calls, schema_path_summary
 
 if TYPE_CHECKING:
@@ -36,10 +45,24 @@ INSPECT_SAMPLE_LIMIT = 3
 INSPECT_DEPTH_LIMIT = 6
 INSPECT_COLLECTION_LIMIT = 10
 INSPECT_STRING_LIMIT = 200
-INSPECT_KEY_LIMIT = 120
+INSPECT_KEY_LIMIT = 80
 INSPECT_BYTE_LIMIT = 8 * 1024
 CHAIN_INPUT_EXTERNAL = "__codemcp_saved_chain_input"
-INSPECT_JSON_EXTERNAL = "__codemcp_inspect_json"
+
+
+type FailureStage = Literal["preflight", "runtime", "timeout", "cancelled", "result"]
+type FailureKind = Literal[
+    "preflight",
+    "result",
+    "result_reference",
+    "sandbox_runtime",
+    "sandbox_timeout",
+    "upstream",
+    "upstream_transport",
+    "upstream_timeout",
+    "cancelled",
+    "internal",
+]
 
 
 class ExecutionMetrics(BaseModel):
@@ -49,6 +72,17 @@ class ExecutionMetrics(BaseModel):
     runtime_ms: float = Field(default=0.0, ge=0)
     serialization_ms: float = Field(default=0.0, ge=0)
     result_bytes: int = Field(default=0, ge=0)
+
+
+class ExecutionFailureInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    kind: FailureKind
+    server: str | None = None
+    tool: str | None = None
+    retryable: bool
+    status: int | None = Field(default=None, ge=100, le=599)
+    message: str = Field(min_length=1)
 
 
 class ExecutionContext:
@@ -66,6 +100,7 @@ class ExecutionContext:
         self.calls_made = 0
         self.chain_calls = 0
         self.metrics = ExecutionMetrics()
+        self.failure: ExecutionFailureInfo | None = None
         self.chain_stack: ContextVar[tuple[str, ...]] = ContextVar(
             "codemcp_chain_stack",
             default=(),
@@ -82,9 +117,7 @@ class ExecutionContext:
 ToolCall = Callable[[str, JsonObject], Awaitable[JsonValue]]
 ContextToolCall = Callable[[str, JsonObject, ExecutionContext], Awaitable[JsonValue]]
 ExternalFunction = Callable[..., Awaitable[JsonValue]]
-
-
-type FailureStage = Literal["preflight", "runtime", "timeout", "cancelled", "result"]
+ResultRetainer = Callable[[JsonValue], RetainedResult | None]
 
 
 class ExecutionResponse(BaseModel):
@@ -94,7 +127,10 @@ class ExecutionResponse(BaseModel):
     failure_stage: FailureStage | None = None
     result: JsonValue = None
     error: str | None = None
+    failure: ExecutionFailureInfo | None = None
     shape: JsonObject | None = None
+    result_ref: str | None = None
+    expires_in_seconds: int | None = Field(default=None, ge=1)
     calls_made: int = Field(default=0, ge=0)
     chain_calls: int = Field(default=0, ge=0)
     metrics: ExecutionMetrics = Field(default_factory=ExecutionMetrics, exclude=True)
@@ -115,33 +151,51 @@ class ExecutionResponse(BaseModel):
         )
 
     @classmethod
-    def failure(
+    def failed(
         cls,
         *,
         failure_stage: FailureStage,
         error: str,
+        failure: ExecutionFailureInfo,
         calls_made: int = 0,
         chain_calls: int = 0,
         shape: JsonObject | None = None,
+        result_ref: str | None = None,
+        expires_in_seconds: int | None = None,
     ) -> Self:
         return cls(
             ok=False,
             failure_stage=failure_stage,
             error=error,
+            failure=failure,
             calls_made=calls_made,
             chain_calls=chain_calls,
             shape=shape,
+            result_ref=result_ref,
+            expires_in_seconds=expires_in_seconds,
         )
 
     @model_validator(mode="after")
     def validate_state(self) -> Self:
         if self.ok:
-            if self.failure_stage is not None or self.error is not None or self.shape is not None:
+            failure_details = (
+                self.failure_stage,
+                self.error,
+                self.failure,
+                self.shape,
+                self.result_ref,
+                self.expires_in_seconds,
+            )
+            if any(detail is not None for detail in failure_details):
                 raise ValueError("successful execution cannot contain failure details")
-        elif self.failure_stage is None or self.error is None:
-            raise ValueError("failed execution requires a failure stage and error")
+        elif self.failure_stage is None or self.error is None or self.failure is None:
+            raise ValueError("failed execution requires a failure stage, error, and details")
         elif self.result is not None:
             raise ValueError("failed execution cannot contain a result")
+        elif (self.result_ref is None) != (self.expires_in_seconds is None):
+            raise ValueError("result reference and expiry must be provided together")
+        elif self.result_ref is not None and self.failure_stage != "result":
+            raise ValueError("only a result failure can contain a result reference")
         return self
 
     @model_serializer(mode="plain")
@@ -153,14 +207,21 @@ class ExecutionResponse(BaseModel):
                 "calls_made": self.calls_made,
             }
         else:
+            failure = self.failure
+            if failure is None:
+                raise RuntimeError("failed execution is missing structured details")
             response = {
                 "ok": False,
                 "failure_stage": self.failure_stage,
                 "error": self.error,
+                "failure": failure.model_dump(mode="json"),
                 "calls_made": self.calls_made,
             }
             if self.shape is not None:
                 response["shape"] = self.shape
+            if self.result_ref is not None:
+                response["result_ref"] = self.result_ref
+                response["expires_in_seconds"] = self.expires_in_seconds
         if self.chain_calls > 0:
             response["chain_calls"] = self.chain_calls
         timings: JsonObject = {
@@ -200,7 +261,14 @@ class MontyExecutor:
     def update_catalog(self, catalog: ToolCatalog) -> None:
         self.catalog = catalog
 
-    async def execute(self, code: str, call_tool: ToolCall) -> ExecutionResponse:
+    async def execute(
+        self,
+        code: str,
+        call_tool: ToolCall,
+        *,
+        input_value: JsonValue = None,
+        retain_result: ResultRetainer | None = None,
+    ) -> ExecutionResponse:
         async def adapted(
             name: str,
             arguments: JsonObject,
@@ -208,22 +276,39 @@ class MontyExecutor:
         ) -> JsonValue:
             return await call_tool(name, arguments)
 
-        return await self.execute_graph(code, adapted)
+        return await self.execute_graph(
+            code,
+            adapted,
+            input_value=input_value,
+            retain_result=retain_result,
+        )
 
     async def execute_graph(
         self,
         code: str,
         call_tool: ContextToolCall,
+        *,
+        input_value: JsonValue = None,
+        retain_result: ResultRetainer | None = None,
     ) -> ExecutionResponse:
         async with self._execution_lock:
             context = self._new_context(self.catalog, call_tool)
-            return await self._execute_program(code, context, enforce_result_limit=True)
+            return await self._execute_program(
+                code,
+                context,
+                input_value=input_value,
+                input_type="JsonValue" if input_value is not None else None,
+                enforce_result_limit=True,
+                retain_result=retain_result,
+            )
 
     async def execute_saved_chain(
         self,
         chain: SavedChainManifest,
         arguments: JsonObject,
         call_tool: ContextToolCall,
+        *,
+        retain_result: ResultRetainer | None = None,
     ) -> ExecutionResponse:
         async with self._execution_lock:
             catalog = self.catalog
@@ -231,9 +316,15 @@ class MontyExecutor:
             try:
                 validated = catalog.validate_arguments(spec.name, arguments)
             except (TypeError, ValidationError, ValueError) as error:
-                return ExecutionResponse.failure(
+                message = f"{chain.call}: invalid arguments: {error}"
+                return ExecutionResponse.failed(
                     failure_stage="preflight",
-                    error=f"{chain.call}: invalid arguments: {error}",
+                    error=message,
+                    failure=ExecutionFailureInfo(
+                        kind="preflight",
+                        retryable=False,
+                        message=message,
+                    ),
                 )
             context = self._new_context(catalog, call_tool)
             context.chain_stack.set((chain.name,))
@@ -245,6 +336,7 @@ class MontyExecutor:
                 output_type=spec.output_type_name,
                 output_spec_name=spec.name,
                 enforce_result_limit=True,
+                retain_result=retain_result,
             )
 
     async def execute_nested_chain(
@@ -318,11 +410,12 @@ class MontyExecutor:
         code: str,
         context: ExecutionContext,
         *,
-        input_value: JsonObject | None = None,
+        input_value: JsonValue = None,
         input_type: str | None = None,
         output_type: str | None = None,
         output_spec_name: str | None = None,
         enforce_result_limit: bool,
+        retain_result: ResultRetainer | None = None,
     ) -> ExecutionResponse:
         if not code.strip():
             return self._failure(context, "preflight", "Execution code must not be empty")
@@ -333,6 +426,7 @@ class MontyExecutor:
             input_type=input_type,
             output_type=output_type,
             typed=True,
+            has_input=has_input,
         )
         referenced = referenced_calls(code, context.catalog.facade_calls)
         type_stubs = context.catalog.type_stubs_for(
@@ -403,8 +497,19 @@ class MontyExecutor:
             if remaining <= 0:
                 raise TimeoutError
             timeout = min(context.settings.tool_timeout_seconds, remaining)
-            async with asyncio.timeout(timeout):
-                return await context.call_tool(name, validated, context)
+            try:
+                async with asyncio.timeout(timeout):
+                    return await context.call_tool(name, validated, context)
+            except TimeoutError:
+                message = f"{spec.call} timed out after {timeout:g}s"
+                context.failure = ExecutionFailureInfo(
+                    kind="upstream_timeout",
+                    server=spec.server,
+                    tool=spec.backend_name,
+                    retryable=True,
+                    message=message,
+                )
+                raise
 
         external_functions: dict[str, ExternalFunction] = {}
 
@@ -430,7 +535,37 @@ class MontyExecutor:
                 byte_limit=_inspection_byte_limit(context.settings.result_byte_limit),
             )
 
-        external_functions[INSPECT_JSON_EXTERNAL] = inspect_json_external
+        async def expect_object_external(value: JsonValue) -> JsonValue:
+            await asyncio.sleep(0)
+            if not isinstance(value, dict):
+                raise TypeError(f"expect_object expected object, got {_shape_label(value)}")
+            return value
+
+        async def expect_list_external(value: JsonValue) -> JsonValue:
+            await asyncio.sleep(0)
+            if not isinstance(value, list):
+                raise TypeError(f"expect_list expected array, got {_shape_label(value)}")
+            return value
+
+        async def expect_string_external(value: JsonValue) -> JsonValue:
+            await asyncio.sleep(0)
+            if not isinstance(value, str):
+                raise TypeError(f"expect_string expected string, got {_shape_label(value)}")
+            return value
+
+        async def expect_integer_external(value: JsonValue) -> JsonValue:
+            await asyncio.sleep(0)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError(f"expect_integer expected integer, got {_shape_label(value)}")
+            return value
+
+        external_functions[SANDBOX_FUNCTION_EXTERNALS[INSPECT_JSON_NAME]] = inspect_json_external
+        external_functions[SANDBOX_FUNCTION_EXTERNALS[EXPECT_OBJECT_NAME]] = expect_object_external
+        external_functions[SANDBOX_FUNCTION_EXTERNALS[EXPECT_LIST_NAME]] = expect_list_external
+        external_functions[SANDBOX_FUNCTION_EXTERNALS[EXPECT_STRING_NAME]] = expect_string_external
+        external_functions[SANDBOX_FUNCTION_EXTERNALS[EXPECT_INTEGER_NAME]] = (
+            expect_integer_external
+        )
         for spec in context.catalog.tools.values():
 
             async def sdk_method(
@@ -491,7 +626,10 @@ class MontyExecutor:
             lowered = message.lower()
             stage: Literal["runtime", "timeout"] = (
                 "timeout"
-                if "duration" in lowered or "timed out" in lowered or "timeout" in lowered
+                if (context.failure is not None and context.failure.kind == "upstream_timeout")
+                or "duration" in lowered
+                or "timed out" in lowered
+                or "timeout" in lowered
                 else "runtime"
             )
             return self._failure(context, stage, message)
@@ -513,11 +651,18 @@ class MontyExecutor:
         context.metrics.serialization_ms += _elapsed_ms(serialization_started)
         context.metrics.result_bytes = result_bytes
         if enforce_result_limit and result_bytes >= context.settings.result_byte_limit:
-            response = ExecutionResponse.failure(
+            retained = retain_result(result) if retain_result is not None else None
+            message = (
+                f"Returned value is {result_bytes} bytes; reduce it below "
+                f"{context.settings.result_byte_limit} bytes"
+            )
+            response = ExecutionResponse.failed(
                 failure_stage="result",
-                error=(
-                    f"Returned value is {result_bytes} bytes; reduce it below "
-                    f"{context.settings.result_byte_limit} bytes"
+                error=message,
+                failure=ExecutionFailureInfo(
+                    kind="result",
+                    retryable=False,
+                    message=message,
                 ),
                 shape=_inspect_json(
                     result,
@@ -527,6 +672,8 @@ class MontyExecutor:
                 ),
                 calls_made=context.calls_made,
                 chain_calls=context.chain_calls,
+                result_ref=retained.reference if retained is not None else None,
+                expires_in_seconds=(retained.expires_in_seconds if retained is not None else None),
             )
             response.metrics = context.metrics.model_copy()
             return response
@@ -584,14 +731,37 @@ class MontyExecutor:
         stage: Literal["preflight", "runtime", "timeout", "cancelled", "result"],
         error: str,
     ) -> ExecutionResponse:
-        response = ExecutionResponse.failure(
+        failure = context.failure or _execution_failure_info(stage, error)
+        response = ExecutionResponse.failed(
             failure_stage=stage,
             error=error,
+            failure=failure,
             calls_made=context.calls_made,
             chain_calls=context.chain_calls,
         )
         response.metrics = context.metrics.model_copy()
         return response
+
+
+def _execution_failure_info(
+    stage: FailureStage,
+    message: str,
+) -> ExecutionFailureInfo:
+    if stage == "preflight":
+        kind: FailureKind = "preflight"
+    elif stage == "result":
+        kind = "result"
+    elif stage == "timeout":
+        kind = "sandbox_timeout"
+    elif stage == "cancelled":
+        kind = "cancelled"
+    else:
+        kind = "sandbox_runtime"
+    return ExecutionFailureInfo(
+        kind=kind,
+        retryable=False,
+        message=message,
+    )
 
 
 def _saved_chain_result_error(
@@ -623,7 +793,7 @@ def _elapsed_ms(started: float) -> float:
 
 
 def _inspection_byte_limit(result_byte_limit: int) -> int:
-    return max(256, min(INSPECT_BYTE_LIMIT, result_byte_limit * 3 // 4))
+    return max(256, min(INSPECT_BYTE_LIMIT, result_byte_limit * 2 // 3))
 
 
 def _inspect_json(
@@ -867,10 +1037,10 @@ def _wrap_code(
     normalized = textwrap.dedent(code).strip("\n")
     uses_input = input_type is not None if has_input is None else has_input
     if typed and uses_input:
-        if input_type is None or output_type is None:
-            raise ValueError("Typed saved-chain code requires input and output types")
+        if input_type is None:
+            raise ValueError("Typed input code requires an input type")
         signature = f"input: {input_type}"
-        return_annotation = f" -> {output_type}"
+        return_annotation = f" -> {output_type}" if output_type is not None else ""
     elif uses_input:
         signature = "input"
         return_annotation = ""
@@ -898,13 +1068,15 @@ def _rewrite_sdk_calls(code: str, catalog: ToolCatalog) -> str:
         def visit_Call(self, node: ast.Call) -> ast.AST:
             self.generic_visit(node)
             function = node.func
-            if isinstance(function, ast.Name) and function.id == "inspect_json":
-                external_call = ast.Call(
-                    func=ast.Name(id=INSPECT_JSON_EXTERNAL, ctx=ast.Load()),
-                    args=node.args,
-                    keywords=node.keywords,
-                )
-                return ast.copy_location(ast.Await(value=external_call), node)
+            if isinstance(function, ast.Name):
+                external_name = SANDBOX_FUNCTION_EXTERNALS.get(function.id)
+                if external_name is not None:
+                    external_call = ast.Call(
+                        func=ast.Name(id=external_name, ctx=ast.Load()),
+                        args=node.args,
+                        keywords=node.keywords,
+                    )
+                    return ast.copy_location(ast.Await(value=external_call), node)
             if not isinstance(function, ast.Attribute):
                 return node
             if not isinstance(function.value, ast.Name):

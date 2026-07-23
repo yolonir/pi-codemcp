@@ -4,7 +4,7 @@ import {
   type ExtensionAPI,
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import { SavedChainManager } from "../src/chains.js";
+import { newCodeMcpTraceId, SavedChainManager } from "../src/chains.js";
 import { setMcpServerEnabled } from "../src/config.js";
 import { summarizeError } from "../src/errors.js";
 import { CodeMcpLifecycle } from "../src/lifecycle.js";
@@ -37,7 +37,7 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
           bindProjectChainScope(ctx, lifecycle, chains);
           const [status, savedChains, settings, stats] = await Promise.all([
             lifecycle.request("status", {}),
-            chains.list(),
+            chains.list(newCodeMcpTraceId("manager")),
             Promise.resolve(lifecycle.loadSettings()),
             lifecycle.request("stats", {}),
           ]);
@@ -75,15 +75,19 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
               return updated;
             },
             onSetChainEnabled: async (chain, enabled) => {
-              await chains.setEnabled(chain.name, chain.scope, enabled);
-              return chainStatesFromViews(await chains.list());
+              const traceId = newCodeMcpTraceId("manager");
+              await chains.setEnabled(chain.name, chain.scope, enabled, traceId);
+              return chainStatesFromViews(await chains.list(traceId));
             },
             onRevalidateChain: async (chain) => {
-              await chains.revalidate(chain.name, chain.scope);
-              return chainStatesFromViews(await chains.list());
+              const traceId = newCodeMcpTraceId("manager");
+              await chains.revalidate(chain.name, chain.scope, traceId);
+              return chainStatesFromViews(await chains.list(traceId));
             },
-            onDeleteChain: async (chain) =>
-              chainStatesFromViews(await chains.delete(chain.name, chain.scope)),
+            onDeleteChain: async (chain) => {
+              const traceId = newCodeMcpTraceId("manager");
+              return chainStatesFromViews(await chains.delete(chain.name, chain.scope, traceId));
+            },
           });
           if (managerResult === "report-problem") await promptForProblemReport(pi, ctx);
         } catch (error) {

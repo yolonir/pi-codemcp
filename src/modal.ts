@@ -72,6 +72,7 @@ export interface StatsModalState {
     p95Ms: number;
     maxMs: number;
   }>;
+  outcomes: Array<{ name: string; count: number }>;
   failures: Array<{ stage: string; count: number }>;
   upstreamOutputBytes: number;
   cacheHits: number;
@@ -258,6 +259,10 @@ export function statsStateFromSnapshot(snapshot: Record<string, unknown>): Stats
       },
     ];
   });
+  const rawOutcomes = isRecord(snapshot.outcomes) ? snapshot.outcomes : {};
+  const outcomes = Object.entries(rawOutcomes)
+    .flatMap(([name, count]) => (typeof count === "number" && count >= 0 ? [{ name, count }] : []))
+    .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name));
   const rawFailures = isRecord(snapshot.failures) ? snapshot.failures : {};
   const failures = Object.entries(rawFailures)
     .flatMap(([stage, count]) =>
@@ -278,6 +283,7 @@ export function statsStateFromSnapshot(snapshot: Record<string, unknown>): Stats
     recent,
     operations,
     phases,
+    outcomes,
     failures,
     upstreamOutputBytes,
     cacheHits: numberField(cache, "hits"),
@@ -754,6 +760,11 @@ class ServerManagerModal implements Component, Focusable {
           width,
         ),
       );
+    }
+    lines.push("", this.theme.fg("dim", this.theme.bold("OUTCOMES")));
+    if (stats.outcomes.length === 0) lines.push(this.theme.fg("muted", "No outcomes yet"));
+    for (const outcome of stats.outcomes) {
+      lines.push(`${outcome.name.padEnd(22)} ${outcome.count.toLocaleString().padStart(8)}`);
     }
     lines.push("", this.theme.fg("dim", this.theme.bold("FAILURE STAGES")));
     if (stats.failures.length === 0) lines.push(this.theme.fg("muted", "No failures yet"));
