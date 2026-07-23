@@ -11,7 +11,7 @@ export const EXECUTE_PROMPT_GUIDELINES = [
   "Use programmatic execution for a bounded workflow when code can deterministically filter, join, aggregate, deduplicate, validate, or reduce intermediate results.",
   "Keep a model turn between calls when an intermediate result changes the semantic decision or user approval is required.",
   "Return the smallest result that answers the request; oversized results fail explicitly with bounded structural inspection data.",
-  "SDK facades are prebound globals and must not be imported. Import supported stdlib normally (for example, `import asyncio`); class declarations and `__import__` are unsupported.",
+  "SDK facades are prebound globals and must not be imported. Use `import asyncio` for `asyncio.gather`; other imports, classes, `asyncio.create_task`, and `__import__` are unsupported.",
 ] as const;
 
 export const SAVE_CHAIN_PROMPT_GUIDELINES = [

@@ -24,6 +24,14 @@ from pydantic import (
 from pydantic_core import to_json
 
 from .json_types import JSON_VALUE_ADAPTER, JsonObject, JsonValue
+from .sandbox_api import (
+    EXPECT_INTEGER_NAME,
+    EXPECT_LIST_NAME,
+    EXPECT_OBJECT_NAME,
+    EXPECT_STRING_NAME,
+    INSPECT_JSON_NAME,
+    SANDBOX_FUNCTION_EXTERNALS,
+)
 from .tool_catalog import referenced_calls, schema_path_summary
 
 if TYPE_CHECKING:
@@ -39,7 +47,6 @@ INSPECT_STRING_LIMIT = 200
 INSPECT_KEY_LIMIT = 120
 INSPECT_BYTE_LIMIT = 8 * 1024
 CHAIN_INPUT_EXTERNAL = "__codemcp_saved_chain_input"
-INSPECT_JSON_EXTERNAL = "__codemcp_inspect_json"
 
 
 class ExecutionMetrics(BaseModel):
@@ -430,7 +437,37 @@ class MontyExecutor:
                 byte_limit=_inspection_byte_limit(context.settings.result_byte_limit),
             )
 
-        external_functions[INSPECT_JSON_EXTERNAL] = inspect_json_external
+        async def expect_object_external(value: JsonValue) -> JsonValue:
+            await asyncio.sleep(0)
+            if not isinstance(value, dict):
+                raise TypeError(f"expect_object expected object, got {_shape_label(value)}")
+            return value
+
+        async def expect_list_external(value: JsonValue) -> JsonValue:
+            await asyncio.sleep(0)
+            if not isinstance(value, list):
+                raise TypeError(f"expect_list expected array, got {_shape_label(value)}")
+            return value
+
+        async def expect_string_external(value: JsonValue) -> JsonValue:
+            await asyncio.sleep(0)
+            if not isinstance(value, str):
+                raise TypeError(f"expect_string expected string, got {_shape_label(value)}")
+            return value
+
+        async def expect_integer_external(value: JsonValue) -> JsonValue:
+            await asyncio.sleep(0)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError(f"expect_integer expected integer, got {_shape_label(value)}")
+            return value
+
+        external_functions[SANDBOX_FUNCTION_EXTERNALS[INSPECT_JSON_NAME]] = inspect_json_external
+        external_functions[SANDBOX_FUNCTION_EXTERNALS[EXPECT_OBJECT_NAME]] = expect_object_external
+        external_functions[SANDBOX_FUNCTION_EXTERNALS[EXPECT_LIST_NAME]] = expect_list_external
+        external_functions[SANDBOX_FUNCTION_EXTERNALS[EXPECT_STRING_NAME]] = expect_string_external
+        external_functions[SANDBOX_FUNCTION_EXTERNALS[EXPECT_INTEGER_NAME]] = (
+            expect_integer_external
+        )
         for spec in context.catalog.tools.values():
 
             async def sdk_method(
@@ -898,13 +935,15 @@ def _rewrite_sdk_calls(code: str, catalog: ToolCatalog) -> str:
         def visit_Call(self, node: ast.Call) -> ast.AST:
             self.generic_visit(node)
             function = node.func
-            if isinstance(function, ast.Name) and function.id == "inspect_json":
-                external_call = ast.Call(
-                    func=ast.Name(id=INSPECT_JSON_EXTERNAL, ctx=ast.Load()),
-                    args=node.args,
-                    keywords=node.keywords,
-                )
-                return ast.copy_location(ast.Await(value=external_call), node)
+            if isinstance(function, ast.Name):
+                external_name = SANDBOX_FUNCTION_EXTERNALS.get(function.id)
+                if external_name is not None:
+                    external_call = ast.Call(
+                        func=ast.Name(id=external_name, ctx=ast.Load()),
+                        args=node.args,
+                        keywords=node.keywords,
+                    )
+                    return ast.copy_location(ast.Await(value=external_call), node)
             if not isinstance(function, ast.Attribute):
                 return node
             if not isinstance(function.value, ast.Name):

@@ -348,22 +348,106 @@ async def test_inspect_json_reports_bounded_runtime_shape_and_samples() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "code, message",
+    "option",
     [
-        ("return inspect_json([], samples=0)", "samples must be from"),
-        ("return inspect_json([], samples=4)", "samples must be from"),
-        ("return inspect_json([], max_depth=0)", "max_depth must be from"),
+        "samples=0",
+        "samples=4",
+        "max_depth=0",
+        "max_depth=7",
     ],
 )
-async def test_inspect_json_rejects_unbounded_options(code: str, message: str) -> None:
-    async def call(_: str, __: JsonObject) -> JsonValue:
-        raise AssertionError("no MCP tool call expected")
+async def test_inspect_json_rejects_unbounded_options_during_preflight(
+    option: str,
+) -> None:
+    calls = 0
 
-    response = await MontyExecutor(catalog()).execute(code, call)
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        nonlocal calls
+        calls += 1
+        return []
+
+    response = await MontyExecutor(catalog()).execute(
+        f"value = await alpha.dynamic({{}})\nreturn inspect_json(value, {option})",
+        call,
+    )
+    assert response.ok is False
+    assert response.failure_stage == "preflight"
+    assert response.error and "invalid-argument-type" in response.error
+    assert response.calls_made == calls == 0
+
+
+@pytest.mark.asyncio
+async def test_narrowing_helpers_make_jsonvalue_access_typed_and_explicit() -> None:
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        return {"items": [{"name": "alpha", "count": 2}]}
+
+    response = await MontyExecutor(catalog()).execute(
+        """
+        root = expect_object(await alpha.dynamic({}))
+        items = expect_list(root.get("items"))
+        first = expect_object(items[0])
+        return {
+            "name": expect_string(first.get("name")),
+            "count": expect_integer(first.get("count")),
+        }
+        """,
+        call,
+    )
+
+    assert response.ok is True
+    assert response.result == {"name": "alpha", "count": 2}
+    assert response.calls_made == 1
+
+
+@pytest.mark.asyncio
+async def test_documented_asyncio_gather_surface_executes() -> None:
+    async def call(_: str, arguments: JsonObject) -> JsonValue:
+        return {"value": arguments["id"]}
+
+    response = await MontyExecutor(catalog()).execute(
+        """
+        import asyncio
+        first, second = await asyncio.gather(
+            alpha.get({"id": "one"}),
+            alpha.get({"id": "two"}),
+        )
+        return [first["value"], second["value"]]
+        """,
+        call,
+    )
+
+    assert response.ok is True
+    assert response.result == ["one", "two"]
+    assert response.calls_made == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "helper, value, expected",
+    [
+        ("expect_object", [], "expected object, got array[0]"),
+        ("expect_list", {}, "expected array, got object"),
+        ("expect_string", 1, "expected string, got integer"),
+        ("expect_integer", True, "expected integer, got boolean"),
+    ],
+)
+async def test_narrowing_helpers_reject_wrong_runtime_shape(
+    helper: str,
+    value: JsonValue,
+    expected: str,
+) -> None:
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        return value
+
+    response = await MontyExecutor(catalog()).execute(
+        f"return {helper}(await alpha.dynamic({{}}))",
+        call,
+    )
+
     assert response.ok is False
     assert response.failure_stage == "runtime"
-    assert response.error and message in response.error
-    assert response.calls_made == 0
+    assert response.error and expected in response.error
+    assert response.calls_made == 1
 
 
 @pytest.mark.asyncio

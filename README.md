@@ -172,7 +172,7 @@ return {"number": number["value"], "identifier": saved["identifier"]}
 '
 ```
 
-Incomplete upstream schemas become recursive `JsonValue`, not `Any`; unknown values must be narrowed explicitly before typed use. For unfamiliar outputs, `inspect_json(value, samples=2, max_depth=3)` returns a byte-bounded structural summary, cardinality, field sizes, and samples. Preflight type errors happen before any upstream call is made, and oversized final results fail explicitly with the same actionable inspection data.
+Incomplete upstream schemas become recursive `JsonValue`, not `Any`; use the prebound `expect_object`, `expect_list`, `expect_string`, and `expect_integer` helpers to narrow unknown values explicitly. For unfamiliar outputs, `inspect_json(value, samples=2, max_depth=3)` returns a byte-bounded structural summary, cardinality, field sizes, and samples; `samples` is limited to 1–3 and `max_depth` to 1–6 during preflight. The generated prelude documents the sandbox surface: use `import asyncio` with `asyncio.gather`; unavailable host or stdlib APIs are rejected. Preflight type errors happen before any upstream call is made, and oversized final results fail explicitly with the same actionable inspection data.
 
 ## Saved-chain CLI flow
 
