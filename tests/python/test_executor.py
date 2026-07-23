@@ -378,12 +378,21 @@ async def test_oversized_diagnostic_truncates_unbounded_json_keys() -> None:
     async def call(_: str, __: JsonObject) -> JsonValue:
         return {huge_key: 1}
 
+    cache = RefinementCache(
+        entry_byte_limit=200_000,
+        total_byte_limit=400_000,
+    )
     response = await MontyExecutor(
         catalog(), settings=ExecutionSettings(result_byte_limit=1_024)
-    ).execute("return await alpha.dynamic({})", call)
+    ).execute(
+        "return await alpha.dynamic({})",
+        call,
+        retain_result=cache.retain,
+    )
 
     assert response.ok is False
     assert response.failure_stage == "result"
+    assert response.result_ref is not None
     assert response.shape is not None
     assert response.shape["truncated"] is True
     assert huge_key not in response.model_dump_json()
