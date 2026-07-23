@@ -47,6 +47,9 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
   const betaPidPath = join(temporary, "beta.pid");
   const fixture = join(root, "tests", "fixtures", "upstream_server.py");
   const sidecarProject = join(root, "sidecar");
+  const packageVersion = (
+    JSON.parse(await readFile(join(root, "package.json"), "utf8")) as { version: string }
+  ).version;
   await writeFile(
     configPath,
     JSON.stringify({
@@ -226,6 +229,25 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     );
     setTimeout(() => controller.abort(), 150);
     await expect(cancelled).rejects.toThrow();
+
+    const failureTraceId = "pi-tool-call-preflight";
+    const rejected = await client.call("execute", {
+      trace_id: failureTraceId,
+      code: "return inspect_json([], samples=4)",
+    });
+    expect(rejected).toMatchObject({ ok: false, failure_stage: "preflight", calls_made: 0 });
+    const finalStats = await client.call("stats", {});
+    const recentFailures = finalStats.recent_failures as Array<Record<string, unknown>>;
+    expect(recentFailures[0]).toMatchObject({
+      trace_id: failureTraceId,
+      operation: "execute",
+      stage: "preflight",
+      subtype: "preflight_typecheck",
+      calls: 0,
+      package_version: packageVersion,
+    });
+    expect(recentFailures[0]).not.toHaveProperty("code");
+    expect(recentFailures[0]).not.toHaveProperty("error");
 
     const status = await client.call("status", {});
     expect(status).toMatchObject({ connected: true, tool_count: 5 });

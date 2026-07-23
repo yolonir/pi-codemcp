@@ -249,7 +249,6 @@ class FailureEvent:
     timestamp: int
     trace_id: str
     operation: str
-    outcome: FailureOutcome
     stage: str
     subtype: str
     calls: int
@@ -262,7 +261,6 @@ class FailureEvent:
         values: JsonObject = {
             "timestamp": self.timestamp,
             "operation": self.operation,
-            "outcome": self.outcome,
             "stage": self.stage,
             "subtype": self.subtype,
             "calls": self.calls,
@@ -361,7 +359,6 @@ class StatsStore:
                     timestamp=int(time.time()),
                     trace_id=_required_bounded_text(failure.trace_id, TRACE_ID_LIMIT),
                     operation=operation,
-                    outcome=outcome,
                     stage=stage,
                     subtype=subtype,
                     calls=max(0, observation.calls),
@@ -533,18 +530,17 @@ class StatsStore:
                     timestamp=row[0],
                     trace_id=row[1],
                     operation=row[2],
-                    outcome=row[3],
-                    stage=row[4],
-                    subtype=row[5],
-                    calls=row[6],
-                    chain_calls=row[7],
-                    server=row[8],
-                    tool=row[9],
-                    package_version=row[10],
+                    stage=row[3],
+                    subtype=row[4],
+                    calls=row[5],
+                    chain_calls=row[6],
+                    server=row[7],
+                    tool=row[8],
+                    package_version=row[9],
                 ).snapshot()
                 for row in connection.execute(
                     """
-                    SELECT timestamp, trace_id, operation, outcome, stage, subtype,
+                    SELECT timestamp, trace_id, operation, stage, subtype,
                            calls, chain_calls, server, tool, package_version
                     FROM failure_events
                     ORDER BY id DESC
@@ -610,15 +606,14 @@ def _apply_delta(connection: sqlite3.Connection, delta: StatsAccumulator) -> Non
         connection.execute(
             """
             INSERT INTO failure_events(
-                timestamp, trace_id, operation, outcome, stage, subtype,
+                timestamp, trace_id, operation, stage, subtype,
                 calls, chain_calls, server, tool, package_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.timestamp,
                 event.trace_id,
                 event.operation,
-                event.outcome,
                 event.stage,
                 event.subtype,
                 event.calls,
@@ -694,7 +689,6 @@ def _initialize_schema(connection: sqlite3.Connection) -> None:
             timestamp INTEGER NOT NULL,
             trace_id TEXT NOT NULL,
             operation TEXT NOT NULL,
-            outcome TEXT NOT NULL,
             stage TEXT NOT NULL,
             subtype TEXT NOT NULL,
             calls INTEGER NOT NULL,

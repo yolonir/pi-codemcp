@@ -127,6 +127,9 @@ async def test_stats_store_aggregates_100k_calls_with_bounded_storage(
     assert isinstance(tools, dict) and len(tools) <= MAX_TOOLS
     assert isinstance(recent, list) and len(recent) <= RECENT_BUCKET_COUNT
     assert isinstance(failures, list) and len(failures) == RECENT_FAILURE_LIMIT
+    latest_failure = failures[0]
+    assert isinstance(latest_failure, dict)
+    assert latest_failure["package_version"] == "1.2.3"
     assert isinstance(outcomes, dict)
     assert outcomes == {"success": 90_000, "upstream_failure": 10_000}
     assert path.read_bytes().startswith(b"SQLite format 3\x00")
@@ -194,8 +197,24 @@ async def test_failure_references_are_bounded_and_payload_free(tmp_path: Path) -
     connection = sqlite3.connect(path)
     try:
         dump = "\n".join(connection.iterdump())
+        failure_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(failure_events)")
+        }
     finally:
         connection.close()
+    assert failure_columns == {
+        "id",
+        "timestamp",
+        "trace_id",
+        "operation",
+        "stage",
+        "subtype",
+        "calls",
+        "chain_calls",
+        "server",
+        "tool",
+        "package_version",
+    }
     serialized_snapshot = str(snapshot)
     for secret in secret_values.values():
         assert secret not in dump
@@ -230,19 +249,45 @@ def test_concurrent_processes_merge_exact_monotonic_rollups(tmp_path: Path) -> N
     servers = snapshot["servers"]
     tools = snapshot["tools"]
     cache = snapshot["cache"]
+    failures = snapshot["failures"]
+    outcomes = snapshot["outcomes"]
     assert isinstance(lifetime, dict) and lifetime["count"] == expected
     assert isinstance(operations, dict)
-    assert required_object(operations, "execute")["count"] == expected
+    operation = required_object(operations, "execute")
+    assert operation["count"] == expected
+    assert required_object(operation, "duration_ms")["count"] == expected
     assert isinstance(phases, dict)
     assert required_object(phases, "execution")["count"] == expected
     assert isinstance(servers, dict)
-    assert required_object(servers, "grafana")["count"] == expected
+    server = required_object(servers, "grafana")
+    assert server["count"] == expected
+    assert required_object(server, "duration_ms")["count"] == expected
     assert isinstance(tools, dict)
-    assert required_object(tools, "grafana.query_prometheus")["count"] == expected
+    tool = required_object(tools, "grafana.query_prometheus")
+    assert tool["count"] == expected
+    connection = sqlite3.connect(path)
+    try:
+        tool_histogram_count = connection.execute(
+            """
+            SELECT SUM(count) FROM histograms
+            WHERE dimension = 'tool'
+              AND name = 'grafana.query_prometheus'
+              AND metric = 'duration_ms'
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+    assert tool_histogram_count == (expected,)
     assert isinstance(cache, dict)
-    assert (
-        required_integer(cache, "hits") + required_integer(cache, "misses") == expected
-    )
+    assert required_integer(cache, "hits") == expected // 2
+    assert required_integer(cache, "misses") == expected // 2
+    assert isinstance(failures, dict)
+    assert failures == {"runtime": expected_failures}
+    assert isinstance(outcomes, dict)
+    assert outcomes == {
+        "success": expected - expected_failures,
+        "upstream_failure": expected_failures,
+    }
     assert lifetime["failure"] == expected_failures
 
     stale_writer = StatsStore(path, package_version="stale")
