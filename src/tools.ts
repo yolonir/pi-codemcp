@@ -297,7 +297,7 @@ export function registerCodeMcpTools(
     name: "codemcp_execute",
     label: "MCP Execute",
     description:
-      "Type-check and execute one bounded sandboxed Python MCP call graph. Use it when code can deterministically process intermediate results; preserve a model turn for semantic decisions or approvals. The sandbox has no host filesystem, environment, network, or subprocess access. Oversized results fail with bounded shape, size, and sample diagnostics.",
+      "Type-check and execute one bounded sandboxed Python MCP call graph. Filter, aggregate, or sample upstream data inside the sandbox instead of returning raw payloads; preserve a model turn for semantic decisions or approvals. The sandbox has no host filesystem, environment, network, or subprocess access. Oversized results fail with bounded shape, size, and sample diagnostics.",
     promptSnippet: "Run a bounded typed MCP workflow and return a compact result",
     promptGuidelines: [...EXECUTE_PROMPT_GUIDELINES],
     parameters: ExecuteParameters,

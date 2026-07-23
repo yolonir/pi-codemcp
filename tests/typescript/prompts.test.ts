@@ -35,6 +35,7 @@ test("agent prompt policy is lean, decision-based, and non-contradictory", () =>
   expect(rendered).toContain("deterministically");
   expect(rendered).toContain("approval");
   expect(rendered).toContain("smallest result");
+  expect(rendered).toContain("do not return raw payloads");
   expect(rendered).toContain("prebound globals");
   expect(rendered).toContain("must not be imported");
   expect(rendered).toContain("__import__");
