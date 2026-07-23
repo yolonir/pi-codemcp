@@ -20,7 +20,7 @@ JSON_TYPE_STUBS = (
     'JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]',
 )
 SANDBOX_CAPABILITY_STUB = (
-    "# Prebound SDK/helpers are not imported. Sandbox: asyncio.gather.\n"
+    "# Prebound SDK/helpers. Supported: import asyncio; asyncio.gather.\n"
     "# Unavailable: collections.Counter, base64, gzip, asyncio.create_task,\n"
     "# __import__. Use dict counts."
 )

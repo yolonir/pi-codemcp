@@ -659,7 +659,7 @@ def test_catalog_progressively_discloses_and_paginates_inventory(
     assert "def expect_list" in prelude
     assert "def expect_string" in prelude
     assert "def expect_integer" in prelude
-    assert "Sandbox: asyncio.gather" in prelude
+    assert "Supported: import asyncio; asyncio.gather" in prelude
     assert "collections.Counter, base64, gzip, asyncio.create_task" in prelude
     assert "__import__. Use dict counts" in prelude
     inspected_stub = inspected[0].stub
