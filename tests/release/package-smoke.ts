@@ -11,6 +11,7 @@ if (!rawPackageRoot || !rawAgentDir) {
 const packageRoot = resolve(rawPackageRoot);
 const agentDir = resolve(rawAgentDir);
 const projectChainsPath = join(agentDir, "project", ".pi", "pi-codemcp", "chains");
+const traceId = "release-smoke";
 await mkdir(agentDir, { recursive: true });
 await writeFile(
   join(agentDir, "mcp.json"),
@@ -39,6 +40,7 @@ try {
   }
 
   const saved = await client.call("save_chain", {
+    trace_id: traceId,
     scope: "project",
     name: "release_echo",
     description: "Exercise project-scoped persistence from the packed release.",
@@ -71,6 +73,7 @@ try {
     throw new Error(`unexpected project chain manifest: ${JSON.stringify(manifest)}`);
   }
   const executed = await client.call("execute_chain", {
+    trace_id: traceId,
     name: "release_echo",
     arguments: { value: 7 },
   });
@@ -78,6 +81,7 @@ try {
     throw new Error(`project chain execution failed: ${JSON.stringify(executed)}`);
   }
   const disabled = await client.call("set_chain_enabled", {
+    trace_id: traceId,
     name: "release_echo",
     scope: "project",
     enabled: false,
@@ -86,6 +90,7 @@ try {
     throw new Error(`chain was not disabled immediately: ${JSON.stringify(disabled)}`);
   }
   const blocked = await client.call("execute_chain", {
+    trace_id: traceId,
     name: "release_echo",
     arguments: { value: 8 },
   });
