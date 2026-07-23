@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 from typing import Never
@@ -268,6 +269,7 @@ async def test_unscoped_search_returns_partial_results_when_discovery_fails(
         assert [item.call for item in response.results] == [
             "alpha.get_number",
             "alpha.slow_number",
+            "alpha.reject_number",
         ]
         assert [failure.model_dump() for failure in response.discovery_failures] == [
             {"server": "beta", "error": "beta is unavailable"}
@@ -340,9 +342,9 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
             {"query": "save number", "trace_id": TRACE_ID},
         )
         search_data = structured_data(search.structured_content)
-        assert search_data["total_tool_count"] == 3
+        assert search_data["total_tool_count"] == 4
         assert search_data["servers"] == [
-            {"name": "alpha", "tool_count": 2},
+            {"name": "alpha", "tool_count": 3},
             {"name": "beta", "tool_count": 1},
         ]
         search_results = json_object_list(search_data["results"])
@@ -459,7 +461,7 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
     async with cached_client:
         cached_status = await cached_client.call_tool("status", {})
         cached_data = structured_data(cached_status.structured_content)
-        assert cached_data["tool_count"] == 3
+        assert cached_data["tool_count"] == 4
         await cached_client.call_tool(
             "search",
             {"query": "number", "trace_id": TRACE_ID},
@@ -535,6 +537,89 @@ async def test_first_execute_discovers_and_connects_only_referenced_server(
         assert not beta_pid.exists()
         alpha_process = int(alpha_pid.read_text())
     await wait_for_process_exit(alpha_process)
+
+
+@pytest.mark.asyncio
+async def test_upstream_failures_are_structured_and_dead_clients_reconnect_explicitly(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).parents[2]
+    fixture = root / "tests" / "fixtures" / "upstream_server.py"
+    alpha_pid = tmp_path / "alpha.pid"
+    beta_pid = tmp_path / "beta.pid"
+    config_path = tmp_path / "mcp.json"
+    write_config(config_path, fixture, alpha_pid, beta_pid)
+    runtime = gateway.GatewayRuntime.create(
+        config_path,
+        tmp_path / "oauth",
+        tmp_path / "catalog",
+    )
+
+    try:
+        await runtime.search("number", trace_id=TRACE_ID)
+        initial = await runtime.execute(
+            'return await alpha.get_number({"seed": 1})',
+            TRACE_ID,
+        )
+        assert initial.ok is True
+        first_pid = int(alpha_pid.read_text())
+
+        rejected = await runtime.execute(
+            'return await alpha.reject_number({"seed": 2})',
+            TRACE_ID,
+        )
+        assert rejected.ok is False
+        assert rejected.failure is not None
+        assert rejected.failure.kind == "upstream"
+        assert rejected.failure.server == "alpha"
+        assert rejected.failure.tool == "reject_number"
+        assert rejected.failure.retryable is False
+        assert rejected.failure.status == 403
+        assert int(alpha_pid.read_text()) == first_pid
+
+        after_rejection = await runtime.execute(
+            'return await alpha.get_number({"seed": 2})',
+            TRACE_ID,
+        )
+        assert after_rejection.ok is True
+        assert int(alpha_pid.read_text()) == first_pid
+
+        os.kill(first_pid, signal.SIGTERM)
+        await wait_for_process_exit(first_pid)
+        alpha_pid.unlink()
+
+        disconnected = await runtime.execute(
+            'return await alpha.get_number({"seed": 3})',
+            TRACE_ID,
+        )
+        assert disconnected.ok is False
+        assert disconnected.calls_made == 1
+        assert disconnected.failure is not None
+        assert disconnected.failure.kind == "upstream_transport", (
+            disconnected.failure.message
+        )
+        assert disconnected.failure.server == "alpha"
+        assert disconnected.failure.tool == "get_number"
+        assert disconnected.failure.retryable is True
+        assert disconnected.failure.status is None
+        assert "connection" in disconnected.failure.message.lower()
+        assert runtime.handles["alpha"].client is None
+        assert not alpha_pid.exists()
+        stats_snapshot = await runtime.stats_store.snapshot()
+        recent_failures = json_object_list(stats_snapshot["recent_failures"])
+        assert recent_failures[0]["trace_id"] == TRACE_ID
+        assert recent_failures[0]["subtype"] == "upstream_transport"
+
+        explicit_retry = await runtime.execute(
+            'return await alpha.get_number({"seed": 3})',
+            TRACE_ID,
+        )
+        assert explicit_retry.ok is True
+        assert explicit_retry.result == {"value": 4}
+        assert alpha_pid.exists()
+        assert int(alpha_pid.read_text()) != first_pid
+    finally:
+        await runtime.close()
 
 
 @pytest.mark.asyncio

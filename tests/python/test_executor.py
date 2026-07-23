@@ -463,7 +463,38 @@ async def test_timeout_stops_infinite_sandbox_loop() -> None:
     response = await executor.execute("while True:\n    pass", call)
     assert response.ok is False
     assert response.failure_stage == "timeout"
+    assert response.failure is not None
+    assert response.failure.kind == "sandbox_timeout"
+    assert response.failure.retryable is False
     assert response.calls_made == 0
+
+
+@pytest.mark.asyncio
+async def test_upstream_timeout_is_structured_without_replay() -> None:
+    calls = 0
+
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(1)
+        return {"value": 1}
+
+    response = await MontyExecutor(
+        catalog(),
+        settings=ExecutionSettings(
+            timeout_seconds=1,
+            tool_timeout_seconds=0.01,
+        ),
+    ).execute('return await alpha.get({"id": "x"})', call)
+
+    assert response.ok is False
+    assert response.failure_stage == "timeout"
+    assert response.failure is not None
+    assert response.failure.kind == "upstream_timeout"
+    assert response.failure.server == "alpha"
+    assert response.failure.tool == "get"
+    assert response.failure.retryable is True
+    assert response.calls_made == calls == 1
 
 
 @pytest.mark.asyncio

@@ -317,6 +317,7 @@ export function registerCodeMcpTools(
         : {
             failure_stage: result.failure_stage,
             error: result.error,
+            failure: result.failure,
             shape: result.shape,
             calls_made: result.calls_made,
             chain_calls: result.chain_calls,

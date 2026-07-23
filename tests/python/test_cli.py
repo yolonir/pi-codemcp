@@ -271,7 +271,7 @@ def test_cli_search_discovers_fixture_server(
     )
 
     assert code == 0
-    assert payload["total_tool_count"] == 2
+    assert payload["total_tool_count"] == 3
     assert payload["results"][0]["call"] == "alpha.get_number"
     assert pid_path.is_file()
 

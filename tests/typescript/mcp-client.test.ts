@@ -202,7 +202,7 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     await expect(cancelled).rejects.toThrow();
 
     const status = await client.call("status", {});
-    expect(status).toMatchObject({ connected: true, tool_count: 4 });
+    expect(status).toMatchObject({ connected: true, tool_count: 5 });
     sidecarPid = client.pid;
     expect(sidecarPid).not.toBeNull();
     upstreamPids = [

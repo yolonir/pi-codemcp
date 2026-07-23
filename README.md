@@ -36,7 +36,8 @@ I built this because I care a lot about software that is genuinely fast, efficie
 pi-codemcp is deliberately opinionated about operational quality:
 
 - Pi startup does not wait for Python or MCP servers.
-- Each upstream connection is lazy and independent.
+- Each upstream connection is lazy and independent. A dead connection is evicted after the original call fails; that call is never replayed, and the next explicit call reconnects.
+- Upstream failures include stable `kind`, `server`, `tool`, `retryable`, `status`, and `message` fields.
 - Tool catalogs are cached per server and invalidated independently.
 - Agent-written code is type-checked before execution.
 - Time, memory, call count, and output size are bounded.

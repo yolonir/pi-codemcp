@@ -3,10 +3,11 @@ from __future__ import annotations
 import ast
 import asyncio
 import os
+import re
 import textwrap
 import time
 import uuid
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, cast
 
 import pydantic_monty
@@ -27,7 +28,12 @@ from .chains import (
     SavedChainManifest,
     ScopedChainStore,
 )
-from .executor import ExecutionContext, ExecutionResponse, MontyExecutor
+from .executor import (
+    ExecutionContext,
+    ExecutionFailureInfo,
+    ExecutionResponse,
+    MontyExecutor,
+)
 from .mcp_config import NormalizedConfig, load_mcp_json, normalize_mcp_config
 from .models import (
     ExecutionLimitsView,
@@ -57,6 +63,7 @@ if TYPE_CHECKING:
     from .runtime_paths import RuntimePaths
 
 MAX_INSPECT_CALLS = 20
+UPSTREAM_FAILURE_MESSAGE_LIMIT = 500
 type ServerConfig = StdioMCPServer | RemoteMCPServer
 type JsonObject = json_types.JsonObject
 type JsonValue = json_types.JsonValue
@@ -129,7 +136,19 @@ class ServerHandle:
     ) -> mcp_types.CallToolResult:
         async with self._lock:
             client = await self._connect_locked()
-        return await client.call_tool_mcp(name, arguments, timeout=timeout_seconds)
+        try:
+            return await client.call_tool_mcp(name, arguments, timeout=timeout_seconds)
+        except Exception as error:
+            if is_unusable_connection_error(error):
+                await self._discard_client(client)
+            raise
+
+    async def _discard_client(self, client: Client[ClientTransport]) -> None:
+        async with self._lock:
+            if self._client is not client:
+                return
+            with suppress(Exception):
+                await self._disconnect_locked()
 
     async def close(self) -> None:
         async with self._lock:
@@ -627,10 +646,15 @@ class GatewayRuntime:
             )
             raise
         if not chain.enabled:
-            response = ExecutionResponse(
-                ok=False,
+            message = f"Saved chain is disabled: {name}"
+            response = ExecutionResponse.failed(
                 failure_stage="preflight",
-                error=f"Saved chain is disabled: {name}",
+                error=message,
+                failure=ExecutionFailureInfo(
+                    kind="preflight",
+                    retryable=False,
+                    message=message,
+                ),
             )
             self._record_execution(
                 "execute_chain",
@@ -1070,7 +1094,22 @@ class GatewayRuntime:
                 ),
             )
             normalized = context.catalog.normalize_result(public_name, result)
-        except BaseException:
+        except BaseException as error:
+            if isinstance(error, Exception) and context.failure is None:
+                status = _upstream_status(error)
+                transport_failure = is_unusable_connection_error(error)
+                context.failure = ExecutionFailureInfo(
+                    kind="upstream_transport" if transport_failure else "upstream",
+                    server=spec.server,
+                    tool=spec.backend_name,
+                    retryable=transport_failure or _retryable_status(status),
+                    status=status,
+                    message=(
+                        "Upstream connection closed"
+                        if transport_failure
+                        else _upstream_failure_message(error)
+                    ),
+                )
             self.stats_store.record_upstream(
                 spec.server,
                 spec.backend_name,
@@ -1368,7 +1407,78 @@ def new_trace_id(source: str) -> str:
     return f"{source}:{uuid.uuid4()}"
 
 
+def _exception_messages(error: BaseException) -> list[str]:
+    messages: list[str] = []
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        identity = id(current)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        rendered = str(current)
+        messages.append(
+            f"{type(current).__name__}: {rendered}" if rendered else type(current).__name__
+        )
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+    return messages
+
+
+def is_unusable_connection_error(error: BaseException) -> bool:
+    markers = (
+        "connection closed",
+        "connection reset",
+        "broken pipe",
+        "brokenresourceerror",
+        "closedresourceerror",
+        "endofstream",
+        "client is not connected",
+        "session terminated",
+        "transport is closed",
+    )
+    return any(
+        marker in message.lower() for message in _exception_messages(error) for marker in markers
+    )
+
+
+def _upstream_status(error: BaseException) -> int | None:
+    for message in _exception_messages(error):
+        match = re.search(
+            r"(?i)\b(?:http(?: status)?|status(?: code)?)[\"'\s:=]+([1-5]\d{2})\b",
+            message,
+        )
+        if match is not None:
+            return int(match.group(1))
+    return None
+
+
+def _retryable_status(status: int | None) -> bool:
+    return status in {408, 409, 425, 429, 500, 502, 503, 504}
+
+
+def _upstream_failure_message(error: BaseException) -> str:
+    message = next((item.strip() for item in _exception_messages(error) if item.strip()), "")
+    compact = " ".join((message or type(error).__name__).split())
+    if len(compact) <= UPSTREAM_FAILURE_MESSAGE_LIMIT:
+        return compact
+    return f"{compact[: UPSTREAM_FAILURE_MESSAGE_LIMIT - 1].rstrip()}…"
+
+
 def _execution_failure_subtype(response: ExecutionResponse) -> str:
+    failure = response.failure
+    if failure is not None and failure.kind in {
+        "sandbox_timeout",
+        "upstream",
+        "upstream_transport",
+        "upstream_timeout",
+    }:
+        return failure.kind
     stage = response.failure_stage or "error"
     error = response.error or ""
     if stage == "preflight":

@@ -204,9 +204,18 @@ export class SavedChainManager {
           signal,
         );
         if (result.ok !== true) {
-          const error =
-            typeof result.error === "string" ? result.error : `Saved chain ${chain.name} failed`;
-          throw new Error(error);
+          throw new Error(
+            JSON.stringify({
+              failure_stage: result.failure_stage,
+              error:
+                typeof result.error === "string"
+                  ? result.error
+                  : `Saved chain ${chain.name} failed`,
+              failure: result.failure,
+              calls_made: result.calls_made,
+              chain_calls: result.chain_calls,
+            }),
+          );
         }
         const settings = manager.lifecycle.loadSettings();
         const output = formatCodeMcpOutput(result.result, {

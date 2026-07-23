@@ -112,6 +112,49 @@ test("execute sends only compact result while keeping metadata in details", asyn
   });
 });
 
+test("execute exposes structured upstream failure fields", async () => {
+  const { tools } = captureTools({
+    projectAvailable: true,
+    executeResult: {
+      ok: false,
+      failure_stage: "runtime",
+      error: "Connection closed",
+      failure: {
+        kind: "upstream_transport",
+        server: "grafana",
+        tool: "query",
+        retryable: true,
+        status: null,
+        message: "Upstream connection closed",
+      },
+      calls_made: 1,
+      chain_calls: 0,
+    },
+  });
+  const execute = tools.get("codemcp_execute");
+  const result = await execute?.execute(
+    "call-transport",
+    { code: "return 1" },
+    undefined,
+    undefined,
+  );
+  const payload = JSON.parse(result?.content[0]?.text ?? "null") as Record<string, unknown>;
+  expect(payload).toMatchObject({
+    failure_stage: "runtime",
+    error: "Connection closed",
+    failure: {
+      kind: "upstream_transport",
+      server: "grafana",
+      tool: "query",
+      retryable: true,
+      status: null,
+      message: "Upstream connection closed",
+    },
+    calls_made: 1,
+    chain_calls: 0,
+  });
+});
+
 test("search exposes unavailable servers as partial-result metadata", async () => {
   const { tools, requests } = captureTools({
     projectAvailable: true,

@@ -44,9 +44,23 @@ INSPECT_SAMPLE_LIMIT = 3
 INSPECT_DEPTH_LIMIT = 6
 INSPECT_COLLECTION_LIMIT = 10
 INSPECT_STRING_LIMIT = 200
-INSPECT_KEY_LIMIT = 120
+INSPECT_KEY_LIMIT = 96
 INSPECT_BYTE_LIMIT = 8 * 1024
 CHAIN_INPUT_EXTERNAL = "__codemcp_saved_chain_input"
+
+
+type FailureStage = Literal["preflight", "runtime", "timeout", "cancelled", "result"]
+type FailureKind = Literal[
+    "preflight",
+    "result",
+    "sandbox_runtime",
+    "sandbox_timeout",
+    "upstream",
+    "upstream_transport",
+    "upstream_timeout",
+    "cancelled",
+    "internal",
+]
 
 
 class ExecutionMetrics(BaseModel):
@@ -56,6 +70,17 @@ class ExecutionMetrics(BaseModel):
     runtime_ms: float = Field(default=0.0, ge=0)
     serialization_ms: float = Field(default=0.0, ge=0)
     result_bytes: int = Field(default=0, ge=0)
+
+
+class ExecutionFailureInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    kind: FailureKind
+    server: str | None = None
+    tool: str | None = None
+    retryable: bool
+    status: int | None = Field(default=None, ge=100, le=599)
+    message: str = Field(min_length=1)
 
 
 class ExecutionContext:
@@ -73,6 +98,7 @@ class ExecutionContext:
         self.calls_made = 0
         self.chain_calls = 0
         self.metrics = ExecutionMetrics()
+        self.failure: ExecutionFailureInfo | None = None
         self.chain_stack: ContextVar[tuple[str, ...]] = ContextVar(
             "codemcp_chain_stack",
             default=(),
@@ -91,9 +117,6 @@ ContextToolCall = Callable[[str, JsonObject, ExecutionContext], Awaitable[JsonVa
 ExternalFunction = Callable[..., Awaitable[JsonValue]]
 
 
-type FailureStage = Literal["preflight", "runtime", "timeout", "cancelled", "result"]
-
-
 class ExecutionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -101,6 +124,7 @@ class ExecutionResponse(BaseModel):
     failure_stage: FailureStage | None = None
     result: JsonValue = None
     error: str | None = None
+    failure: ExecutionFailureInfo | None = None
     shape: JsonObject | None = None
     calls_made: int = Field(default=0, ge=0)
     chain_calls: int = Field(default=0, ge=0)
@@ -122,11 +146,12 @@ class ExecutionResponse(BaseModel):
         )
 
     @classmethod
-    def failure(
+    def failed(
         cls,
         *,
         failure_stage: FailureStage,
         error: str,
+        failure: ExecutionFailureInfo,
         calls_made: int = 0,
         chain_calls: int = 0,
         shape: JsonObject | None = None,
@@ -135,6 +160,7 @@ class ExecutionResponse(BaseModel):
             ok=False,
             failure_stage=failure_stage,
             error=error,
+            failure=failure,
             calls_made=calls_made,
             chain_calls=chain_calls,
             shape=shape,
@@ -143,10 +169,15 @@ class ExecutionResponse(BaseModel):
     @model_validator(mode="after")
     def validate_state(self) -> Self:
         if self.ok:
-            if self.failure_stage is not None or self.error is not None or self.shape is not None:
+            if (
+                self.failure_stage is not None
+                or self.error is not None
+                or self.failure is not None
+                or self.shape is not None
+            ):
                 raise ValueError("successful execution cannot contain failure details")
-        elif self.failure_stage is None or self.error is None:
-            raise ValueError("failed execution requires a failure stage and error")
+        elif self.failure_stage is None or self.error is None or self.failure is None:
+            raise ValueError("failed execution requires a failure stage, error, and details")
         elif self.result is not None:
             raise ValueError("failed execution cannot contain a result")
         return self
@@ -160,10 +191,14 @@ class ExecutionResponse(BaseModel):
                 "calls_made": self.calls_made,
             }
         else:
+            failure = self.failure
+            if failure is None:
+                raise RuntimeError("failed execution is missing structured details")
             response = {
                 "ok": False,
                 "failure_stage": self.failure_stage,
                 "error": self.error,
+                "failure": failure.model_dump(mode="json"),
                 "calls_made": self.calls_made,
             }
             if self.shape is not None:
@@ -238,9 +273,15 @@ class MontyExecutor:
             try:
                 validated = catalog.validate_arguments(spec.name, arguments)
             except (TypeError, ValidationError, ValueError) as error:
-                return ExecutionResponse.failure(
+                message = f"{chain.call}: invalid arguments: {error}"
+                return ExecutionResponse.failed(
                     failure_stage="preflight",
-                    error=f"{chain.call}: invalid arguments: {error}",
+                    error=message,
+                    failure=ExecutionFailureInfo(
+                        kind="preflight",
+                        retryable=False,
+                        message=message,
+                    ),
                 )
             context = self._new_context(catalog, call_tool)
             context.chain_stack.set((chain.name,))
@@ -410,8 +451,19 @@ class MontyExecutor:
             if remaining <= 0:
                 raise TimeoutError
             timeout = min(context.settings.tool_timeout_seconds, remaining)
-            async with asyncio.timeout(timeout):
-                return await context.call_tool(name, validated, context)
+            try:
+                async with asyncio.timeout(timeout):
+                    return await context.call_tool(name, validated, context)
+            except TimeoutError:
+                message = f"{spec.call} timed out after {timeout:g}s"
+                context.failure = ExecutionFailureInfo(
+                    kind="upstream_timeout",
+                    server=spec.server,
+                    tool=spec.backend_name,
+                    retryable=True,
+                    message=message,
+                )
+                raise
 
         external_functions: dict[str, ExternalFunction] = {}
 
@@ -528,7 +580,10 @@ class MontyExecutor:
             lowered = message.lower()
             stage: Literal["runtime", "timeout"] = (
                 "timeout"
-                if "duration" in lowered or "timed out" in lowered or "timeout" in lowered
+                if (context.failure is not None and context.failure.kind == "upstream_timeout")
+                or "duration" in lowered
+                or "timed out" in lowered
+                or "timeout" in lowered
                 else "runtime"
             )
             return self._failure(context, stage, message)
@@ -550,11 +605,17 @@ class MontyExecutor:
         context.metrics.serialization_ms += _elapsed_ms(serialization_started)
         context.metrics.result_bytes = result_bytes
         if enforce_result_limit and result_bytes >= context.settings.result_byte_limit:
-            response = ExecutionResponse.failure(
+            message = (
+                f"Returned value is {result_bytes} bytes; reduce it below "
+                f"{context.settings.result_byte_limit} bytes"
+            )
+            response = ExecutionResponse.failed(
                 failure_stage="result",
-                error=(
-                    f"Returned value is {result_bytes} bytes; reduce it below "
-                    f"{context.settings.result_byte_limit} bytes"
+                error=message,
+                failure=ExecutionFailureInfo(
+                    kind="result",
+                    retryable=False,
+                    message=message,
                 ),
                 shape=_inspect_json(
                     result,
@@ -621,14 +682,37 @@ class MontyExecutor:
         stage: Literal["preflight", "runtime", "timeout", "cancelled", "result"],
         error: str,
     ) -> ExecutionResponse:
-        response = ExecutionResponse.failure(
+        failure = context.failure or _execution_failure_info(stage, error)
+        response = ExecutionResponse.failed(
             failure_stage=stage,
             error=error,
+            failure=failure,
             calls_made=context.calls_made,
             chain_calls=context.chain_calls,
         )
         response.metrics = context.metrics.model_copy()
         return response
+
+
+def _execution_failure_info(
+    stage: FailureStage,
+    message: str,
+) -> ExecutionFailureInfo:
+    if stage == "preflight":
+        kind: FailureKind = "preflight"
+    elif stage == "result":
+        kind = "result"
+    elif stage == "timeout":
+        kind = "sandbox_timeout"
+    elif stage == "cancelled":
+        kind = "cancelled"
+    else:
+        kind = "sandbox_runtime"
+    return ExecutionFailureInfo(
+        kind=kind,
+        retryable=False,
+        message=message,
+    )
 
 
 def _saved_chain_result_error(
@@ -660,7 +744,7 @@ def _elapsed_ms(started: float) -> float:
 
 
 def _inspection_byte_limit(result_byte_limit: int) -> int:
-    return max(256, min(INSPECT_BYTE_LIMIT, result_byte_limit * 3 // 4))
+    return max(256, min(INSPECT_BYTE_LIMIT, result_byte_limit * 2 // 3))
 
 
 def _inspect_json(
