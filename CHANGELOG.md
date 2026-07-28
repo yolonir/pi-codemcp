@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.1](https://github.com/yolonir/pi-codemcp/compare/v1.3.0...v1.3.1) (2026-07-28)
+
+
+### Bug Fixes
+
+* honor sibling type in allOf schema stubs ([219236f](https://github.com/yolonir/pi-codemcp/commit/219236f1eee193820e482d9c23d665696e16f98a))
+* honor sibling type in allOf schema stubs ([6cc6d5d](https://github.com/yolonir/pi-codemcp/commit/6cc6d5dea8c327c97d05d5bd2e841d2cc6f3c898))
+
 ## [1.3.0](https://github.com/yolonir/pi-codemcp/compare/v1.2.2...v1.3.0) (2026-07-23)
 
 
