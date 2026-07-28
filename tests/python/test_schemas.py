@@ -326,6 +326,47 @@ def test_recursive_json_schema_refs_stop_at_json_value() -> None:
     assert "Any" not in catalog.type_stubs
 
 
+def test_constrained_primitive_with_sibling_type_and_all_of_renders_primitive() -> None:
+    catalog = ToolCatalog.from_server_tools(
+        {
+            "herd": [
+                make_tool(
+                    "contract_metadata",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "contractAddress": {
+                                "type": "string",
+                                "allOf": [
+                                    {
+                                        "pattern": "^0x[0-9a-fA-F]{40}$",
+                                        "description": "The contract address (0x...)",
+                                    }
+                                ],
+                            },
+                            "page": {
+                                "type": "integer",
+                                "allOf": [{"minimum": 1}],
+                            },
+                        },
+                        "required": ["contractAddress"],
+                    },
+                )
+            ]
+        }
+    )
+
+    spec = catalog.tools["herd_contract_metadata"]
+    assert "contractAddress: str" in spec.stub
+    assert "page: NotRequired[int]" in spec.stub
+    validated = catalog.validate_arguments(
+        spec.name, {"contractAddress": "0x" + "ab" * 20}
+    )
+    assert validated["contractAddress"] == "0x" + "ab" * 20
+    with pytest.raises(ValidationError):
+        catalog.validate_arguments(spec.name, {"contractAddress": {"not": "a string"}})
+
+
 def make_search_fixture_tool(
     name: str,
     description: str,
