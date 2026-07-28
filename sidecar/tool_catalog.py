@@ -1047,42 +1047,67 @@ def _resolve_ref(ref: str, root: JsonSchema) -> JsonObject:
 def _merge_all_of(
     schema: JsonObject,
     root: JsonSchema,
-) -> JsonObject | None:
-    merged_properties: JsonObject = {}
-    merged_required: list[JsonValue] = []
-    additional_properties: JsonValue = True
-    has_additional_properties = False
+) -> JsonSchema | None:
     raw_members = schema.get("allOf")
     if not isinstance(raw_members, list):
         return None
+    # Sibling constraints (type, properties, ...) apply on top of allOf members.
+    parts: list[JsonObject] = [{key: value for key, value in schema.items() if key != "allOf"}]
     for member in raw_members:
         if not isinstance(member, dict):
             return None
         ref = member.get("$ref")
-        resolved = _resolve_ref(ref, root) if isinstance(ref, str) else member
-        if resolved.get("type") not in {None, "object"}:
-            return None
-        raw_properties = resolved.get("properties")
+        parts.append(_resolve_ref(ref, root) if isinstance(ref, str) else member)
+
+    declared_types: set[str] = set()
+    for part in parts:
+        part_type = part.get("type")
+        if isinstance(part_type, str):
+            declared_types.add(part_type)
+    if len(declared_types) > 1:
+        return None
+    merged_type = declared_types.pop() if declared_types else None
+
+    if merged_type == "object" or (
+        merged_type is None and any("properties" in part for part in parts)
+    ):
+        return _merge_object_parts(parts)
+
+    if merged_type is None:
+        # Annotation-only allOf (descriptions, patterns, ...): no type information.
+        return True
+    merged: JsonObject = {"type": merged_type}
+    for part in parts:
+        if "items" in part and "items" not in merged:
+            merged["items"] = part["items"]
+    return merged
+
+
+def _merge_object_parts(parts: list[JsonObject]) -> JsonObject:
+    merged_properties: JsonObject = {}
+    merged_required: list[JsonValue] = []
+    additional_properties: JsonValue = True
+    has_additional_properties = False
+    for part in parts:
+        raw_properties = part.get("properties")
         if isinstance(raw_properties, dict):
             merged_properties.update(raw_properties)
-        raw_required = resolved.get("required")
+        raw_required = part.get("required")
         if isinstance(raw_required, list):
             for required in raw_required:
                 if isinstance(required, str) and required not in merged_required:
                     merged_required.append(required)
-        if "additionalProperties" in resolved:
-            additional_properties = JSON_VALUE_ADAPTER.validate_python(
-                resolved["additionalProperties"]
-            )
+        if "additionalProperties" in part:
+            additional_properties = JSON_VALUE_ADAPTER.validate_python(part["additionalProperties"])
             has_additional_properties = True
-    merged: JsonObject = {
+    merged_object: JsonObject = {
         "type": "object",
         "properties": merged_properties,
         "required": merged_required,
     }
     if has_additional_properties:
-        merged["additionalProperties"] = additional_properties
-    return merged
+        merged_object["additionalProperties"] = additional_properties
+    return merged_object
 
 
 def _dedupe(blocks: Iterable[str]) -> list[str]:
