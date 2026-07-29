@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.2](https://github.com/yolonir/pi-codemcp/compare/v1.3.1...v1.3.2) (2026-07-28)
+
+
+### Bug Fixes
+
+* stop repeated OAuth re-logins for remote MCP servers ([9f56206](https://github.com/yolonir/pi-codemcp/commit/9f5620694528e29f9f9dd5544ccf49257fd7c86c))
+* stop repeated OAuth re-logins for remote MCP servers ([a69d01d](https://github.com/yolonir/pi-codemcp/commit/a69d01d4ab58b2c5f30066efedd4b2f11948aebd))
+
 ## [1.3.1](https://github.com/yolonir/pi-codemcp/compare/v1.3.0...v1.3.1) (2026-07-28)
 
 
