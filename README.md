@@ -2,6 +2,8 @@
 
 Fast, typed, sandboxed **Code Mode for every MCP server configured in Pi**.
 
+[Documentation](https://yolonir.github.io/pi-codemcp/) · [GitHub](https://github.com/yolonir/pi-codemcp) · [npm](https://www.npmjs.com/package/pi-codemcp)
+
 Instead of putting every upstream MCP tool definition into the model context, pi-codemcp gives the agent a small interface for discovery, execution, and reuse:
 
 - `codemcp_search` ranks capabilities or pages through a compact inventory without loading full schemas.

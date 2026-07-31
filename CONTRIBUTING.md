@@ -35,7 +35,9 @@ check.
 ```text
 just sync          Install exactly what the lockfiles specify
 just format        Format TypeScript and Python, then apply safe lint fixes
-just check         Run lock, lint, type, and test gates
+just check         Run lock, lint, type, test, and documentation gates
+bun run docs:dev   Start the local documentation server
+bun run docs:build Build the static documentation site
 just precommit     Run fast pre-commit hooks against the repository
 just prepush       Run the complete pre-push quality gate
 just release-check Pack, install, and smoke-test the production npm artifact

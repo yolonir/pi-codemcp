@@ -1,6 +1,7 @@
 node_modules/
 dist/
-docs/
+/docs/
+/.astro/
 .pi/
 sidecar/.venv/
 __pycache__/

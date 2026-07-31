@@ -59,6 +59,10 @@ test-python:
 
 check-python: format-check-python lint-python typecheck-python test-python
 
+check-docs:
+    bun run docs:check
+    bun run docs:build
+
 check-type-suppressions:
     @if git grep -n -E \
         'type:[[:space:]]*ignore|pyright:[[:space:]]*ignore|@ts-(ignore|expect-error|nocheck)|noqa:.*TC[0-9]+' \
@@ -72,14 +76,17 @@ check-fast: lint-typescript format-check-python lint-python check-type-suppressi
 check: check-locks check-type-suppressions
     #!/usr/bin/env bash
     set -uo pipefail
-    printf '%s\n' 'Running TypeScript and Python gates in parallel'
+    printf '%s\n' 'Running TypeScript, Python, and documentation gates in parallel'
     just check-typescript &
     typescript_pid=$!
     just check-python &
     python_pid=$!
+    just check-docs &
+    docs_pid=$!
     status=0
     wait "$typescript_pid" || status=1
     wait "$python_pid" || status=1
+    wait "$docs_pid" || status=1
     exit "$status"
 
 release-check:

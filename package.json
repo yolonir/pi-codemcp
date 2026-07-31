@@ -9,7 +9,7 @@
     "type": "git",
     "url": "git+https://github.com/yolonir/pi-codemcp.git"
   },
-  "homepage": "https://github.com/yolonir/pi-codemcp#readme",
+  "homepage": "https://yolonir.github.io/pi-codemcp/",
   "bugs": {
     "url": "https://github.com/yolonir/pi-codemcp/issues"
   },
@@ -37,6 +37,10 @@
   "scripts": {
     "check": "just check",
     "check:ts": "bun run typecheck && bun run lint && bun run test:ts",
+    "docs:build": "astro build",
+    "docs:check": "astro check --minimumSeverity error",
+    "docs:dev": "astro dev",
+    "docs:preview": "astro preview",
     "format": "biome check --write .",
     "lint": "biome check .",
     "prepublishOnly": "just check && just release-check",
@@ -80,12 +84,16 @@
     }
   },
   "devDependencies": {
+    "@astrojs/check": "0.9.10",
+    "@astrojs/starlight": "0.41.5",
     "@biomejs/biome": "2.5.4",
     "@earendil-works/pi-agent-core": "0.80.10",
     "@earendil-works/pi-ai": "0.80.10",
     "@earendil-works/pi-coding-agent": "0.80.10",
     "@earendil-works/pi-tui": "0.80.10",
     "@types/bun": "1.3.14",
+    "astro": "7.1.6",
+    "sharp": "0.34.5",
     "typebox": "1.3.6",
     "typescript": "5.9.3"
   }

@@ -1,0 +1,50 @@
+---
+title: pi-codemcp
+description: Typed, sandboxed Code Mode for every MCP server configured in Pi.
+template: splash
+hero:
+  tagline: Search every configured MCP server, inspect exact typed contracts, and execute compact multi-server call graphs without flooding the model context.
+  actions:
+    - text: Get started
+      link: /pi-codemcp/getting-started/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/yolonir/pi-codemcp
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+## Code Mode for Pi
+
+pi-codemcp replaces a large collection of MCP tool schemas with five focused Pi tools for discovery, inspection, sandboxed execution, and reuse.
+
+<CardGrid stagger>
+  <Card title="Compact discovery" icon="magnifier">
+    Search a combined catalog and load exact schemas only for the calls needed by the task.
+  </Card>
+  <Card title="Typed execution" icon="seti:python">
+    Type-check agent-written Python before making any upstream call, then run the call graph in a bounded sandbox.
+  </Card>
+  <Card title="Multi-server workflows" icon="puzzle">
+    Compose dependent and parallel calls across configured MCP servers without model round-trips between steps.
+  </Card>
+  <Card title="Reusable chains" icon="approve-check">
+    Save a successful call graph as both a native Pi tool and a typed function available inside Code Mode.
+  </Card>
+  <Card title="Lazy startup" icon="rocket">
+    Pi startup does not wait for Python or MCP servers. Connections and catalog discovery happen only when needed.
+  </Card>
+  <Card title="Explicit safety" icon="shield-check">
+    Enforce time, memory, call-count, output-size, and per-tool policy limits without silent retries or fallbacks.
+  </Card>
+</CardGrid>
+
+## Install
+
+```shell
+pi install npm:pi-codemcp
+```
+
+After installation, configure MCP servers in Pi's existing `mcp.json`, restart or reload Pi, and open `/codemcp` to inspect servers and settings.

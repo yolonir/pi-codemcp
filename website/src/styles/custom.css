@@ -1,0 +1,42 @@
+:root {
+  --sl-color-accent-low: #102a26;
+  --sl-color-accent: #24d1a3;
+  --sl-color-accent-high: #b9f8e7;
+  --sl-color-white: #f7fffc;
+  --sl-color-gray-1: #e7f3ef;
+  --sl-color-gray-2: #b5c7c1;
+  --sl-color-gray-3: #7f9690;
+  --sl-color-gray-4: #4d625d;
+  --sl-color-gray-5: #2e403c;
+  --sl-color-gray-6: #1b2b27;
+  --sl-color-black: #101a18;
+}
+
+:root[data-theme="light"] {
+  --sl-color-accent-low: #d7f8ee;
+  --sl-color-accent: #087f65;
+  --sl-color-accent-high: #064d3f;
+  --sl-color-white: #101a18;
+  --sl-color-gray-1: #283a35;
+  --sl-color-gray-2: #465a54;
+  --sl-color-gray-3: #657972;
+  --sl-color-gray-4: #9baca7;
+  --sl-color-gray-5: #d5dfdc;
+  --sl-color-gray-6: #edf3f1;
+  --sl-color-gray-7: #f7faf9;
+  --sl-color-black: #ffffff;
+}
+
+.hero .tagline {
+  max-width: 46rem;
+}
+
+.sl-markdown-content code:not(:where(.not-content *)) {
+  border-radius: 0.3rem;
+}
+
+::view-transition-group(*),
+::view-transition-old(*),
+::view-transition-new(*) {
+  animation: none;
+}
