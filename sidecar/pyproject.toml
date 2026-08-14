@@ -4,10 +4,10 @@ version = "0.1.0"
 description = "Python sidecar for pi-codemcp"
 requires-python = ">=3.13"
 dependencies = [
-  "fastmcp==3.4.4",
+  "fastmcp==3.4.7",
   "httpx==0.28.1",
   "pydantic==2.13.4",
-  "pydantic-monty==0.0.18",
+  "pydantic-monty==0.0.21",
   "py-key-value-aio[filetree,pydantic]==0.4.5",
   "rapidfuzz==3.14.5",
 ]
@@ -15,11 +15,11 @@ dependencies = [
 [dependency-groups]
 dev = [
   "mypy==2.3.0",
-  "prek==0.4.10",
+  "prek==0.4.13",
   "pytest==9.1.1",
   "pytest-asyncio==1.4.0",
-  "ruff==0.15.22",
-  "ty==0.0.61",
+  "ruff==0.16.2",
+  "ty==0.0.70",
 ]
 
 [tool.pytest.ini_options]
