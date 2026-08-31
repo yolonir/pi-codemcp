@@ -36,7 +36,7 @@ describe("Pi extension registration", () => {
     expect(messages[0]).toContain("Do not autosumbit issue without clear approval");
   });
 
-  test("registers search, inspect, execute, save, and one manager command", () => {
+  test("registers search, inspect, execute, edit, save, and one manager command", () => {
     const tools: Array<{ name: string; description?: string; parameters?: unknown }> = [];
     const commands: string[] = [];
     const events: string[] = [];
@@ -58,6 +58,7 @@ describe("Pi extension registration", () => {
       "codemcp_search",
       "codemcp_inspect",
       "codemcp_execute",
+      "codemcp_edit",
       "codemcp_save_chain",
       "codemcp_manage_chains",
     ]);
@@ -80,10 +81,16 @@ describe("Pi extension registration", () => {
     });
     expect(tools[3]?.parameters).toMatchObject({
       properties: {
-        scope: { type: "string", enum: ["project", "global"] },
+        oldText: { type: "string" },
+        newText: { type: "string" },
       },
     });
     expect(tools[4]?.parameters).toMatchObject({
+      properties: {
+        scope: { type: "string", enum: ["project", "global"] },
+      },
+    });
+    expect(tools[5]?.parameters).toMatchObject({
       properties: {
         action: { enum: ["list", "enable", "disable", "revalidate", "delete"] },
         confirmedByUser: { type: "boolean" },

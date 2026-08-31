@@ -23,6 +23,7 @@ export type SidecarToolName =
   | "discover"
   | "reload_settings"
   | "execute"
+  | "edit_execute"
   | "save_chain"
   | "list_chains"
   | "execute_chain"
@@ -34,6 +35,7 @@ export type SidecarToolName =
 
 const LONG_RUNNING_TOOLS = new Set<SidecarToolName>([
   "execute",
+  "edit_execute",
   "save_chain",
   "execute_chain",
   "revalidate_chain",

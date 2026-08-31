@@ -26,6 +26,7 @@ test("OAuth-capable calls outlive the interactive callback window", () => {
     "inspect",
     "discover",
     "execute",
+    "edit_execute",
     "save_chain",
     "execute_chain",
     "revalidate_chain",
@@ -123,6 +124,17 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
       },
     });
     expect(await readFile(alphaCwdPath, "utf8")).toBe(workingDirectory);
+
+    const editedExecution = await client.call("edit_execute", {
+      trace_id: "pi-tool-call-edit-success",
+      old_text: '"seed": 9',
+      new_text: '"seed": 10',
+    });
+    expect(editedExecution).toMatchObject({
+      ok: true,
+      result: { identifier: "N-11" },
+      calls_made: 2,
+    });
 
     const savedChain = await client.call("save_chain", {
       trace_id: traceId,
@@ -236,6 +248,12 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
       code: "return inspect_json([], samples=4)",
     });
     expect(rejected).toMatchObject({ ok: false, failure_stage: "preflight", calls_made: 0 });
+    const corrected = await client.call("edit_execute", {
+      trace_id: "pi-tool-call-edit",
+      old_text: "samples=4",
+      new_text: "samples=3",
+    });
+    expect(corrected).toMatchObject({ ok: true, calls_made: 0 });
     const finalStats = await client.call("stats", {});
     const recentFailures = finalStats.recent_failures as Array<Record<string, unknown>>;
     expect(recentFailures[0]).toMatchObject({

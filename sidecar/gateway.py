@@ -206,6 +206,11 @@ class SavedChainHandlers(NamedTuple):
     delete: Callable[[str, ChainScope, str], Awaitable[ChainListResponse]]
 
 
+class _LastExecution(NamedTuple):
+    code: str
+    input_ref: str | None
+
+
 class SavedChainRuntime:
     def __init__(self, handlers: SavedChainHandlers) -> None:
         self.handlers = handlers
@@ -307,6 +312,8 @@ class GatewayRuntime:
             )
         )
         self._catalog_lock = asyncio.Lock()
+        self._execute_lock = asyncio.Lock()
+        self._last_execution: _LastExecution | None = None
 
     @classmethod
     def create(
@@ -595,6 +602,38 @@ class GatewayRuntime:
         trace_id: str,
         input_ref: str | None = None,
     ) -> ExecutionResponse:
+        async with self._execute_lock:
+            return await self._execute(code, trace_id, input_ref)
+
+    async def edit_execute(
+        self,
+        old_text: str,
+        new_text: str,
+        trace_id: str,
+    ) -> ExecutionResponse:
+        async with self._execute_lock:
+            previous = self._last_execution
+            if previous is None:
+                raise ValueError("No previous CodeMCP execution is available in this sidecar")
+            if not old_text:
+                raise ValueError("old_text must not be empty")
+            if old_text == new_text:
+                raise ValueError("old_text and new_text must differ")
+            matches = previous.code.count(old_text)
+            if matches != 1:
+                raise ValueError(
+                    f"old_text must match the previous code exactly once; found {matches} matches"
+                )
+            code = previous.code.replace(old_text, new_text, 1)
+            return await self._execute(code, trace_id, previous.input_ref)
+
+    async def _execute(
+        self,
+        code: str,
+        trace_id: str,
+        input_ref: str | None,
+    ) -> ExecutionResponse:
+        self._last_execution = None
         started = time.perf_counter()
         input_bytes = len(code.encode()) + len((input_ref or "").encode())
         input_value: JsonValue = None
@@ -619,6 +658,7 @@ class GatewayRuntime:
                     response,
                     trace_id,
                 )
+                self._last_execution = _LastExecution(code, input_ref)
                 return response
         discovery_started = time.perf_counter()
         try:
@@ -655,6 +695,7 @@ class GatewayRuntime:
             )
             raise
         self._record_execution("execute", started, input_bytes, response, trace_id)
+        self._last_execution = _LastExecution(code, input_ref)
         return response
 
     async def _execute_chain(
@@ -1677,6 +1718,16 @@ async def execute(
 ) -> ExecutionResponse:
     """Type-check and run one sandboxed Python MCP SDK chain."""
     return await _require_runtime().execute(code, trace_id, input_ref)
+
+
+@mcp.tool
+async def edit_execute(
+    trace_id: str,
+    old_text: str,
+    new_text: str,
+) -> ExecutionResponse:
+    """Patch and rerun the last sandbox execution."""
+    return await _require_runtime().edit_execute(old_text, new_text, trace_id)
 
 
 @mcp.tool
