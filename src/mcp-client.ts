@@ -66,6 +66,14 @@ export function sidecarToolTimeoutMs(
   return DEFAULT_TOOL_TIMEOUT_MS;
 }
 
+export interface SidecarProgress {
+  progress: number;
+  total?: number | undefined;
+  message?: string | undefined;
+}
+
+export type SidecarProgressCallback = (progress: SidecarProgress) => void;
+
 export interface SidecarClientOptions {
   packageRoot?: string;
   agentDir?: string;
@@ -153,7 +161,12 @@ export class SidecarClient {
     return this.client !== undefined && this.transport?.pid !== null;
   }
 
-  async call(name: SidecarToolName, args: JsonObject, signal?: AbortSignal): Promise<JsonObject> {
+  async call(
+    name: SidecarToolName,
+    args: JsonObject,
+    signal?: AbortSignal,
+    onProgress?: SidecarProgressCallback,
+  ): Promise<JsonObject> {
     await this.ensureStarted(signal);
     const client = this.client;
     if (!client) throw new Error("Sidecar client failed to initialize");
@@ -165,6 +178,7 @@ export class SidecarClient {
     const result = await client.callTool({ name, arguments: args }, undefined, {
       timeout,
       ...(signal === undefined ? {} : { signal }),
+      ...(onProgress === undefined ? {} : { onprogress: onProgress }),
     });
 
     if (result.isError) {

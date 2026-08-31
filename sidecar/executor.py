@@ -93,11 +93,13 @@ class ExecutionContext:
         call_tool: ContextToolCall,
         settings: ExecutionSettings,
         deadline: float,
+        progress: ProgressReporter | None = None,
     ) -> None:
         self.catalog = catalog
         self.call_tool = call_tool
         self.settings = settings
         self.deadline = deadline
+        self.progress = progress
         self.calls_made = 0
         self.chain_calls = 0
         self.metrics = ExecutionMetrics()
@@ -117,6 +119,7 @@ class ExecutionContext:
 
 ToolCall = Callable[[str, JsonObject], Awaitable[JsonValue]]
 ContextToolCall = Callable[[str, JsonObject, ExecutionContext], Awaitable[JsonValue]]
+ProgressReporter = Callable[[int, str], Awaitable[None]]
 ExternalFunction = Callable[..., Awaitable[JsonValue]]
 ResultRetainer = Callable[[JsonValue], RetainedResult | None]
 
@@ -291,9 +294,10 @@ class MontyExecutor:
         *,
         input_value: JsonValue = None,
         retain_result: ResultRetainer | None = None,
+        progress: ProgressReporter | None = None,
     ) -> ExecutionResponse:
         async with self._execution_lock:
-            context = self._new_context(self.catalog, call_tool)
+            context = self._new_context(self.catalog, call_tool, progress=progress)
             return await self._execute_program(
                 code,
                 context,
@@ -397,6 +401,8 @@ class MontyExecutor:
         self,
         catalog: ToolCatalog,
         call_tool: ContextToolCall,
+        *,
+        progress: ProgressReporter | None = None,
     ) -> ExecutionContext:
         loop = asyncio.get_running_loop()
         return ExecutionContext(
@@ -404,6 +410,7 @@ class MontyExecutor:
             call_tool=call_tool,
             settings=self.settings,
             deadline=loop.time() + self.settings.timeout_seconds,
+            progress=progress,
         )
 
     async def _execute_program(  # ruff:ignore[complex-structure, too-many-statements]
@@ -502,9 +509,13 @@ class MontyExecutor:
                 raise ValueError(message) from error
             if spec.kind == "saved_chain":
                 context.chain_calls += 1
+                if context.progress is not None:
+                    await context.progress(context.total_calls, spec.call)
                 return await context.call_tool(name, validated, context)
 
             context.calls_made += 1
+            if context.progress is not None:
+                await context.progress(context.total_calls, spec.call)
             remaining = context.remaining_seconds()
             if remaining <= 0:
                 raise TimeoutError
@@ -607,6 +618,8 @@ class MontyExecutor:
             "max_duration_secs": remaining,
             "max_memory": context.settings.max_memory_bytes,
         }
+        if context.progress is not None:
+            await context.progress(context.total_calls, "executing")
         runtime_started = time.perf_counter()
         try:
             async with asyncio.timeout(remaining + 0.1):

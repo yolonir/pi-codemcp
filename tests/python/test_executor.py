@@ -6,7 +6,12 @@ import pytest
 from mcp import types as mcp_types
 from pydantic import ValidationError
 
-from sidecar.executor import ExecutionResponse, ExecutionSettings, MontyExecutor
+from sidecar.executor import (
+    ExecutionContext,
+    ExecutionResponse,
+    ExecutionSettings,
+    MontyExecutor,
+)
 from sidecar.json_types import JsonObject, JsonValue
 from sidecar.refinement_cache import RefinementCache
 from sidecar.tool_catalog import ToolCatalog
@@ -154,6 +159,30 @@ async def test_preflight_errors_make_zero_calls(code: str) -> None:
     assert response.calls_made == 0
     assert calls == 0
     assert response.error
+
+
+@pytest.mark.asyncio
+async def test_progress_reports_execution_phase_and_each_call() -> None:
+    events: list[tuple[int, str]] = []
+
+    async def progress(total_calls: int, message: str) -> None:
+        events.append((total_calls, message))
+
+    async def call(name: str, _: JsonObject, __: ExecutionContext) -> JsonValue:
+        return {"value": 2} if name == "alpha_get" else {"ok": True}
+
+    response = await MontyExecutor(catalog()).execute_graph(
+        """
+        first = await alpha.get({"id": "one"})
+        saved = await beta.put({"value": first["value"]})
+        return saved["ok"]
+        """,
+        call,
+        progress=progress,
+    )
+
+    assert response.ok is True
+    assert events == [(0, "executing"), (1, "alpha.get"), (2, "beta.put")]
 
 
 @pytest.mark.asyncio
