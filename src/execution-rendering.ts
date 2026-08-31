@@ -114,6 +114,9 @@ function renderCompactFailure(
   if (stage === "preflight") {
     return theme.fg("warning", `✗ Preflight · code not run · ${summary}`);
   }
+  if (stage === "arguments") {
+    return theme.fg("warning", `✗ Argument validation · code run · ${summary}`);
+  }
   if (stage === "timeout") {
     return theme.fg("error", `✗ Timeout · stopped after ${summary}`);
   }
@@ -130,6 +133,9 @@ function failureHeading(stage: string, calls: number, chainCalls: number, theme:
   const summary = formatExecutionCalls(calls, chainCalls);
   if (stage === "preflight") {
     return `${theme.fg("warning", theme.bold("Preflight failed"))}\n${theme.fg("muted", "Code was not executed; no upstream side effects")}`;
+  }
+  if (stage === "arguments") {
+    return `${theme.fg("warning", theme.bold("Argument validation failed"))}\n${theme.fg("muted", "Code ran; no invalid MCP call was sent")}`;
   }
   if (stage === "timeout") {
     return `${theme.fg("error", theme.bold("Execution timed out"))}\n${theme.fg("muted", `Stopped after ${summary}`)}`;

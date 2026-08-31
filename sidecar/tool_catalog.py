@@ -426,7 +426,8 @@ class ToolCatalog(BaseModel):
         for spec in specs:
             definitions.extend(spec.stub.split("\n\n") if spec.stub else [])
             facade_methods.setdefault(spec.namespace, []).append(
-                f"    async def {spec.method}(self, arguments: {spec.input_type_name}) "
+                f"    async def {spec.method}(self, arguments: "
+                f"{spec.input_type_name} | Mapping[str, JsonValue]) "
                 f"-> {spec.output_type_name}: ..."
             )
         facades: list[str] = []

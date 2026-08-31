@@ -98,6 +98,7 @@ DISTINCT_NAME_QUERIES = {
 FailureOutcome = Literal[
     "success",
     "preflight_rejection",
+    "argument_rejection",
     "result_refinement",
     "upstream_failure",
     "transport_failure",
@@ -996,6 +997,8 @@ def _operation_outcome(
         return "internal_error"
     if failure.stage == "preflight":
         return "preflight_rejection"
+    if failure.stage == "arguments":
+        return "argument_rejection"
     if failure.stage == "result":
         return "result_refinement"
     if failure.stage == "cancelled":

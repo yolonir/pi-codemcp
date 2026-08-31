@@ -136,7 +136,7 @@ describe("codemcp_execute rendering", () => {
     expect(compact).not.toContain("KB");
   });
 
-  test("formats preflight and runtime failures differently", () => {
+  test("formats preflight, argument, and runtime failures differently", () => {
     const tool = captureExecuteTool();
     const preflight = render(
       tool.renderResult?.(
@@ -154,6 +154,30 @@ describe("codemcp_execute rendering", () => {
           details: {
             ok: false,
             failureStage: "preflight",
+            callsMade: 0,
+            preview: [],
+          },
+        },
+        { expanded: true, isPartial: false },
+        plainTheme,
+      ) as Component,
+    );
+    const argumentsFailure = render(
+      tool.renderResult?.(
+        {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                failure_stage: "arguments",
+                error: "alpha.get: invalid arguments",
+                calls_made: 0,
+              }),
+            },
+          ],
+          details: {
+            ok: false,
+            failureStage: "arguments",
             callsMade: 0,
             preview: [],
           },
@@ -190,6 +214,9 @@ describe("codemcp_execute rendering", () => {
     expect(preflight).toContain("Preflight failed");
     expect(preflight).toContain("Code was not executed; no upstream side effects");
     expect(preflight).toContain("missing required argument: id");
+    expect(argumentsFailure).toContain("Argument validation failed");
+    expect(argumentsFailure).toContain("Code ran; no invalid MCP call was sent");
+    expect(argumentsFailure).toContain("alpha.get: invalid arguments");
     expect(runtime).toContain("Runtime failed");
     expect(runtime).toContain("Failure occurred after 2 MCP calls");
     expect(runtime).toContain("upstream rejected the request");

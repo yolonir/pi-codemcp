@@ -14,7 +14,7 @@ SANDBOX_FUNCTION_EXTERNALS = {
     EXPECT_INTEGER_NAME: "__codemcp_expect_integer",
 }
 
-STUB_IMPORTS = "from typing import Literal, Never, NotRequired, TypeAlias, TypedDict"
+STUB_IMPORTS = "from typing import Literal, Mapping, Never, NotRequired, TypeAlias, TypedDict"
 JSON_TYPE_STUBS = (
     "JsonScalar: TypeAlias = bool | int | float | str | None",
     'JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]',

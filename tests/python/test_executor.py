@@ -133,8 +133,6 @@ async def test_valid_three_call_cross_server_chain_and_mutation() -> None:
     "code",
     [
         "return await unknown.tool({})",
-        "return await alpha.get({})",
-        'return await alpha.get({"id": 1})',
         """
         result = await alpha.get({"id": "x"})
         return result["missing"]
@@ -156,6 +154,51 @@ async def test_preflight_errors_make_zero_calls(code: str) -> None:
     assert response.calls_made == 0
     assert calls == 0
     assert response.error
+
+
+@pytest.mark.asyncio
+async def test_dynamically_built_sdk_arguments_are_validated_at_runtime() -> None:
+    seen: list[JsonObject] = []
+
+    async def call(_: str, arguments: JsonObject) -> JsonValue:
+        seen.append(arguments)
+        return {"identifier": "LIN-1"}
+
+    response = await MontyExecutor(catalog()).execute(
+        """
+        arguments = {"id": "issue-id", "priority": 1}
+        arguments["priority"] = 2
+        return await linear.update_issue(arguments)
+        """,
+        call,
+    )
+
+    assert response.ok is True
+    assert response.result == {"identifier": "LIN-1"}
+    assert response.calls_made == 1
+    assert seen == [{"id": "issue-id", "priority": 2}]
+
+
+@pytest.mark.asyncio
+async def test_invalid_sdk_arguments_are_rejected_before_mcp_call() -> None:
+    calls = 0
+
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        nonlocal calls
+        calls += 1
+        return {}
+
+    response = await MontyExecutor(catalog()).execute(
+        'return await alpha.get({"id": 1})',
+        call,
+    )
+
+    assert response.ok is False
+    assert response.failure_stage == "arguments"
+    assert response.failure is not None
+    assert response.failure.kind == "argument_validation"
+    assert response.calls_made == calls == 0
+    assert response.error and "alpha.get: invalid arguments" in response.error
 
 
 @pytest.mark.asyncio

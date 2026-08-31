@@ -50,9 +50,10 @@ INSPECT_BYTE_LIMIT = 8 * 1024
 CHAIN_INPUT_EXTERNAL = "__codemcp_saved_chain_input"
 
 
-type FailureStage = Literal["preflight", "runtime", "timeout", "cancelled", "result"]
+type FailureStage = Literal["preflight", "arguments", "runtime", "timeout", "cancelled", "result"]
 type FailureKind = Literal[
     "preflight",
+    "argument_validation",
     "result",
     "result_reference",
     "sandbox_runtime",
@@ -487,7 +488,18 @@ class MontyExecutor:
                 raise RuntimeError(
                     f"Call limit exceeded: maximum {context.settings.max_calls} total calls"
                 )
-            validated = catalog.validate_arguments(name, arguments)
+            try:
+                validated = catalog.validate_arguments(name, arguments)
+            except (TypeError, ValidationError, ValueError) as error:
+                message = f"{spec.call}: invalid arguments: {error}"
+                context.failure = ExecutionFailureInfo(
+                    kind="argument_validation",
+                    server=spec.server,
+                    tool=spec.backend_name,
+                    retryable=False,
+                    message=message,
+                )
+                raise ValueError(message) from error
             if spec.kind == "saved_chain":
                 context.chain_calls += 1
                 return await context.call_tool(name, validated, context)
@@ -624,8 +636,10 @@ class MontyExecutor:
             context.metrics.runtime_ms += _elapsed_ms(runtime_started)
             message = error.display("type-msg").strip()
             lowered = message.lower()
-            stage: Literal["runtime", "timeout"] = (
-                "timeout"
+            stage: Literal["arguments", "runtime", "timeout"] = (
+                "arguments"
+                if context.failure is not None and context.failure.kind == "argument_validation"
+                else "timeout"
                 if (context.failure is not None and context.failure.kind == "upstream_timeout")
                 or "duration" in lowered
                 or "timed out" in lowered
@@ -728,7 +742,7 @@ class MontyExecutor:
     @staticmethod
     def _failure(
         context: ExecutionContext,
-        stage: Literal["preflight", "runtime", "timeout", "cancelled", "result"],
+        stage: FailureStage,
         error: str,
     ) -> ExecutionResponse:
         failure = context.failure or _execution_failure_info(stage, error)
@@ -749,6 +763,8 @@ def _execution_failure_info(
 ) -> ExecutionFailureInfo:
     if stage == "preflight":
         kind: FailureKind = "preflight"
+    elif stage == "arguments":
+        kind = "argument_validation"
     elif stage == "result":
         kind = "result"
     elif stage == "timeout":
