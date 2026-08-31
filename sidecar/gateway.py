@@ -1511,6 +1511,7 @@ def _execution_failure_subtype(response: ExecutionResponse) -> str:
     failure = response.failure
     if failure is not None and failure.kind in {
         "result_reference",
+        "argument_validation",
         "sandbox_timeout",
         "upstream",
         "upstream_transport",

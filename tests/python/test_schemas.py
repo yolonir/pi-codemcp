@@ -723,7 +723,7 @@ def test_catalog_selective_type_stubs_include_only_referenced_facades(
 
     assert "class _GrafanaSdk" in selected
     assert "async def query_prometheus" in selected
-    assert "GrafanaQueryPrometheusArgs" in selected
+    assert "GrafanaQueryPrometheusArgs | Mapping[str, JsonValue]" in selected
     assert "async def search_dashboards" not in selected
     assert "LinearListIssuesArgs" not in selected
     assert len(selected) < len(representative_search_catalog.type_stubs) * 0.35
@@ -756,7 +756,7 @@ def test_selective_type_stubs_remain_small_with_260_tools() -> None:
     assert "async def tool_137" in selected
     assert "async def tool_136" not in selected
     assert "async def tool_138" not in selected
-    assert len(selected) < len(large_catalog.type_stubs) * 0.02
+    assert len(selected) < len(large_catalog.type_stubs) * 0.021
 
 
 def test_catalog_inspect_rejects_unknown_calls_with_suggestions(

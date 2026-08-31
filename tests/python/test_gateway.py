@@ -621,7 +621,9 @@ async def test_upstream_failures_are_structured_and_dead_clients_reconnect_expli
             TRACE_ID,
         )
         assert invalid.ok is False
-        assert invalid.failure_stage == "preflight"
+        assert invalid.failure_stage == "arguments"
+        assert invalid.failure is not None
+        assert invalid.failure.kind == "argument_validation"
         assert invalid.calls_made == 0
         assert int(alpha_pid.read_text()) == first_pid
 
