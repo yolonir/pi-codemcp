@@ -1,4 +1,9 @@
-import { SidecarClient, type SidecarClientOptions, type SidecarToolName } from "./mcp-client.js";
+import {
+  SidecarClient,
+  type SidecarClientOptions,
+  type SidecarProgressCallback,
+  type SidecarToolName,
+} from "./mcp-client.js";
 import { type CodeMcpSettings, loadCodeMcpSettings } from "./settings.js";
 
 export class CodeMcpLifecycle {
@@ -37,9 +42,10 @@ export class CodeMcpLifecycle {
     name: SidecarToolName,
     args: Record<string, unknown>,
     signal?: AbortSignal,
+    onProgress?: SidecarProgressCallback,
   ): Promise<Record<string, unknown>> {
     await this.reloadBarrier;
-    return this.sidecar.call(name, args, signal);
+    return this.sidecar.call(name, args, signal, onProgress);
   }
 
   async warmup(): Promise<void> {

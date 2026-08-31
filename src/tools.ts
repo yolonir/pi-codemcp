@@ -13,6 +13,7 @@ import {
   renderExecutionResult,
 } from "./execution-rendering.js";
 import type { CodeMcpLifecycle } from "./lifecycle.js";
+import type { SidecarProgress } from "./mcp-client.js";
 import { type CodeMcpOutputDetails, formatCodeMcpOutput } from "./output.js";
 import {
   EXECUTE_PROMPT_GUIDELINES,
@@ -330,6 +331,7 @@ export function registerCodeMcpTools(
           ...(params.inputRef === undefined ? {} : { input_ref: params.inputRef }),
         },
         signal,
+        (progress) => onUpdate?.(executionProgressUpdate(progress)),
       );
       return formatExecutionResponse(result, lifecycle);
     },
@@ -384,6 +386,7 @@ export function registerCodeMcpTools(
           trace_id: toolCallId,
         },
         signal,
+        (progress) => onUpdate?.(executionProgressUpdate(progress)),
       );
       return formatExecutionResponse(result, lifecycle);
     },
@@ -575,6 +578,17 @@ export function registerCodeMcpTools(
       );
     },
   });
+}
+
+function executionProgressUpdate(progress: SidecarProgress) {
+  const currentCall = progress.message === "executing" ? undefined : progress.message;
+  return {
+    content: [{ type: "text" as const, text: progress.message ?? "Executing MCP calls..." }],
+    details: {
+      callsMade: progress.progress,
+      ...(currentCall === undefined ? {} : { currentCall }),
+    },
+  };
 }
 
 function formatExecutionResponse(result: Record<string, unknown>, lifecycle: CodeMcpLifecycle) {

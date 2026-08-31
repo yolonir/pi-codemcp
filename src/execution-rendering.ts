@@ -16,6 +16,12 @@ interface RenderResult {
   details?: unknown;
 }
 
+/** Details sent with partial updates while an execution is running. */
+export interface ExecutionProgressDetails {
+  callsMade: number;
+  currentCall?: string;
+}
+
 interface ExecutionRendererOptions {
   partialText?: string;
   expandDescription?: string;
@@ -28,6 +34,16 @@ export function renderExecutionResult(
   options: ExecutionRendererOptions = {},
 ): Text {
   if (state.isPartial) {
+    const progress = result.details as ExecutionProgressDetails | undefined;
+    if (typeof progress?.callsMade === "number") {
+      const calls = progress.callsMade;
+      const current = progress.currentCall ? ` · ${progress.currentCall}` : "";
+      return new Text(
+        `\n${theme.fg("warning", `Executing · ${calls} MCP ${calls === 1 ? "call" : "calls"}${current}...`)}`,
+        0,
+        0,
+      );
+    }
     return new Text(
       `\n${theme.fg("warning", options.partialText ?? "Preflight check, then execution...")}`,
       0,

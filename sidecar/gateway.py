@@ -11,7 +11,7 @@ from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, cast
 
 import pydantic_monty
-from fastmcp import Client, FastMCP
+from fastmcp import Client, Context, FastMCP
 from fastmcp.mcp_config import RemoteMCPServer, StdioMCPServer
 from pydantic_core import to_json
 from rapidfuzz import fuzz, process
@@ -33,6 +33,7 @@ from .executor import (
     ExecutionFailureInfo,
     ExecutionResponse,
     MontyExecutor,
+    ProgressReporter,
 )
 from .mcp_config import NormalizedConfig, load_mcp_json, normalize_mcp_config
 from .models import (
@@ -601,15 +602,17 @@ class GatewayRuntime:
         code: str,
         trace_id: str,
         input_ref: str | None = None,
+        progress: ProgressReporter | None = None,
     ) -> ExecutionResponse:
         async with self._execute_lock:
-            return await self._execute(code, trace_id, input_ref)
+            return await self._execute(code, trace_id, input_ref, progress)
 
     async def edit_execute(
         self,
         old_text: str,
         new_text: str,
         trace_id: str,
+        progress: ProgressReporter | None = None,
     ) -> ExecutionResponse:
         async with self._execute_lock:
             previous = self._last_execution
@@ -625,13 +628,14 @@ class GatewayRuntime:
                     f"old_text must match the previous code exactly once; found {matches} matches"
                 )
             code = previous.code.replace(old_text, new_text, 1)
-            return await self._execute(code, trace_id, previous.input_ref)
+            return await self._execute(code, trace_id, previous.input_ref, progress)
 
     async def _execute(
         self,
         code: str,
         trace_id: str,
         input_ref: str | None,
+        progress: ProgressReporter | None = None,
     ) -> ExecutionResponse:
         self._last_execution = None
         started = time.perf_counter()
@@ -682,6 +686,7 @@ class GatewayRuntime:
                 self._dispatch,
                 input_value=input_value,
                 retain_result=self.refinement_cache.retain,
+                progress=progress,
             )
         except BaseException as error:
             cancelled = isinstance(error, asyncio.CancelledError)
@@ -1615,6 +1620,13 @@ def _require_runtime() -> GatewayRuntime:
     return _runtime_state.runtime
 
 
+def _progress_reporter(ctx: Context) -> ProgressReporter:
+    async def report(total_calls: int, message: str) -> None:
+        await ctx.report_progress(progress=float(total_calls), message=message)
+
+    return report
+
+
 def configure_runtime_paths(paths: RuntimePaths | None) -> None:
     _runtime_state.paths = paths
 
@@ -1714,10 +1726,16 @@ async def set_chain_enabled(
 async def execute(
     trace_id: str,
     code: str,
+    ctx: Context,
     input_ref: str | None = None,
 ) -> ExecutionResponse:
     """Type-check and run one sandboxed Python MCP SDK chain."""
-    return await _require_runtime().execute(code, trace_id, input_ref)
+    return await _require_runtime().execute(
+        code,
+        trace_id,
+        input_ref,
+        _progress_reporter(ctx),
+    )
 
 
 @mcp.tool
@@ -1725,9 +1743,15 @@ async def edit_execute(
     trace_id: str,
     old_text: str,
     new_text: str,
+    ctx: Context,
 ) -> ExecutionResponse:
     """Patch and rerun the last sandbox execution."""
-    return await _require_runtime().edit_execute(old_text, new_text, trace_id)
+    return await _require_runtime().edit_execute(
+        old_text,
+        new_text,
+        trace_id,
+        _progress_reporter(ctx),
+    )
 
 
 @mcp.tool

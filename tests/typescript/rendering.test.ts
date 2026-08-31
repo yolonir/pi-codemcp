@@ -136,6 +136,43 @@ describe("codemcp_execute rendering", () => {
     expect(compact).not.toContain("KB");
   });
 
+  test("shows preflight, then live MCP call progress while partial", () => {
+    const tool = captureExecuteTool();
+    const preflight = render(
+      tool.renderResult?.(
+        { content: [{ type: "text", text: "Type-checking MCP chain..." }] },
+        { expanded: false, isPartial: true },
+        plainTheme,
+      ) as Component,
+    );
+    expect(preflight).toContain("Preflight check, then execution...");
+
+    const executing = render(
+      tool.renderResult?.(
+        {
+          content: [{ type: "text", text: "alpha.get" }],
+          details: { callsMade: 2, currentCall: "alpha.get" },
+        },
+        { expanded: false, isPartial: true },
+        plainTheme,
+      ) as Component,
+    );
+    expect(executing).toContain("Executing · 2 MCP calls · alpha.get...");
+    expect(executing).not.toContain("Preflight");
+
+    const executingNoCall = render(
+      tool.renderResult?.(
+        {
+          content: [{ type: "text", text: "executing" }],
+          details: { callsMade: 0 },
+        },
+        { expanded: false, isPartial: true },
+        plainTheme,
+      ) as Component,
+    );
+    expect(executingNoCall).toContain("Executing · 0 MCP calls...");
+  });
+
   test("formats preflight, argument, and runtime failures differently", () => {
     const tool = captureExecuteTool();
     const preflight = render(
