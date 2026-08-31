@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.3](https://github.com/yolonir/pi-codemcp/compare/v1.3.2...v1.3.3) (2026-08-31)
+
+
+### Bug Fixes
+
+* support dynamically built SDK arguments ([#45](https://github.com/yolonir/pi-codemcp/issues/45)) ([d61fdc9](https://github.com/yolonir/pi-codemcp/commit/d61fdc9534d4497ba660600ee7e6c275a87ddf5f))
+
 ## [1.3.2](https://github.com/yolonir/pi-codemcp/compare/v1.3.1...v1.3.2) (2026-07-28)
 
 
