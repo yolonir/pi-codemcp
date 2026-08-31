@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/yolonir/pi-codemcp/compare/v1.3.3...v1.4.0) (2026-08-31)
+
+
+### Features
+
+* edit and rerun last execution ([#47](https://github.com/yolonir/pi-codemcp/issues/47)) ([e22f39d](https://github.com/yolonir/pi-codemcp/commit/e22f39d2798d1e44f6966807247fa6b3e20e56de))
+
 ## [1.3.3](https://github.com/yolonir/pi-codemcp/compare/v1.3.2...v1.3.3) (2026-08-31)
 
 
