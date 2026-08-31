@@ -56,7 +56,9 @@ function captureTools(options: {
     loadSettings: () => ({ ...DEFAULT_CODEMCP_SETTINGS, disabledTools: {} }),
     async request(name: string, args: Record<string, unknown>) {
       requests.push({ name, args });
-      if (name === "execute" && options.executeResult) return options.executeResult;
+      if ((name === "execute" || name === "edit_execute") && options.executeResult) {
+        return options.executeResult;
+      }
       if (name === "search" && options.searchResult) return options.searchResult;
       throw new Error("unexpected sidecar request");
     },
@@ -110,6 +112,33 @@ test("execute sends only compact result while keeping metadata in details", asyn
     chainCalls: 0,
     timings: { typecheck_ms: 4, execution_ms: 8, serialization_ms: 1 },
   });
+});
+
+test("edit patches and reruns the previous execution without resending code", async () => {
+  const { tools, requests } = captureTools({
+    projectAvailable: true,
+    executeResult: {
+      ok: true,
+      result: { value: 3 },
+      calls_made: 1,
+      chain_calls: 0,
+    },
+  });
+  const edit = tools.get("codemcp_edit");
+  const result = await edit?.execute(
+    "edit-id",
+    { oldText: '"seed": 2', newText: '"seed": 3' },
+    undefined,
+    undefined,
+  );
+  expect(requests).toEqual([
+    {
+      name: "edit_execute",
+      args: { old_text: '"seed": 2', new_text: '"seed": 3', trace_id: "edit-id" },
+    },
+  ]);
+  expect(result?.content[0]?.text).toBe('{"value":3}');
+  expect(result?.details).toMatchObject({ ok: true, callsMade: 1 });
 });
 
 test("execute exposes structured upstream failure fields", async () => {

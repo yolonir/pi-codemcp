@@ -306,6 +306,7 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
             "discover",
             "reload_settings",
             "execute",
+            "edit_execute",
             "save_chain",
             "list_chains",
             "execute_chain",
@@ -505,6 +506,39 @@ async def test_execute_telemetry_records_discovery_failures(
 
 
 @pytest.mark.asyncio
+async def test_edit_execute_replaces_unique_text_in_the_previous_code(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(json.dumps({"mcpServers": {}}))
+    runtime = gateway.GatewayRuntime.create(
+        config_path,
+        tmp_path / "oauth",
+        tmp_path / "catalog",
+    )
+
+    try:
+        with pytest.raises(ValueError, match="No previous"):
+            await runtime.edit_execute("missing", "4", TRACE_ID)
+
+        rejected = await runtime.execute("return missing + missing", TRACE_ID)
+        assert rejected.ok is False
+        assert rejected.failure_stage == "preflight"
+        with pytest.raises(ValueError, match="found 2 matches"):
+            await runtime.edit_execute("missing", "4", TRACE_ID)
+
+        corrected = await runtime.edit_execute("missing + missing", "4", TRACE_ID)
+        assert corrected.ok is True
+        assert corrected.result == 4
+
+        rerun = await runtime.edit_execute("4", "5", TRACE_ID)
+        assert rerun.ok is True
+        assert rerun.result == 5
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_execute_consumes_result_reference_and_rejects_foreign_reference(
     tmp_path: Path,
 ) -> None:
@@ -538,6 +572,10 @@ async def test_execute_consumes_result_reference_and_rejects_foreign_reference(
         assert response.ok is True
         assert response.result == {"characters": 2_000}
         assert response.calls_made == 0
+
+        edited = await runtime.edit_execute('"characters"', '"length"', TRACE_ID)
+        assert edited.ok is True
+        assert edited.result == {"length": 2_000}
 
         foreign = await runtime.execute(
             "return input",

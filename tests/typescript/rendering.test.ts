@@ -223,6 +223,21 @@ describe("codemcp_execute rendering", () => {
   });
 });
 
+describe("codemcp_edit rendering", () => {
+  test("summarizes the patch without showing its code", () => {
+    const tool = captureTool("codemcp_edit");
+    const call = render(
+      tool.renderCall?.({ oldText: "first\nsecond", newText: "one\ntwo\nthree" }, plainTheme, {
+        expanded: false,
+      }) as Component,
+    );
+
+    expect(call).toContain("Edited 2 lines");
+    expect(call).not.toContain("first");
+    expect(call).not.toContain("three");
+  });
+});
+
 describe("codemcp_manage_chains rendering", () => {
   test("renders manager failures explicitly", () => {
     const tool = captureTool("codemcp_manage_chains");

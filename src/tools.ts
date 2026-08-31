@@ -152,6 +152,16 @@ const ExecuteParameters = Type.Object({
   ),
 });
 
+const EditExecuteParameters = Type.Object({
+  oldText: Type.String({
+    minLength: 1,
+    description: "Exact text that must occur once in the previous execution code",
+  }),
+  newText: Type.String({
+    description: "Replacement text; may be empty",
+  }),
+});
+
 export function registerCodeMcpTools(
   pi: ExtensionAPI,
   lifecycle: CodeMcpLifecycle,
@@ -321,32 +331,7 @@ export function registerCodeMcpTools(
         },
         signal,
       );
-      const ok = result.ok === true;
-      const modelValue = ok
-        ? result.result
-        : {
-            failure_stage: result.failure_stage,
-            error: result.error,
-            failure: result.failure,
-            shape: result.shape,
-            result_ref: result.result_ref,
-            expires_in_seconds: result.expires_in_seconds,
-            calls_made: result.calls_made,
-            chain_calls: result.chain_calls,
-          };
-      const output = formatCodeMcpOutput(modelValue, outputLimits(lifecycle));
-      return {
-        content: [{ type: "text", text: output.text }],
-        details: {
-          ...output.details,
-          ok,
-          failureStage: typeof result.failure_stage === "string" ? result.failure_stage : undefined,
-          callsMade: Number(result.calls_made ?? 0),
-          chainCalls: Number(result.chain_calls ?? 0),
-          ...(isRecord(result.timings) ? { timings: result.timings } : {}),
-          preview: previewExecutionValue(ok ? result.result : result.error),
-        },
-      };
+      return formatExecutionResponse(result, lifecycle);
     },
     renderCall(args, theme, context) {
       const code = args.code.trim();
@@ -376,6 +361,46 @@ export function registerCodeMcpTools(
     },
     renderResult(result, state, theme) {
       return renderExecutionResult(result, state, theme);
+    },
+  });
+
+  pi.registerTool({
+    name: "codemcp_edit",
+    label: "MCP Edit",
+    description:
+      "Patch and rerun the most recent codemcp_execute in the current sidecar without resending its full code. oldText must match exactly once. The original inputRef is reused and the entire call graph, including upstream MCP calls, runs again.",
+    promptSnippet: "Patch and rerun the previous CodeMCP execution",
+    parameters: EditExecuteParameters,
+    async execute(toolCallId, params, signal, onUpdate) {
+      onUpdate?.({
+        content: [{ type: "text", text: "Patching and type-checking MCP chain..." }],
+        details: undefined,
+      });
+      const result = await lifecycle.request(
+        "edit_execute",
+        {
+          old_text: params.oldText,
+          new_text: params.newText,
+          trace_id: toolCallId,
+        },
+        signal,
+      );
+      return formatExecutionResponse(result, lifecycle);
+    },
+    renderCall(args, theme) {
+      const lines = args.oldText ? args.oldText.split("\n").length : 0;
+      const title = theme.fg("toolTitle", theme.bold("MCP Edit"));
+      const patchLabel = theme.fg(
+        "accent",
+        theme.bold(`Edited ${lines} ${lines === 1 ? "line" : "lines"}`),
+      );
+      return new Text(`${title} ${theme.fg("muted", "·")} ${patchLabel}`, 0, 0);
+    },
+    renderResult(result, state, theme) {
+      return renderExecutionResult(result, state, theme, {
+        partialText: "Applying edit, then execution...",
+        expandDescription: "full output",
+      });
     },
   });
 
@@ -550,6 +575,35 @@ export function registerCodeMcpTools(
       );
     },
   });
+}
+
+function formatExecutionResponse(result: Record<string, unknown>, lifecycle: CodeMcpLifecycle) {
+  const ok = result.ok === true;
+  const modelValue = ok
+    ? result.result
+    : {
+        failure_stage: result.failure_stage,
+        error: result.error,
+        failure: result.failure,
+        shape: result.shape,
+        result_ref: result.result_ref,
+        expires_in_seconds: result.expires_in_seconds,
+        calls_made: result.calls_made,
+        chain_calls: result.chain_calls,
+      };
+  const output = formatCodeMcpOutput(modelValue, outputLimits(lifecycle));
+  return {
+    content: [{ type: "text" as const, text: output.text }],
+    details: {
+      ...output.details,
+      ok,
+      failureStage: typeof result.failure_stage === "string" ? result.failure_stage : undefined,
+      callsMade: Number(result.calls_made ?? 0),
+      chainCalls: Number(result.chain_calls ?? 0),
+      ...(isRecord(result.timings) ? { timings: result.timings } : {}),
+      preview: previewExecutionValue(ok ? result.result : result.error),
+    },
+  };
 }
 
 function compactChainView(view: SavedChainView) {

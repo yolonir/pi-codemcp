@@ -7,6 +7,7 @@ Instead of putting every upstream MCP tool definition into the model context, pi
 - `codemcp_search` ranks capabilities or pages through a compact inventory without loading full schemas.
 - `codemcp_inspect` returns exact typed SDK stubs only for selected calls.
 - `codemcp_execute` runs one sandboxed Python call graph across one or many MCP servers.
+- `codemcp_edit` applies one exact replacement to the previous execution and reruns it without resending the full code.
 - `codemcp_save_chain` turns a repeated call graph into a reusable native Pi tool.
 - `codemcp_manage_chains` lists chains or performs an explicitly confirmed enable, disable, revalidate, or delete.
 
@@ -176,6 +177,8 @@ return {"number": number["value"], "identifier": saved["identifier"]}
 Incomplete upstream schemas become recursive `JsonValue`, not `Any`; use the prebound `expect_object`, `expect_list`, `expect_string`, and `expect_integer` helpers to narrow unknown values explicitly. For unfamiliar outputs, `inspect_json(value, samples=2, max_depth=3)` returns a byte-bounded structural summary, cardinality, field sizes, and samples; `samples` is limited to 1–3 and `max_depth` to 1–6 during preflight. The generated prelude documents the sandbox surface: use `import asyncio` with `asyncio.gather`; unavailable host or stdlib APIs are rejected. Preflight type errors happen before any upstream call is made, and oversized final results fail explicitly with the same actionable inspection data.
 
 When an oversized value fits the bounded in-memory refinement cache, the failure also returns an opaque `result_ref` and expiry. Pass that reference back as `inputRef` on one follow-up `codemcp_execute`; the retained JSON is exposed as `input`, so code can filter or aggregate it without repeating upstream calls. References expire after five minutes, are valid only in the originating sidecar, and are never persisted.
+
+For a small correction, `codemcp_edit` replaces one uniquely matching `oldText` with `newText` in the most recent execution and reruns it with the same `inputRef`. The state is in-memory and disappears when the sidecar restarts. The full call graph runs again, including upstream MCP calls.
 
 ## Saved-chain CLI flow
 
