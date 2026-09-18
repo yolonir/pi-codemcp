@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.2](https://github.com/yolonir/pi-codemcp/compare/v1.5.1...v1.5.2) (2026-09-18)
+
+
+### Bug Fixes
+
+* preserve JSON aliases during argument and result normalization ([#57](https://github.com/yolonir/pi-codemcp/issues/57)) ([16767d3](https://github.com/yolonir/pi-codemcp/commit/16767d341fa556c74d34dd247153b2c2771f947b))
+
 ## [1.5.1](https://github.com/yolonir/pi-codemcp/compare/v1.5.0...v1.5.1) (2026-09-18)
 
 
