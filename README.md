@@ -56,12 +56,12 @@ Independent calls can use `asyncio.gather`; dependent calls pass earlier outputs
 
 Provide `TYPESAFE_API_KEY`, then set **Enable Jev → true** in `/codemcp` → Settings. This replaces `codemcp_search` with `codemcp_route` as the agent's discovery tool.
 
-1. The agent calls `codemcp_route()` when it needs MCP capabilities. The extension reads the latest user request and up to three preceding user/assistant messages automatically.
-2. Enabled tool names and descriptions go to Jev in parallel chunks of up to 40. Jev scores relevance, assigns workflow roles, and checks whether an intermediate model decision or user approval is needed.
+1. The agent calls `codemcp_route` with a short `intent`, such as “read staging logs to diagnose the approval error.” The extension includes the original user request and up to three preceding user/assistant messages as context. A changed subtask can be routed again with a new intent.
+2. Enabled tool names and descriptions go to Jev in parallel chunks of up to 40. Jev scores relevance to that subtask (including prerequisites), assigns workflow roles, and checks whether an intermediate model decision or user approval is needed.
 3. CodeMCP ranks and filters the answers, selects at most eight tools, derives composition guidance, and fetches their exact typed contracts.
 4. The agent writes the actual `codemcp_execute` program, keeping a checkpoint between stages when needed.
 
-Jev does not execute tools or block ordinary messages. **Routing sends your request, recent context, and tool descriptions to TypeSafe**, so it is opt-in. Without a key, local search stays active; a failed route enables search as a fallback. The SDK also honors `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL`.
+Jev does not execute tools or block ordinary messages. **Routing sends the intent, your request, recent context, and tool descriptions to TypeSafe**, so it is opt-in. Without a key, local search stays active; a failed route enables search as a fallback. The SDK also honors `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL`.
 
 ## MCP configuration
 

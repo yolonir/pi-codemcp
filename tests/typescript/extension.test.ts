@@ -122,7 +122,10 @@ describe("Pi extension registration", () => {
         confirmedByUser: { type: "boolean" },
       },
     });
-    expect(tools[6]?.parameters).toMatchObject({ properties: {} });
+    expect(tools[6]?.parameters).toMatchObject({
+      properties: { intent: { type: "string", minLength: 1, pattern: "\\S" } },
+      required: ["intent"],
+    });
   });
 
   test("discovering a disabled server enables it without an extra step", async () => {

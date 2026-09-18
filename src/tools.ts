@@ -75,7 +75,14 @@ const SearchParameters = Type.Object({
   ),
 });
 
-const JevRouteParameters = Type.Object({});
+const JevRouteParameters = Type.Object({
+  intent: Type.String({
+    minLength: 1,
+    pattern: "\\S",
+    description:
+      "Briefly describe the current MCP subtask and relevant service or environment, e.g. read staging logs to diagnose an approval error. Not instructions to another agent; the original user request is included automatically.",
+  }),
+});
 
 const InspectParameters = Type.Object({
   calls: Type.Array(Type.String({ minLength: 1 }), {
@@ -174,15 +181,15 @@ export function registerJevRouteTool(
     name: "codemcp_route",
     label: "Jev MCP Route",
     description:
-      "Use Jev to select every configured MCP call relevant to a complete task, classify each call's workflow role, recommend parallel or dependent composition, and return exact typed SDK contracts. Use when the task may require external services or saved workflows. If no configured capability applies, returns no calls.",
-    promptSnippet: "Select and compose MCP calls for a complete task with Jev",
+      "Use Jev to select configured MCP calls for the agent's current subtask, including prerequisites, classify each call's workflow role, recommend parallel or dependent composition, and return exact typed SDK contracts. Use when the subtask may require external services or saved workflows. If no configured capability applies, returns no calls.",
+    promptSnippet: "Select MCP calls and composition guidance for the current subtask with Jev",
     promptGuidelines: [
-      "Use codemcp_route once per distinct task when MCP capabilities may be needed; route again only if the task changes or the selected contracts cannot complete it. It reads the current request and recent conversation context automatically.",
+      "Use codemcp_route once per distinct MCP subtask. Provide a short intent describing what you need now, including relevant findings; the original user request and recent context are included automatically. Route again with an updated intent if the subtask changes or the selected contracts cannot complete it.",
       "After codemcp_route returns contracts, immediately write and run the recommended minimal codemcp_execute program instead of stopping to describe the plan.",
       "Follow codemcp_route composition guidance: gather independent calls, sequence dependent calls, and preserve a model turn only for semantic decisions or approvals.",
     ],
     parameters: JevRouteParameters,
-    async execute(_toolCallId, _params, signal, onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const router = getRouter();
       if (!router) throw new Error("Jev routing requires TYPESAFE_API_KEY");
       const { task, recentContext } = currentRouteTask(ctx.sessionManager.buildContextEntries());
@@ -191,7 +198,11 @@ export function registerJevRouteTool(
         details: undefined,
       });
       try {
-        const route = await router.route(task, recentContext, signal);
+        const route = await router.route(
+          params.intent,
+          [`Original user request: ${task}`, recentContext].filter(Boolean).join("\n\n"),
+          signal,
+        );
         return {
           content: [{ type: "text", text: route.prompt }],
           details: {
