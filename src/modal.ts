@@ -13,7 +13,12 @@ import {
 } from "@earendil-works/pi-tui";
 import type { ChainScope, SavedChainView } from "./chains.js";
 import { summarizeError } from "./errors.js";
-import type { CodeMcpSettings, EditableSettingKey, EditableSettingValue } from "./settings.js";
+import {
+  type CodeMcpSettings,
+  type EditableSettingKey,
+  type EditableSettingValue,
+  setEditableSetting,
+} from "./settings.js";
 
 export interface ToolModalState {
   name: string;
@@ -136,13 +141,22 @@ const OVERLAY_OPTIONS = {
   minWidth: 72,
   maxHeight: "85%",
 } as const;
-
 const PROBLEM_REPORT_LABEL = "Extension is broken!";
 const PROBLEM_REPORT_DESCRIPTION =
   "Well, that sucks. With this button you can ask the agent to describe the problem and prepare a GitHub issue for review. The goal is to make pi-codemcp usable for everyone, don't be lazy - submit an issue. Don't worry, you will see all prompts, this is a transparent process.";
 const PROBLEM_REPORT_SHORTCUT = "Report issue: R";
 
 const SETTING_DEFINITIONS: SettingDefinition[] = [
+  {
+    key: "jevEnabled",
+    label: "Enable Jev",
+    description:
+      "Let the agent call Jev on demand to select and compose relevant MCP contracts instead of local search. Requires TYPESAFE_API_KEY and sends routed tasks and enabled tool descriptions to TypeSafe.",
+    choices: [
+      { value: false, label: "false" },
+      { value: true, label: "true" },
+    ],
+  },
   {
     key: "backgroundWarmup",
     label: "Background warmup",
@@ -327,6 +341,7 @@ class ServerManagerModal implements Component, Focusable {
   private selectedToolIndex = 0;
   private selectedChainIndex = 0;
   private selectedSettingIndex = 0;
+  private settingBusy = false;
   private settingsError: string | undefined;
   private _focused = false;
 
@@ -1005,8 +1020,9 @@ class ServerManagerModal implements Component, Focusable {
 
   private cycleSelectedSetting(direction: -1 | 1): void {
     const definition = SETTING_DEFINITIONS[this.selectedSettingIndex];
-    if (!definition) return;
-    const current = this.options.settings[definition.key];
+    if (!definition || this.settingBusy) return;
+    const previous = this.options.settings;
+    const current = previous[definition.key];
     const currentIndex = Math.max(
       0,
       definition.choices.findIndex((choice) => choice.value === current),
@@ -1014,16 +1030,23 @@ class ServerManagerModal implements Component, Focusable {
     const choice =
       definition.choices[cycleIndex(currentIndex, direction, definition.choices.length)];
     if (!choice) return;
+    this.settingBusy = true;
     this.settingsError = undefined;
+    this.options.settings = setEditableSetting(previous, definition.key, choice.value);
+    this.requestRender();
     void this.options
       .onSetSetting(definition.key, choice.value)
       .then((settings) => {
         this.options.settings = settings;
       })
       .catch((error: unknown) => {
+        this.options.settings = previous;
         this.settingsError = summarizeError(error);
       })
-      .finally(() => this.requestRender());
+      .finally(() => {
+        this.settingBusy = false;
+        this.requestRender();
+      });
   }
 
   private focusProblemReport(): void {

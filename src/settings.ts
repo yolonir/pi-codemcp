@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { readJsonObject, requireJsonObject, writeJsonObjectAtomically } from "./json-file.js";
 
 export interface CodeMcpSettings {
+  jevEnabled: boolean;
   backgroundWarmup: boolean;
   cacheTtlHours: number;
   executionTimeoutSeconds: number;
@@ -16,6 +17,7 @@ export type EditableSettingKey = Exclude<keyof CodeMcpSettings, "disabledTools">
 export type EditableSettingValue = boolean | number;
 
 export const DEFAULT_CODEMCP_SETTINGS: Readonly<CodeMcpSettings> = {
+  jevEnabled: false,
   backgroundWarmup: true,
   cacheTtlHours: 24,
   executionTimeoutSeconds: 30,
@@ -28,6 +30,7 @@ export const DEFAULT_CODEMCP_SETTINGS: Readonly<CodeMcpSettings> = {
 
 const ALLOWED_KEYS = new Set([
   "version",
+  "jevEnabled",
   "backgroundWarmup",
   "cacheTtlHours",
   "executionTimeoutSeconds",
@@ -45,16 +48,18 @@ export function loadCodeMcpSettings(path: string): CodeMcpSettings {
   if (version !== 1 && version !== 2) {
     throw new Error(`Unsupported CodeMCP settings version: ${String(version)}`);
   }
-  const migrated =
+  const versionMigrated =
     version === 1
       ? Object.fromEntries(Object.entries(root).filter(([key]) => key !== "outputLineLimit"))
       : root;
+  const migrated = migrateDiscoveryMode(versionMigrated);
   const unknown = Object.keys(migrated).filter((key) => !ALLOWED_KEYS.has(key));
   if (unknown.length > 0) {
     throw new Error(`Unknown CodeMCP settings: ${unknown.join(", ")}`);
   }
 
   return {
+    jevEnabled: booleanSetting(migrated, "jevEnabled"),
     backgroundWarmup: booleanSetting(migrated, "backgroundWarmup"),
     cacheTtlHours: integerSetting(migrated, "cacheTtlHours", 0, 720),
     executionTimeoutSeconds: integerSetting(migrated, "executionTimeoutSeconds", 1, 300),
@@ -69,6 +74,7 @@ export function loadCodeMcpSettings(path: string): CodeMcpSettings {
 export function saveCodeMcpSettings(path: string, settings: CodeMcpSettings): void {
   writeJsonObjectAtomically(path, {
     version: 2,
+    jevEnabled: settings.jevEnabled,
     backgroundWarmup: settings.backgroundWarmup,
     cacheTtlHours: settings.cacheTtlHours,
     executionTimeoutSeconds: settings.executionTimeoutSeconds,
@@ -85,7 +91,7 @@ export function setEditableSetting(
   key: EditableSettingKey,
   value: EditableSettingValue,
 ): CodeMcpSettings {
-  if (key === "backgroundWarmup") {
+  if (key === "jevEnabled" || key === "backgroundWarmup") {
     if (typeof value !== "boolean") throw new TypeError(`${key} must be a boolean`);
     return { ...settings, [key]: value };
   }
@@ -112,7 +118,21 @@ function cloneDefaults(): CodeMcpSettings {
   return { ...DEFAULT_CODEMCP_SETTINGS, disabledTools: {} };
 }
 
-function booleanSetting(root: Record<string, unknown>, key: "backgroundWarmup"): boolean {
+function migrateDiscoveryMode(root: Record<string, unknown>): Record<string, unknown> {
+  if (root.discoveryMode === undefined) return root;
+  if (root.discoveryMode !== "search" && root.discoveryMode !== "jev") {
+    throw new TypeError("discoveryMode must be search or jev");
+  }
+  return {
+    ...Object.fromEntries(Object.entries(root).filter(([key]) => key !== "discoveryMode")),
+    jevEnabled: root.jevEnabled ?? root.discoveryMode === "jev",
+  };
+}
+
+function booleanSetting(
+  root: Record<string, unknown>,
+  key: "jevEnabled" | "backgroundWarmup",
+): boolean {
   const value = root[key] ?? DEFAULT_CODEMCP_SETTINGS[key];
   if (typeof value !== "boolean") throw new TypeError(`${key} must be a boolean`);
   return value;
@@ -120,7 +140,7 @@ function booleanSetting(root: Record<string, unknown>, key: "backgroundWarmup"):
 
 function integerSetting(
   root: Record<string, unknown>,
-  key: Exclude<EditableSettingKey, "backgroundWarmup">,
+  key: Exclude<EditableSettingKey, "jevEnabled" | "backgroundWarmup">,
   minimum: number,
   maximum: number,
 ): number {

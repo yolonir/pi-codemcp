@@ -16,6 +16,7 @@ def test_settings_load_defaults_and_camel_case_overrides(tmp_path: Path) -> None
     path.write_text(
         json.dumps(
             {
+                "jevEnabled": True,
                 "backgroundWarmup": False,
                 "cacheTtlHours": 6,
                 "executionTimeoutSeconds": 60,
@@ -32,12 +33,19 @@ def test_settings_load_defaults_and_camel_case_overrides(tmp_path: Path) -> None
 
     assert settings.version == 2
     assert not hasattr(settings, "output_line_limit")
+    assert settings.jev_enabled is True
     assert settings.background_warmup is False
     assert settings.cache_ttl_seconds == 6 * 60 * 60
     assert settings.execution_settings().timeout_seconds == 60
     assert settings.execution_settings().result_byte_limit == 32 * 1024
     assert settings.tool_enabled("linear", "delete_issue") is False
     assert settings.tool_enabled("linear", "list_issues") is True
+
+
+def test_settings_migrate_discovery_mode(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"discoveryMode": "jev"}))
+    assert load_settings(path).jev_enabled is True
 
 
 def test_settings_reject_unknown_or_unsafe_values(tmp_path: Path) -> None:
@@ -56,4 +64,8 @@ def test_settings_reject_unknown_or_unsafe_values(tmp_path: Path) -> None:
 
     path.write_text(json.dumps({"version": 2, "outputLineLimit": 500}))
     with pytest.raises(ValidationError, match="outputLineLimit"):
+        load_settings(path)
+
+    path.write_text(json.dumps({"discoveryMode": "cloud"}))
+    with pytest.raises(ValidationError, match="discoveryMode"):
         load_settings(path)

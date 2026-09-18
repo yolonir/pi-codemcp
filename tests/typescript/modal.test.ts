@@ -214,7 +214,7 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   let overlayOptions: Record<string, unknown> | undefined;
   const serverToggles: Array<{ name: string; enabled: boolean }> = [];
   const toolToggles: Array<{ name: string; enabled: boolean }> = [];
-  const settingChanges: Array<{ key: string; value: boolean | number }> = [];
+  const settingChanges: Array<{ key: string; value: boolean | number | string }> = [];
   const chainToggles: boolean[] = [];
   const discoveries: string[] = [];
   const revalidated: string[] = [];
@@ -238,7 +238,7 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   await showServerManagerModal(ctx, {
     servers,
     chains,
-    settings: { ...DEFAULT_CODEMCP_SETTINGS, disabledTools: {} },
+    settings: { ...DEFAULT_CODEMCP_SETTINGS, jevEnabled: true, disabledTools: {} },
     stats: statsStateFromSnapshot({
       updated_at: 100,
       lifetime: {
@@ -296,6 +296,7 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
     },
     async onSetSetting(key, value) {
       settingChanges.push({ key, value });
+      await Bun.sleep(20);
       return { ...DEFAULT_CODEMCP_SETTINGS, [key]: value, disabledTools: {} };
     },
     async onSetChainEnabled(chain, enabled) {
@@ -426,10 +427,13 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   expect(performance.now() - renderStarted).toBeLessThan(500);
 
   component?.handleInput?.("\t");
-  expect((component?.render(90) ?? []).join("\n")).toContain("[Settings]");
-  expect((component?.render(90) ?? []).join("\n")).toContain("Extension is broken!");
+  const settingsLines = (component?.render(90) ?? []).join("\n");
+  expect(settingsLines).toContain("[Settings]");
+  expect(settingsLines).toContain("Extension is broken!");
+  expect(settingsLines).toContain("true");
   component?.handleInput?.("\u001b[C");
-  await Bun.sleep(0);
+  expect((component?.render(90) ?? []).join("\n")).toContain("off");
+  await Bun.sleep(25);
   expect(settingChanges).toEqual([{ key: "backgroundWarmup", value: false }]);
   expect((component?.render(90) ?? []).join("\n")).not.toContain("Unsaved changes");
   expect((component?.render(90) ?? []).join("\n")).not.toContain("ctrl+s");

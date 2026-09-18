@@ -12,6 +12,7 @@ import {
   previewExecutionValue,
   renderExecutionResult,
 } from "./execution-rendering.js";
+import type { JevRouter } from "./jev-router.js";
 import type { CodeMcpLifecycle } from "./lifecycle.js";
 import type { SidecarProgress } from "./mcp-client.js";
 import { type CodeMcpOutputDetails, formatCodeMcpOutput } from "./output.js";
@@ -73,6 +74,8 @@ const SearchParameters = Type.Object({
     }),
   ),
 });
+
+const JevRouteParameters = Type.Object({});
 
 const InspectParameters = Type.Object({
   calls: Type.Array(Type.String({ minLength: 1 }), {
@@ -162,6 +165,76 @@ const EditExecuteParameters = Type.Object({
     description: "Replacement text; may be empty",
   }),
 });
+
+export function registerJevRouteTool(
+  pi: ExtensionAPI,
+  getRouter: () => Pick<JevRouter, "route"> | undefined,
+): void {
+  pi.registerTool({
+    name: "codemcp_route",
+    label: "Jev MCP Route",
+    description:
+      "Use Jev to select every configured MCP call relevant to a complete task, classify each call's workflow role, recommend parallel or dependent composition, and return exact typed SDK contracts. Use when the task may require external services or saved workflows. If no configured capability applies, returns no calls.",
+    promptSnippet: "Select and compose MCP calls for a complete task with Jev",
+    promptGuidelines: [
+      "Use codemcp_route once per distinct task when MCP capabilities may be needed; route again only if the task changes or the selected contracts cannot complete it. It reads the current request and recent conversation context automatically.",
+      "After codemcp_route returns contracts, immediately write and run the recommended minimal codemcp_execute program instead of stopping to describe the plan.",
+      "Follow codemcp_route composition guidance: gather independent calls, sequence dependent calls, and preserve a model turn only for semantic decisions or approvals.",
+    ],
+    parameters: JevRouteParameters,
+    async execute(_toolCallId, _params, signal, onUpdate, ctx) {
+      const router = getRouter();
+      if (!router) throw new Error("Jev routing requires TYPESAFE_API_KEY");
+      const { task, recentContext } = currentRouteTask(ctx.sessionManager.buildContextEntries());
+      onUpdate?.({
+        content: [{ type: "text", text: "Jev is selecting and composing MCP calls..." }],
+        details: undefined,
+      });
+      try {
+        const route = await router.route(task, recentContext, signal);
+        return {
+          content: [{ type: "text", text: route.prompt }],
+          details: {
+            selected: route.selected.map((tool) => ({
+              call: tool.call,
+              relevance: tool.relevance,
+              role: tool.role,
+            })),
+            needsAnyTool: route.needsAnyTool,
+            workflowShape: route.workflowShape,
+            needsCheckpoint: route.needsCheckpoint,
+          },
+        };
+      } catch (error) {
+        const active = pi.getActiveTools();
+        if (!active.includes("codemcp_search")) {
+          pi.setActiveTools([...active, "codemcp_search"]);
+        }
+        throw error;
+      }
+    },
+    renderCall(_args, theme) {
+      return new Text(theme.fg("toolTitle", theme.bold("Jev MCP Route")), 0, 0);
+    },
+    renderResult(result, { expanded, isPartial }, theme) {
+      if (isPartial) return new Text(theme.fg("warning", "Jev is routing..."), 0, 0);
+      if (expanded) return renderExpandedJson(result.content);
+      const details = result.details as
+        | { selected?: Array<{ call?: string }>; workflowShape?: string }
+        | undefined;
+      const selected = details?.selected ?? [];
+      let text = theme.fg(
+        "success",
+        `\n${selected.length} calls · ${details?.workflowShape ?? "no workflow"}`,
+      );
+      for (const tool of selected.slice(0, 4)) {
+        if (tool.call) text += `\n${theme.fg("dim", `  ${tool.call}`)}`;
+      }
+      text += `\n${theme.fg("muted", keyHint("app.tools.expand", "routing details"))}`;
+      return new Text(text, 0, 0);
+    },
+  });
+}
 
 export function registerCodeMcpTools(
   pi: ExtensionAPI,
@@ -648,6 +721,40 @@ function renderExpandedJson(content: readonly unknown[]): Text {
 function outputLimits(lifecycle: CodeMcpLifecycle): { maxBytes: number } {
   const settings = lifecycle.loadSettings();
   return { maxBytes: settings.outputLimitKiB * 1024 };
+}
+
+function currentRouteTask(entries: readonly unknown[]): {
+  task: string;
+  recentContext: string;
+} {
+  const messages: Array<{ role: "user" | "assistant"; text: string }> = [];
+  for (const entry of entries) {
+    if (!isRecord(entry) || !isRecord(entry.message)) continue;
+    const role = entry.message.role;
+    if (role !== "user" && role !== "assistant") continue;
+    const text = messageText(entry.message.content).trim();
+    if (text) messages.push({ role, text });
+  }
+  let currentIndex = messages.length - 1;
+  while (currentIndex >= 0 && messages[currentIndex]?.role !== "user") currentIndex -= 1;
+  const current = messages[currentIndex];
+  if (!current) throw new Error("Jev routing requires a text user request");
+  const recentContext = messages
+    .slice(Math.max(0, currentIndex - 3), currentIndex)
+    .map((message) => `${message.role === "user" ? "User" : "Assistant"}: ${message.text}`)
+    .join("\n\n")
+    .slice(-6_000);
+  return { task: current.text, recentContext };
+}
+
+function messageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .flatMap((item) =>
+      isRecord(item) && item.type === "text" && typeof item.text === "string" ? [item.text] : [],
+    )
+    .join("\n");
 }
 
 function truncate(value: string, maxLength: number): string {

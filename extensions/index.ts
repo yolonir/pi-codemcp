@@ -1,12 +1,16 @@
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
   CONFIG_DIR_NAME,
   type ExtensionAPI,
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
+import { TypeSafeClient } from "@typesafe-ai/sdk";
 import { newCodeMcpTraceId, SavedChainManager } from "../src/chains.js";
 import { setMcpServerEnabled } from "../src/config.js";
 import { summarizeError } from "../src/errors.js";
+import { JevRouter } from "../src/jev-router.js";
+import { readJsonObject, writeJsonObjectAtomically } from "../src/json-file.js";
 import { CodeMcpLifecycle } from "../src/lifecycle.js";
 import type { SidecarClientOptions } from "../src/mcp-client.js";
 import {
@@ -22,13 +26,21 @@ import {
   setEditableSetting,
   setToolEnabled,
 } from "../src/settings.js";
-import { registerCodeMcpTools } from "../src/tools.js";
+import { registerCodeMcpTools, registerJevRouteTool } from "../src/tools.js";
 
-export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
+export interface CodeMcpExtensionOptions extends SidecarClientOptions {
+  jevClient?: TypeSafeClient;
+}
+
+export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
   return function codeMcpExtension(pi: ExtensionAPI): void {
-    const lifecycle = new CodeMcpLifecycle(options);
+    const { jevClient, ...sidecarOptions } = options;
+    const lifecycle = new CodeMcpLifecycle(sidecarOptions);
     const chains = new SavedChainManager(pi, lifecycle);
+    const routerClient = jevClient ?? createJevClient();
+    const jevRouter = routerClient ? new JevRouter(lifecycle, routerClient) : undefined;
     registerCodeMcpTools(pi, lifecycle, chains);
+    registerJevRouteTool(pi, () => jevRouter);
 
     pi.registerCommand("codemcp", {
       description: "Manage CodeMCP servers, saved chains, tools, and settings",
@@ -71,7 +83,11 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
             onSetSetting: async (key, value) => {
               const updated = setEditableSetting(lifecycle.loadSettings(), key, value);
               saveCodeMcpSettings(lifecycle.settingsPath, updated);
-              await lifecycle.request("reload_settings", {});
+              if (key !== "jevEnabled") await lifecycle.request("reload_settings", {});
+              setDiscoveryTools(pi, updated.jevEnabled && jevRouter !== undefined);
+              if (updated.jevEnabled && !jevRouter) {
+                ctx.ui.notify("Jev mode requires TYPESAFE_API_KEY; using local search", "warning");
+              }
               return updated;
             },
             onSetChainEnabled: async (chain, enabled) => {
@@ -97,6 +113,11 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
     });
 
     pi.on("session_start", (_event, ctx) => {
+      try {
+        showChangelogOnce(ctx, join(dirname(lifecycle.settingsPath), "changelog.json"));
+      } catch (error) {
+        ctx.ui.notify(`CodeMCP changelog failed: ${summarizeError(error)}`, "warning");
+      }
       bindProjectChainScope(ctx, lifecycle, chains);
       chains.activatePersisted();
       for (const error of chains.startupErrors) ctx.ui.notify(error, "warning");
@@ -106,6 +127,11 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
       } catch (error) {
         ctx.ui.notify(`CodeMCP settings failed: ${summarizeError(error)}`, "warning");
         return;
+      }
+      const useJev = settings.jevEnabled && jevRouter !== undefined;
+      setDiscoveryTools(pi, useJev);
+      if (settings.jevEnabled && !jevRouter) {
+        ctx.ui.notify("Jev mode requires TYPESAFE_API_KEY; using local search", "warning");
       }
       if (!settings.backgroundWarmup) return;
       void lifecycle.warmup().catch((error: unknown) => {
@@ -153,6 +179,38 @@ export async function setServerEnabledFromManager(
 }
 
 export default createCodeMcpExtension();
+
+const CHANGELOG_ID = "jev-routing-v1";
+const CHANGELOG_MESSAGE =
+  "pi-codemcp update: optional Jev routing is now available! Enable Jev in /codemcp → Settings to let Jev select and compose MCP calls, it's pretty cool";
+
+export function showChangelogOnce(
+  ctx: Pick<ExtensionCommandContext, "mode" | "ui">,
+  path: string,
+): void {
+  if (ctx.mode !== "tui") return;
+  const state = existsSync(path) ? readJsonObject(path, "CodeMCP changelog state") : {};
+  if (state.lastSeen === CHANGELOG_ID) return;
+  ctx.ui.notify(CHANGELOG_MESSAGE, "info");
+  writeJsonObjectAtomically(path, { lastSeen: CHANGELOG_ID });
+}
+
+function createJevClient(): TypeSafeClient | undefined {
+  return process.env.TYPESAFE_API_KEY?.trim() ? new TypeSafeClient() : undefined;
+}
+
+function setDiscoveryTools(pi: ExtensionAPI, useJev: boolean): void {
+  const selected = useJev ? "codemcp_route" : "codemcp_search";
+  const current = pi.getActiveTools();
+  if (
+    current.includes(selected) &&
+    !current.includes(useJev ? "codemcp_search" : "codemcp_route")
+  ) {
+    return;
+  }
+  const active = current.filter((name) => name !== "codemcp_search" && name !== "codemcp_route");
+  pi.setActiveTools([...active, selected]);
+}
 
 export async function promptForProblemReport(
   pi: Pick<ExtensionAPI, "sendUserMessage">,

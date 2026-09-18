@@ -7,6 +7,7 @@ import {
   createCodeMcpExtension,
   discoverServerFromManager,
   promptForProblemReport,
+  showChangelogOnce,
 } from "../../extensions/index.js";
 
 describe("Pi extension registration", () => {
@@ -36,7 +37,31 @@ describe("Pi extension registration", () => {
     expect(messages[0]).toContain("Do not autosumbit issue without clear approval");
   });
 
-  test("registers search, inspect, execute, edit, save, and one manager command", () => {
+  test("shows the current changelog once in the TUI", async () => {
+    const temporary = await mkdtemp(join(tmpdir(), "pi-codemcp-changelog-"));
+    const path = join(temporary, "changelog.json");
+    const notifications: string[] = [];
+    const ctx = {
+      mode: "tui",
+      ui: {
+        notify(message: string) {
+          notifications.push(message);
+        },
+      },
+    } as unknown as Parameters<typeof showChangelogOnce>[0];
+    try {
+      showChangelogOnce(ctx, path);
+      showChangelogOnce(ctx, path);
+
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]).toContain("optional Jev routing");
+      expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ lastSeen: "jev-routing-v1" });
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  });
+
+  test("registers search, Jev route, execution tools, and one manager command", () => {
     const tools: Array<{ name: string; description?: string; parameters?: unknown }> = [];
     const commands: string[] = [];
     const events: string[] = [];
@@ -61,6 +86,7 @@ describe("Pi extension registration", () => {
       "codemcp_edit",
       "codemcp_save_chain",
       "codemcp_manage_chains",
+      "codemcp_route",
     ]);
     expect(commands).toEqual(["codemcp"]);
     expect(events).toEqual(["session_start", "session_shutdown"]);
@@ -96,6 +122,7 @@ describe("Pi extension registration", () => {
         confirmedByUser: { type: "boolean" },
       },
     });
+    expect(tools[6]?.parameters).toMatchObject({ properties: {} });
   });
 
   test("discovering a disabled server enables it without an extra step", async () => {
