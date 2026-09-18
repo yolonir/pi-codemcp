@@ -182,7 +182,7 @@ export default createCodeMcpExtension();
 
 const CHANGELOG_ID = "jev-routing-v1";
 const CHANGELOG_MESSAGE =
-  "pi-codemcp update: optional Jev routing is now available. Enable Jev in /codemcp → Settings to select and compose MCP calls on demand without slowing ordinary messages.";
+  "pi-codemcp update: optional Jev routing is now available! Enable Jev in /codemcp → Settings to let Jev select and compose MCP calls, it's pretty cool";
 
 export function showChangelogOnce(
   ctx: Pick<ExtensionCommandContext, "mode" | "ui">,
