@@ -234,7 +234,7 @@ export function registerJevRouteTool(
       const selected = details?.selected ?? [];
       let text = theme.fg(
         "success",
-        `${selected.length} calls · ${details?.workflowShape ?? "no workflow"}`,
+        `\n${selected.length} calls · ${details?.workflowShape ?? "no workflow"}`,
       );
       for (const tool of selected.slice(0, 4)) {
         if (tool.call) text += `\n${theme.fg("dim", `  ${tool.call}`)}`;
