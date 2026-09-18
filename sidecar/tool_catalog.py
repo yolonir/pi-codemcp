@@ -454,6 +454,7 @@ class ToolCatalog(BaseModel):
                 value,
                 mode="json",
                 exclude_unset=True,
+                by_alias=True,
             )
         )
         if not isinstance(dumped, dict):
@@ -469,7 +470,7 @@ class ToolCatalog(BaseModel):
             raise TypeError(f"{tool_name} is not a saved chain with an output contract")
         validated = spec.output_adapter.validate_python(result)
         return JSON_VALUE_ADAPTER.validate_python(
-            spec.output_adapter.dump_python(validated, mode="json")
+            spec.output_adapter.dump_python(validated, mode="json", by_alias=True)
         )
 
     def normalize_result(self, tool_name: str, result: mcp_types.CallToolResult) -> JsonValue:
@@ -501,7 +502,7 @@ class ToolCatalog(BaseModel):
             else:
                 validated = adapter.validate_python(structured)
                 normalized = JSON_VALUE_ADAPTER.validate_python(
-                    adapter.dump_python(validated, mode="json")
+                    adapter.dump_python(validated, mode="json", by_alias=True)
                 )
             if isinstance(normalized, str) and (spec.output_wrap_result or wrap_from_meta):
                 return _normalize_text_result(normalized)

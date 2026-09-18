@@ -813,6 +813,97 @@ def test_runtime_argument_validation_preserves_omitted_optional_fields() -> None
     }
 
 
+@pytest.mark.parametrize("required", [True, False], ids=["required", "optional"])
+def test_argument_normalization_preserves_json_aliases(required: bool) -> None:
+    range_schema: JsonObject = {
+        "type": "object",
+        "properties": {"from": {"type": "integer"}, "to": {"type": "integer"}},
+        "required": ["from", "to"],
+    }
+    schema: JsonObject = {
+        "type": "object",
+        "properties": {
+            "for": {"type": "string"},
+            "relativeTimeRange": range_schema,
+            "queries": {"type": "array", "items": range_schema},
+            "duration": {"type": "string"},
+            "omitted": {"type": "string", "default": "default value"},
+        },
+        "required": ["for", "relativeTimeRange", "queries"] if required else [],
+    }
+    catalog = ToolCatalog.from_server_tools({"demo": [make_tool("echo", schema)]})
+    supplied: JsonObject = {
+        "for": "3m",
+        "relativeTimeRange": {"from": 900, "to": 0},
+        "queries": [{"from": 600, "to": 0}],
+        "duration": "5m",
+    }
+
+    actual = catalog.validate_arguments("demo_echo", supplied)
+    assert actual == supplied
+    assert catalog.validate_arguments("demo_echo", actual) == supplied
+    if required:
+        with pytest.raises(ValidationError):
+            catalog.validate_arguments("demo_echo", {"duration": "5m"})
+    else:
+        assert catalog.validate_arguments("demo_echo", {"duration": "5m"}) == {
+            "duration": "5m"
+        }
+
+
+@pytest.mark.parametrize("kind", ["mcp", "wrapped_schema", "wrapped_meta", "chain"])
+def test_result_normalization_preserves_json_aliases(kind: str, tmp_path: Path) -> None:
+    schema: JsonObject = {
+        "type": "object",
+        "properties": {
+            "for": {"type": "string"},
+            "queries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"from": {"type": "integer"}},
+                    "required": ["from"],
+                },
+            },
+        },
+        "required": ["for", "queries"],
+    }
+    supplied: JsonObject = {"for": "3m", "queries": [{"from": 900}]}
+    if kind == "chain":
+        chain = ChainStore(tmp_path / "chains").build(
+            name="echo",
+            description="Return the input unchanged.",
+            code="return input",
+            input_schema=schema,
+            output_schema=schema,
+            dependencies=[],
+        )
+        catalog = ToolCatalog.from_server_tools({}, saved_chains=[chain])
+        assert catalog.validate_arguments(chain.public_name, supplied) == supplied
+        assert (
+            catalog.validate_saved_chain_result(chain.public_name, supplied) == supplied
+        )
+        return
+
+    wrapped = kind in {"wrapped_schema", "wrapped_meta"}
+    output_schema: JsonObject = (
+        {"type": "object", "properties": {"result": schema}, "required": ["result"]}
+        if wrapped
+        else schema
+    )
+    if kind == "wrapped_schema":
+        output_schema["x-fastmcp-wrap-result"] = True
+    catalog = ToolCatalog.from_server_tools(
+        {"demo": [make_tool("echo", {"type": "object"}, output_schema)]}
+    )
+    result = mcp_types.CallToolResult(
+        content=[],
+        structuredContent={"result": supplied} if wrapped else supplied,
+        _meta={"fastmcp": {"wrap_result": True}} if kind == "wrapped_meta" else None,
+    )
+    assert catalog.normalize_result("demo_echo", result) == supplied
+
+
 def test_catalog_validates_arguments_and_unknown_schema_names() -> None:
     catalog = ToolCatalog.from_mcp_tools(
         [
