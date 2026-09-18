@@ -5,6 +5,7 @@ Fast, typed, sandboxed **Code Mode for every MCP server configured in Pi**.
 Instead of putting every upstream MCP tool definition into the model context, pi-codemcp gives the agent a small interface for discovery, execution, and reuse:
 
 - `codemcp_search` ranks capabilities or pages through a compact inventory without loading full schemas.
+- Optional Jev discovery selects all relevant calls in one parallel TypeSafe request and injects their exact contracts before the agent starts.
 - `codemcp_inspect` returns exact typed SDK stubs only for selected calls.
 - `codemcp_execute` runs one sandboxed Python call graph across one or many MCP servers.
 - `codemcp_edit` applies one exact replacement to the previous execution and reruns it without resending the full code.
@@ -133,6 +134,7 @@ Settings live at `<agent-dir>/pi-codemcp/settings.json` and can also be edited i
 ```json
 {
   "version": 2,
+  "discoveryMode": "search",
   "backgroundWarmup": true,
   "cacheTtlHours": 24,
   "executionTimeoutSeconds": 30,
@@ -147,6 +149,12 @@ Settings live at `<agent-dir>/pi-codemcp/settings.json` and can also be edited i
 ```
 
 The Python sidecar enforces catalog cache TTL, execution timeout, per-tool timeout, max MCP calls, result size, and disabled-tool policy. The TypeScript Pi layer uses `backgroundWarmup` and `outputLimitKiB` for session warmup and rendered-output truncation; the sidecar still validates those fields so the settings file has one strict shared schema. Version-one files are migrated when loaded, and the removed `outputLineLimit` field is omitted on the next save.
+
+### Jev discovery mode
+
+Set `discoveryMode` to `"jev"` in `/codemcp` and provide `TYPESAFE_API_KEY`. Before each agent run, pi-codemcp sends the current request, a small recent-conversation window, and every enabled MCP call's name and description to TypeSafe. One Jev request independently scores whether any MCP capability is needed and whether each call materially helps. pi-codemcp injects exact typed contracts for the relevant calls and hides `codemcp_search`.
+
+Jev mode is opt-in because request text and enabled tool descriptions leave the machine. If the API key is missing or Jev fails, pi-codemcp keeps local `codemcp_search` available for that session. `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL` are honored by the official TypeSafe SDK.
 
 ## Search and execute flow
 

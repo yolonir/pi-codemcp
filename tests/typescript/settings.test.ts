@@ -17,12 +17,14 @@ test("settings persist product controls and per-tool policy", async () => {
     const defaults = loadCodeMcpSettings(path);
     expect(defaults).toEqual(DEFAULT_CODEMCP_SETTINGS);
 
-    const withLimit = setEditableSetting(defaults, "outputLimitKiB", 100);
+    const withJev = setEditableSetting(defaults, "discoveryMode", "jev");
+    const withLimit = setEditableSetting(withJev, "outputLimitKiB", 100);
     const withDisabledTool = setToolEnabled(withLimit, "linear", "delete_issue", false);
     saveCodeMcpSettings(path, withDisabledTool);
 
     expect(loadCodeMcpSettings(path)).toEqual({
       ...DEFAULT_CODEMCP_SETTINGS,
+      discoveryMode: "jev",
       outputLimitKiB: 100,
       disabledTools: { linear: ["delete_issue"] },
     });
@@ -65,6 +67,9 @@ test("settings reject unknown and out-of-range controls", async () => {
 
     await writeFile(path, JSON.stringify({ maxCalls: 0 }), "utf8");
     expect(() => loadCodeMcpSettings(path)).toThrow("maxCalls must be an integer");
+
+    await writeFile(path, JSON.stringify({ discoveryMode: "cloud" }), "utf8");
+    expect(() => loadCodeMcpSettings(path)).toThrow("discoveryMode must be search or jev");
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

@@ -214,7 +214,7 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   let overlayOptions: Record<string, unknown> | undefined;
   const serverToggles: Array<{ name: string; enabled: boolean }> = [];
   const toolToggles: Array<{ name: string; enabled: boolean }> = [];
-  const settingChanges: Array<{ key: string; value: boolean | number }> = [];
+  const settingChanges: Array<{ key: string; value: boolean | number | string }> = [];
   const chainToggles: boolean[] = [];
   const discoveries: string[] = [];
   const revalidated: string[] = [];
@@ -238,7 +238,7 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   await showServerManagerModal(ctx, {
     servers,
     chains,
-    settings: { ...DEFAULT_CODEMCP_SETTINGS, disabledTools: {} },
+    settings: { ...DEFAULT_CODEMCP_SETTINGS, discoveryMode: "jev", disabledTools: {} },
     stats: statsStateFromSnapshot({
       updated_at: 100,
       lifetime: {
@@ -426,8 +426,10 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   expect(performance.now() - renderStarted).toBeLessThan(500);
 
   component?.handleInput?.("\t");
-  expect((component?.render(90) ?? []).join("\n")).toContain("[Settings]");
-  expect((component?.render(90) ?? []).join("\n")).toContain("Extension is broken!");
+  const settingsLines = (component?.render(90) ?? []).join("\n");
+  expect(settingsLines).toContain("[Settings]");
+  expect(settingsLines).toContain("Extension is broken!");
+  expect(settingsLines).toContain("\x1b[38;2;255;92;92mJ");
   component?.handleInput?.("\u001b[C");
   await Bun.sleep(0);
   expect(settingChanges).toEqual([{ key: "backgroundWarmup", value: false }]);

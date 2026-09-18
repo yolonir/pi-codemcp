@@ -52,7 +52,8 @@
     "image": "https://raw.githubusercontent.com/yolonir/pi-codemcp/main/media/preview.png"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0"
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@typesafe-ai/sdk": "0.6.0"
   },
   "optionalDependencies": {
     "@manzt/uv-darwin-arm64": "0.8.13",

@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { readJsonObject, requireJsonObject, writeJsonObjectAtomically } from "./json-file.js";
 
 export interface CodeMcpSettings {
+  discoveryMode: "search" | "jev";
   backgroundWarmup: boolean;
   cacheTtlHours: number;
   executionTimeoutSeconds: number;
@@ -13,9 +14,10 @@ export interface CodeMcpSettings {
 }
 
 export type EditableSettingKey = Exclude<keyof CodeMcpSettings, "disabledTools">;
-export type EditableSettingValue = boolean | number;
+export type EditableSettingValue = boolean | number | CodeMcpSettings["discoveryMode"];
 
 export const DEFAULT_CODEMCP_SETTINGS: Readonly<CodeMcpSettings> = {
+  discoveryMode: "search",
   backgroundWarmup: true,
   cacheTtlHours: 24,
   executionTimeoutSeconds: 30,
@@ -28,6 +30,7 @@ export const DEFAULT_CODEMCP_SETTINGS: Readonly<CodeMcpSettings> = {
 
 const ALLOWED_KEYS = new Set([
   "version",
+  "discoveryMode",
   "backgroundWarmup",
   "cacheTtlHours",
   "executionTimeoutSeconds",
@@ -55,6 +58,7 @@ export function loadCodeMcpSettings(path: string): CodeMcpSettings {
   }
 
   return {
+    discoveryMode: discoveryModeSetting(migrated.discoveryMode),
     backgroundWarmup: booleanSetting(migrated, "backgroundWarmup"),
     cacheTtlHours: integerSetting(migrated, "cacheTtlHours", 0, 720),
     executionTimeoutSeconds: integerSetting(migrated, "executionTimeoutSeconds", 1, 300),
@@ -69,6 +73,7 @@ export function loadCodeMcpSettings(path: string): CodeMcpSettings {
 export function saveCodeMcpSettings(path: string, settings: CodeMcpSettings): void {
   writeJsonObjectAtomically(path, {
     version: 2,
+    discoveryMode: settings.discoveryMode,
     backgroundWarmup: settings.backgroundWarmup,
     cacheTtlHours: settings.cacheTtlHours,
     executionTimeoutSeconds: settings.executionTimeoutSeconds,
@@ -85,6 +90,12 @@ export function setEditableSetting(
   key: EditableSettingKey,
   value: EditableSettingValue,
 ): CodeMcpSettings {
+  if (key === "discoveryMode") {
+    if (value !== "search" && value !== "jev") {
+      throw new TypeError(`${key} must be search or jev`);
+    }
+    return { ...settings, [key]: value };
+  }
   if (key === "backgroundWarmup") {
     if (typeof value !== "boolean") throw new TypeError(`${key} must be a boolean`);
     return { ...settings, [key]: value };
@@ -112,6 +123,14 @@ function cloneDefaults(): CodeMcpSettings {
   return { ...DEFAULT_CODEMCP_SETTINGS, disabledTools: {} };
 }
 
+function discoveryModeSetting(value: unknown): CodeMcpSettings["discoveryMode"] {
+  const mode = value ?? DEFAULT_CODEMCP_SETTINGS.discoveryMode;
+  if (mode !== "search" && mode !== "jev") {
+    throw new TypeError("discoveryMode must be search or jev");
+  }
+  return mode;
+}
+
 function booleanSetting(root: Record<string, unknown>, key: "backgroundWarmup"): boolean {
   const value = root[key] ?? DEFAULT_CODEMCP_SETTINGS[key];
   if (typeof value !== "boolean") throw new TypeError(`${key} must be a boolean`);
@@ -120,7 +139,7 @@ function booleanSetting(root: Record<string, unknown>, key: "backgroundWarmup"):
 
 function integerSetting(
   root: Record<string, unknown>,
-  key: Exclude<EditableSettingKey, "backgroundWarmup">,
+  key: Exclude<EditableSettingKey, "backgroundWarmup" | "discoveryMode">,
   minimum: number,
   maximum: number,
 ): number {

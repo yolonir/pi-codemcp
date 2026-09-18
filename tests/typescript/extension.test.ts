@@ -63,7 +63,7 @@ describe("Pi extension registration", () => {
       "codemcp_manage_chains",
     ]);
     expect(commands).toEqual(["codemcp"]);
-    expect(events).toEqual(["session_start", "session_shutdown"]);
+    expect(events).toEqual(["session_start", "before_agent_start", "session_shutdown"]);
 
     const search = tools[0];
     expect(search?.description).toContain("compact inventory");

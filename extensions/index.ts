@@ -4,9 +4,11 @@ import {
   type ExtensionAPI,
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
+import { TypeSafeClient } from "@typesafe-ai/sdk";
 import { newCodeMcpTraceId, SavedChainManager } from "../src/chains.js";
 import { setMcpServerEnabled } from "../src/config.js";
 import { summarizeError } from "../src/errors.js";
+import { JevRouter, recentConversation } from "../src/jev-router.js";
 import { CodeMcpLifecycle } from "../src/lifecycle.js";
 import type { SidecarClientOptions } from "../src/mcp-client.js";
 import {
@@ -24,10 +26,18 @@ import {
 } from "../src/settings.js";
 import { registerCodeMcpTools } from "../src/tools.js";
 
-export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
+export interface CodeMcpExtensionOptions extends SidecarClientOptions {
+  jevClient?: TypeSafeClient;
+}
+
+export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
   return function codeMcpExtension(pi: ExtensionAPI): void {
-    const lifecycle = new CodeMcpLifecycle(options);
+    const { jevClient, ...sidecarOptions } = options;
+    const lifecycle = new CodeMcpLifecycle(sidecarOptions);
     const chains = new SavedChainManager(pi, lifecycle);
+    const routerClient = jevClient ?? createJevClient();
+    const jevRouter = routerClient ? new JevRouter(lifecycle, routerClient) : undefined;
+    let jevFailureNotified = false;
     registerCodeMcpTools(pi, lifecycle, chains);
 
     pi.registerCommand("codemcp", {
@@ -72,6 +82,10 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
               const updated = setEditableSetting(lifecycle.loadSettings(), key, value);
               saveCodeMcpSettings(lifecycle.settingsPath, updated);
               await lifecycle.request("reload_settings", {});
+              setSearchActive(pi, updated.discoveryMode !== "jev" || !jevRouter);
+              if (updated.discoveryMode === "jev" && !jevRouter) {
+                ctx.ui.notify("Jev mode requires TYPESAFE_API_KEY; using local search", "warning");
+              }
               return updated;
             },
             onSetChainEnabled: async (chain, enabled) => {
@@ -107,10 +121,38 @@ export function createCodeMcpExtension(options: SidecarClientOptions = {}) {
         ctx.ui.notify(`CodeMCP settings failed: ${summarizeError(error)}`, "warning");
         return;
       }
+      const useJev = settings.discoveryMode === "jev" && jevRouter !== undefined;
+      setSearchActive(pi, !useJev);
+      if (settings.discoveryMode === "jev" && !jevRouter) {
+        ctx.ui.notify("Jev mode requires TYPESAFE_API_KEY; using local search", "warning");
+      }
       if (!settings.backgroundWarmup) return;
       void lifecycle.warmup().catch((error: unknown) => {
         ctx.ui.notify(`CodeMCP background warmup failed: ${summarizeError(error)}`, "warning");
       });
+    });
+
+    pi.on("before_agent_start", async (event, ctx) => {
+      if (lifecycle.loadSettings().discoveryMode !== "jev" || !jevRouter) return;
+      try {
+        const recent = recentConversation(ctx.sessionManager.buildContextEntries(), event.prompt);
+        const route = await jevRouter.route(event.prompt, recent, ctx.signal);
+        setSearchActive(pi, false);
+        jevFailureNotified = false;
+        return { systemPrompt: `${event.systemPrompt}\n\n${route.prompt}` };
+      } catch (error) {
+        setSearchActive(pi, true);
+        if (!jevFailureNotified) {
+          ctx.ui.notify(
+            `Jev routing failed; using local search: ${summarizeError(error)}`,
+            "warning",
+          );
+          jevFailureNotified = true;
+        }
+        return {
+          systemPrompt: `${event.systemPrompt}\n\nJev routing is unavailable for this turn; use codemcp_search for MCP discovery.`,
+        };
+      }
     });
 
     pi.on("session_shutdown", async () => {
@@ -153,6 +195,17 @@ export async function setServerEnabledFromManager(
 }
 
 export default createCodeMcpExtension();
+
+function createJevClient(): TypeSafeClient | undefined {
+  return process.env.TYPESAFE_API_KEY?.trim() ? new TypeSafeClient() : undefined;
+}
+
+function setSearchActive(pi: ExtensionAPI, enabled: boolean): void {
+  const current = pi.getActiveTools();
+  if (current.includes("codemcp_search") === enabled) return;
+  const active = current.filter((name) => name !== "codemcp_search");
+  pi.setActiveTools(enabled ? [...active, "codemcp_search"] : active);
+}
 
 export async function promptForProblemReport(
   pi: Pick<ExtensionAPI, "sendUserMessage">,

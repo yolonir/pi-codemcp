@@ -26,6 +26,7 @@ class CodeMcpSettings(BaseModel):
     )
 
     version: Literal[2] = 2
+    discovery_mode: Literal["search", "jev"] = "search"
     background_warmup: bool = True
     cache_ttl_hours: int = Field(default=24, ge=0, le=720)
     execution_timeout_seconds: int = Field(default=30, ge=1, le=300)

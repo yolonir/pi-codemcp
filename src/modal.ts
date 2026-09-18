@@ -136,6 +136,15 @@ const OVERLAY_OPTIONS = {
   minWidth: 72,
   maxHeight: "85%",
 } as const;
+const RAINBOW_COLORS = [
+  "\x1b[38;2;255;92;92m",
+  "\x1b[38;2;255;202;58m",
+  "\x1b[38;2;72;219;130m",
+  "\x1b[38;2;80;181;255m",
+  "\x1b[38;2;174;112;255m",
+  "\x1b[38;2;255;105;180m",
+] as const;
+const ANSI_RESET = "\x1b[0m";
 
 const PROBLEM_REPORT_LABEL = "Extension is broken!";
 const PROBLEM_REPORT_DESCRIPTION =
@@ -143,6 +152,16 @@ const PROBLEM_REPORT_DESCRIPTION =
 const PROBLEM_REPORT_SHORTCUT = "Report issue: R";
 
 const SETTING_DEFINITIONS: SettingDefinition[] = [
+  {
+    key: "discoveryMode",
+    label: "Tool discovery",
+    description:
+      "Use local search, or let Jev select relevant MCP contracts before each agent run. Jev requires TYPESAFE_API_KEY and sends the request and enabled tool descriptions to TypeSafe.",
+    choices: [
+      { value: "search", label: "search" },
+      { value: "jev", label: "Jev" },
+    ],
+  },
   {
     key: "backgroundWarmup",
     label: "Background warmup",
@@ -202,17 +221,24 @@ export async function showServerManagerModal(
     throw new Error("CodeMCP server manager requires interactive mode");
   }
 
-  return ctx.ui.custom<ServerManagerResult>(
-    (tui, theme, keybindings, done) =>
-      new ServerManagerModal(
-        options,
-        theme,
-        keybindings,
-        (result) => done(result),
-        () => tui.requestRender(),
-      ),
-    { overlay: true, overlayOptions: OVERLAY_OPTIONS },
-  );
+  let modal: ServerManagerModal | undefined;
+  try {
+    return await ctx.ui.custom<ServerManagerResult>(
+      (tui, theme, keybindings, done) => {
+        modal = new ServerManagerModal(
+          options,
+          theme,
+          keybindings,
+          (result) => done(result),
+          () => tui.requestRender(),
+        );
+        return modal;
+      },
+      { overlay: true, overlayOptions: OVERLAY_OPTIONS },
+    );
+  } finally {
+    modal?.dispose();
+  }
 }
 
 export function chainStatesFromViews(views: SavedChainView[]): ChainModalState[] {
@@ -321,6 +347,8 @@ export function serverStatesFromStatus(status: Record<string, unknown>): ServerM
 
 class ServerManagerModal implements Component, Focusable {
   private readonly search = new Input();
+  private readonly rainbowTimer: ReturnType<typeof setInterval>;
+  private rainbowFrame = 0;
   private activeTab: "servers" | "chains" | "stats" | "settings" = "servers";
   private activePane: "servers" | "tools" = "servers";
   private selectedServerIndex = 0;
@@ -336,7 +364,16 @@ class ServerManagerModal implements Component, Focusable {
     private readonly keybindings: Keybindings,
     private readonly close: (result?: ServerManagerResult) => void,
     private readonly requestRender: () => void,
-  ) {}
+  ) {
+    this.rainbowTimer = setInterval(() => {
+      this.rainbowFrame += 1;
+      this.requestRender();
+    }, 120);
+  }
+
+  dispose(): void {
+    clearInterval(this.rainbowTimer);
+  }
 
   get focused(): boolean {
     return this._focused;
@@ -784,6 +821,13 @@ class ServerManagerModal implements Component, Focusable {
     return lines.slice(0, Math.max(1, modalBodyRows()));
   }
 
+  private settingValue(definition: SettingDefinition): string {
+    const value = settingLabel(definition, this.options.settings[definition.key]);
+    return definition.key === "discoveryMode" && value === "Jev"
+      ? rainbowText(value, this.rainbowFrame)
+      : value;
+  }
+
   private renderSettings(width: number): string[] {
     const splitHeight = Math.max(1, modalBodyRows());
     const leftWidth = Math.min(38, Math.max(28, Math.floor(width * 0.42)));
@@ -792,7 +836,7 @@ class ServerManagerModal implements Component, Focusable {
     for (const [index, definition] of SETTING_DEFINITIONS.entries()) {
       const selected = index === this.selectedSettingIndex;
       const prefix = selected ? this.theme.fg("accent", "→") : " ";
-      const value = settingLabel(definition, this.options.settings[definition.key]);
+      const value = this.settingValue(definition);
       const reserved = visibleWidth(prefix) + visibleWidth(value) + 3;
       const label = truncateToWidth(definition.label, Math.max(4, leftWidth - reserved), "…");
       const gap = " ".repeat(Math.max(1, leftWidth - reserved - visibleWidth(label) + 1));
@@ -830,7 +874,7 @@ class ServerManagerModal implements Component, Focusable {
       : definition
         ? [
             this.theme.fg("accent", this.theme.bold(definition.label)),
-            this.theme.fg("muted", settingLabel(definition, this.options.settings[definition.key])),
+            this.theme.fg("muted", this.settingValue(definition)),
             "",
             ...wrapPlainText(definition.description, rightWidth).map((line) =>
               this.theme.fg("muted", line),
@@ -1262,6 +1306,17 @@ function serverIcon(server: ServerModalState, theme: Theme): string {
 
 function settingLabel(definition: SettingDefinition, value: EditableSettingValue): string {
   return definition.choices.find((choice) => choice.value === value)?.label ?? String(value);
+}
+
+function rainbowText(text: string, frame: number): string {
+  return (
+    [...text]
+      .map(
+        (character, index) =>
+          `${RAINBOW_COLORS[(frame + index) % RAINBOW_COLORS.length]}${character}`,
+      )
+      .join("") + ANSI_RESET
+  );
 }
 
 function secondsChoice(value: number): SettingChoice {
