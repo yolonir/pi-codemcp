@@ -169,6 +169,8 @@ uv run --project sidecar --frozen -m sidecar.cli execute --code-file plan.py
 
 Conventional Commit titles drive Release Please. Feature PRs do not publish; merging the release PR triggers the verified npm release.
 
+Release automation requires the Actions secret `RELEASE_PLEASE_TOKEN`: a fine-grained PAT scoped to this repository with **Contents**, **Pull requests**, and **Issues** read/write permissions. It lets release PR checks run automatically without the `GITHUB_TOKEN` approval gate; release PRs still require an explicit merge.
+
 ## Credits
 
 Inspired by [Cloudflare's Code Mode](https://blog.cloudflare.com/code-mode-mcp/). Independent implementation for Pi using FastMCP and Pydantic Monty.
