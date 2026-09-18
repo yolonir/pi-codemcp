@@ -19,32 +19,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      actions: write
-      contents: write
-      issues: write
-      pull-requests: write
+      contents: read
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
 
     steps:
+      - name: Require release automation token
+        env:
+          RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          if [[ -z "$RELEASE_PLEASE_TOKEN" ]]; then
+            echo "::error::Set RELEASE_PLEASE_TOKEN to a repository-scoped PAT before running Release."
+            exit 1
+          fi
+
       - name: Update release pull request or create release
         id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           target-branch: main
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-
-      - name: Run required checks on release pull request
-        if: steps.release.outputs.pr != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_PR: ${{ steps.release.outputs.pr }}
-        run: |
-          set -euo pipefail
-          branch="$(jq -er '.headBranchName' <<<"$RELEASE_PR")"
-          gh workflow run quality.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"
 
   publish:
     name: Publish npm package
