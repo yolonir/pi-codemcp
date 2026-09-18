@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.0](https://github.com/yolonir/pi-codemcp/compare/v1.4.0...v1.5.0) (2026-09-18)
+
+
+### Features
+
+* add on-demand Jev tool routing ([#52](https://github.com/yolonir/pi-codemcp/issues/52)) ([a1c7e4d](https://github.com/yolonir/pi-codemcp/commit/a1c7e4d6ea76ae4fad391556ca3c9be2b10d27b7))
+* report live preflight/execution progress during sandbox runs ([#49](https://github.com/yolonir/pi-codemcp/issues/49)) ([b3a3a5f](https://github.com/yolonir/pi-codemcp/commit/b3a3a5f107b02fb55e7645d7e514fa029f6e108d))
+
 ## [1.4.0](https://github.com/yolonir/pi-codemcp/compare/v1.3.3...v1.4.0) (2026-08-31)
 
 
