@@ -13,7 +13,12 @@ import {
 } from "@earendil-works/pi-tui";
 import type { ChainScope, SavedChainView } from "./chains.js";
 import { summarizeError } from "./errors.js";
-import type { CodeMcpSettings, EditableSettingKey, EditableSettingValue } from "./settings.js";
+import {
+  type CodeMcpSettings,
+  type EditableSettingKey,
+  type EditableSettingValue,
+  setEditableSetting,
+} from "./settings.js";
 
 export interface ToolModalState {
   name: string;
@@ -355,6 +360,7 @@ class ServerManagerModal implements Component, Focusable {
   private selectedToolIndex = 0;
   private selectedChainIndex = 0;
   private selectedSettingIndex = 0;
+  private settingBusy = false;
   private settingsError: string | undefined;
   private _focused = false;
 
@@ -1049,8 +1055,9 @@ class ServerManagerModal implements Component, Focusable {
 
   private cycleSelectedSetting(direction: -1 | 1): void {
     const definition = SETTING_DEFINITIONS[this.selectedSettingIndex];
-    if (!definition) return;
-    const current = this.options.settings[definition.key];
+    if (!definition || this.settingBusy) return;
+    const previous = this.options.settings;
+    const current = previous[definition.key];
     const currentIndex = Math.max(
       0,
       definition.choices.findIndex((choice) => choice.value === current),
@@ -1058,16 +1065,23 @@ class ServerManagerModal implements Component, Focusable {
     const choice =
       definition.choices[cycleIndex(currentIndex, direction, definition.choices.length)];
     if (!choice) return;
+    this.settingBusy = true;
     this.settingsError = undefined;
+    this.options.settings = setEditableSetting(previous, definition.key, choice.value);
+    this.requestRender();
     void this.options
       .onSetSetting(definition.key, choice.value)
       .then((settings) => {
         this.options.settings = settings;
       })
       .catch((error: unknown) => {
+        this.options.settings = previous;
         this.settingsError = summarizeError(error);
       })
-      .finally(() => this.requestRender());
+      .finally(() => {
+        this.settingBusy = false;
+        this.requestRender();
+      });
   }
 
   private focusProblemReport(): void {

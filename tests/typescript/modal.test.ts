@@ -296,6 +296,7 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
     },
     async onSetSetting(key, value) {
       settingChanges.push({ key, value });
+      await Bun.sleep(20);
       return { ...DEFAULT_CODEMCP_SETTINGS, [key]: value, disabledTools: {} };
     },
     async onSetChainEnabled(chain, enabled) {
@@ -431,7 +432,8 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   expect(settingsLines).toContain("Extension is broken!");
   expect(settingsLines).toContain("\x1b[38;2;255;92;92mJ");
   component?.handleInput?.("\u001b[C");
-  await Bun.sleep(0);
+  expect((component?.render(90) ?? []).join("\n")).toContain("off");
+  await Bun.sleep(25);
   expect(settingChanges).toEqual([{ key: "backgroundWarmup", value: false }]);
   expect((component?.render(90) ?? []).join("\n")).not.toContain("Unsaved changes");
   expect((component?.render(90) ?? []).join("\n")).not.toContain("ctrl+s");

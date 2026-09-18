@@ -81,7 +81,7 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
             onSetSetting: async (key, value) => {
               const updated = setEditableSetting(lifecycle.loadSettings(), key, value);
               saveCodeMcpSettings(lifecycle.settingsPath, updated);
-              await lifecycle.request("reload_settings", {});
+              if (key !== "discoveryMode") await lifecycle.request("reload_settings", {});
               setSearchActive(pi, updated.discoveryMode !== "jev" || !jevRouter);
               if (updated.discoveryMode === "jev" && !jevRouter) {
                 ctx.ui.notify("Jev mode requires TYPESAFE_API_KEY; using local search", "warning");
