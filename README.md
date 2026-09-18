@@ -1,5 +1,23 @@
 # pi-codemcp
 
+> [!IMPORTANT]
+> **Something failed? Please open an issue.**
+>
+> Please do not assume your failure is too specific or not worth reporting. Platform differences, strange schemas, slow startup, confusing rendering, OAuth problems, and rough edges are exactly the reports that make this project better.
+>
+> Open an issue at <https://github.com/yolonir/pi-codemcp/issues>, or use **Extension is broken!** in `/codemcp` → Settings to ask the agent to investigate and prepare one.
+>
+> You can ask your coding agent to do the work:
+>
+> ```text
+> Reproduce this pi-codemcp problem, redact all credentials and private data,
+> collect the pi-codemcp version, Pi version, OS/architecture, MCP transport,
+> minimal configuration shape, exact error, and relevant logs, then open a
+> GitHub issue at https://github.com/yolonir/pi-codemcp/issues.
+> ```
+>
+> If the agent cannot create the issue, ask it to prepare the title and body for you. I would much rather receive an incomplete report than have someone hit a problem, abandon the package, and never say anything. I will read the issues and work through them.
+
 Typed, sandboxed **Code Mode for your MCP servers in Pi**.
 
 The agent discovers the tools it needs, writes a Python program, and runs dependent or parallel calls across MCP servers. Intermediate data stays in the sandbox; only the program's compact return value goes back to the model.
@@ -151,9 +169,7 @@ uv run --project sidecar --frozen -m sidecar.cli execute --code-file plan.py
 
 Conventional Commit titles drive Release Please. Feature PRs do not publish; merging the release PR triggers the verified npm release.
 
-## Feedback and credits
-
-Use **Extension is broken!** in `/codemcp` → Settings to ask the agent to investigate and prepare an issue, or [open one directly](https://github.com/yolonir/pi-codemcp/issues). Include the error and version details, with credentials and private data removed.
+## Credits
 
 Inspired by [Cloudflare's Code Mode](https://blog.cloudflare.com/code-mode-mcp/). Independent implementation for Pi using FastMCP and Pydantic Monty.
 
