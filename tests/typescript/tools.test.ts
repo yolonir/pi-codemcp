@@ -280,7 +280,7 @@ test("project chain saves fail before persistence when scope is unavailable", as
   expect(calls).toEqual([]);
 });
 
-test("Jev route reads the current request and recent context from the session", async () => {
+test("Jev routes the current intent while retaining the original request as context", async () => {
   let routeTool:
     | {
         execute(
@@ -316,17 +316,20 @@ test("Jev route reads the current request and recent context from the session", 
   } as unknown as ExtensionAPI;
   registerJevRouteTool(pi, () => router);
 
-  const result = await routeTool?.execute("id", {}, undefined, undefined, {
+  const ctx = {
     sessionManager: {
       buildContextEntries: () => [
-        { type: "message", message: { role: "user", content: "Use Linear" } },
+        { type: "message", message: { role: "user", content: "Check staging" } },
         {
           type: "message",
-          message: { role: "assistant", content: [{ type: "text", text: "Which team?" }] },
+          message: { role: "assistant", content: [{ type: "text", text: "The API is deployed." }] },
         },
         {
           type: "message",
-          message: { role: "user", content: [{ type: "text", text: "ENG. Do it." }] },
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "Approval failed. What happened?" }],
+          },
         },
         {
           type: "message",
@@ -334,13 +337,17 @@ test("Jev route reads the current request and recent context from the session", 
         },
       ],
     },
-  });
+  };
+  const intent = "Read staging service logs to diagnose the rebalance approval error";
+  const result = await routeTool?.execute("id", { intent }, undefined, undefined, ctx);
+  const nextIntent = "Query staging error metrics to determine when the failures started";
+  await routeTool?.execute("next", { intent: nextIntent }, undefined, undefined, ctx);
 
+  const recentContext =
+    "Original user request: Approval failed. What happened?\n\nUser: Check staging\n\nAssistant: The API is deployed.";
   expect(calls).toEqual([
-    {
-      task: "ENG. Do it.",
-      recentContext: "User: Use Linear\n\nAssistant: Which team?",
-    },
+    { task: intent, recentContext },
+    { task: nextIntent, recentContext },
   ]);
   expect(result?.content[0]?.text).toBe("routed");
 });

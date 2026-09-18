@@ -128,14 +128,14 @@ export class JevRouter {
     const questions: Questions = {};
     if (includeTaskQuestions) {
       questions.needs_any_tool = noul(
-        "Does satisfying the user's request require at least one configured external-service or saved-workflow tool?",
+        "Does the current task (the agent's routing intent) require at least one configured external-service or saved-workflow tool? Use the original user request as context, not as a requirement that every step be explicitly named.",
         {
           true: "The request needs current, private, or external state, or asks for an external action.",
           false: "Explanation, reasoning, or local coding tools can fully satisfy the request.",
         },
       );
       questions.needs_checkpoint = noul(
-        "Must the agent inspect an intermediate result, make a semantic decision, or obtain user approval before the next external call?",
+        "For the current task, must the agent inspect an intermediate result, make a semantic decision, or obtain user approval before the next external call?",
         {
           true: "A model or user decision is required between tool stages.",
           false: "One deterministic CodeMCP program can safely run the complete workflow.",
@@ -150,17 +150,17 @@ export class JevRouter {
       questions[`tool_${index}`] = noul(
         {
           question:
-            "Is this exact tool necessary to satisfy an explicit part of the user's request?",
+            "Is this tool needed for the current task (the agent's routing intent), including prerequisite discovery or diagnostic calls? The user need not explicitly name each step.",
           tool: toolDescription,
         },
         {
-          true: "The minimal correct workflow needs this capability.",
+          true: "The task needs this capability directly or as a prerequisite, such as finding a datasource before querying logs.",
           false: "The tool is unrelated, redundant, optional, or merely adjacent.",
         },
       );
       questions[`role_${index}`] = choice(
         {
-          question: "What role should this tool have in the minimal requested workflow?",
+          question: "What role should this tool have in the minimal workflow for the current task?",
           tool: toolDescription,
         },
         {

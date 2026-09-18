@@ -1,5 +1,23 @@
 # pi-codemcp
 
+> [!IMPORTANT]
+> **Something failed? Please open an issue.**
+>
+> Please do not assume your failure is too specific or not worth reporting. Platform differences, strange schemas, slow startup, confusing rendering, OAuth problems, and rough edges are exactly the reports that make this project better.
+>
+> Open an issue at <https://github.com/yolonir/pi-codemcp/issues>, or use **Extension is broken!** in `/codemcp` → Settings to ask the agent to investigate and prepare one.
+>
+> You can ask your coding agent to do the work:
+>
+> ```text
+> Reproduce this pi-codemcp problem, redact all credentials and private data,
+> collect the pi-codemcp version, Pi version, OS/architecture, MCP transport,
+> minimal configuration shape, exact error, and relevant logs, then open a
+> GitHub issue at https://github.com/yolonir/pi-codemcp/issues.
+> ```
+>
+> If the agent cannot create the issue, ask it to prepare the title and body for you. I would much rather receive an incomplete report than have someone hit a problem, abandon the package, and never say anything. I will read the issues and work through them.
+
 Typed, sandboxed **Code Mode for your MCP servers in Pi**.
 
 The agent discovers the tools it needs, writes a Python program, and runs dependent or parallel calls across MCP servers. Intermediate data stays in the sandbox; only the program's compact return value goes back to the model.
@@ -38,12 +56,12 @@ Independent calls can use `asyncio.gather`; dependent calls pass earlier outputs
 
 Provide `TYPESAFE_API_KEY`, then set **Enable Jev → true** in `/codemcp` → Settings. This replaces `codemcp_search` with `codemcp_route` as the agent's discovery tool.
 
-1. The agent calls `codemcp_route()` when it needs MCP capabilities. The extension reads the latest user request and up to three preceding user/assistant messages automatically.
-2. Enabled tool names and descriptions go to Jev in parallel chunks of up to 40. Jev scores relevance, assigns workflow roles, and checks whether an intermediate model decision or user approval is needed.
+1. The agent calls `codemcp_route` with a short `intent`, such as “read staging logs to diagnose the approval error.” The extension includes the original user request and up to three preceding user/assistant messages as context. A changed subtask can be routed again with a new intent.
+2. Enabled tool names and descriptions go to Jev in parallel chunks of up to 40. Jev scores relevance to that subtask (including prerequisites), assigns workflow roles, and checks whether an intermediate model decision or user approval is needed.
 3. CodeMCP ranks and filters the answers, selects at most eight tools, derives composition guidance, and fetches their exact typed contracts.
 4. The agent writes the actual `codemcp_execute` program, keeping a checkpoint between stages when needed.
 
-Jev does not execute tools or block ordinary messages. **Routing sends your request, recent context, and tool descriptions to TypeSafe**, so it is opt-in. Without a key, local search stays active; a failed route enables search as a fallback. The SDK also honors `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL`.
+Jev does not execute tools or block ordinary messages. **Routing sends the intent, your request, recent context, and tool descriptions to TypeSafe**, so it is opt-in. Without a key, local search stays active; a failed route enables search as a fallback. The SDK also honors `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL`.
 
 ## MCP configuration
 
@@ -151,9 +169,7 @@ uv run --project sidecar --frozen -m sidecar.cli execute --code-file plan.py
 
 Conventional Commit titles drive Release Please. Feature PRs do not publish; merging the release PR triggers the verified npm release.
 
-## Feedback and credits
-
-Use **Extension is broken!** in `/codemcp` → Settings to ask the agent to investigate and prepare an issue, or [open one directly](https://github.com/yolonir/pi-codemcp/issues). Include the error and version details, with credentials and private data removed.
+## Credits
 
 Inspired by [Cloudflare's Code Mode](https://blog.cloudflare.com/code-mode-mcp/). Independent implementation for Pi using FastMCP and Pydantic Monty.
 
