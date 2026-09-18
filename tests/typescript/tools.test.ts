@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { SavedChainView } from "../../src/chains.js";
+import type { JevRouter } from "../../src/jev-router.js";
 import { DEFAULT_CODEMCP_SETTINGS } from "../../src/settings.js";
-import { registerCodeMcpTools } from "../../src/tools.js";
+import { registerCodeMcpTools, registerJevRouteTool } from "../../src/tools.js";
 
 interface RegisteredTool {
   name: string;
@@ -277,4 +278,69 @@ test("project chain saves fail before persistence when scope is unavailable", as
     ),
   ).rejects.toThrow("Project saved-chain scope is unavailable");
   expect(calls).toEqual([]);
+});
+
+test("Jev route reads the current request and recent context from the session", async () => {
+  let routeTool:
+    | {
+        execute(
+          id: string,
+          params: Record<string, unknown>,
+          signal: AbortSignal | undefined,
+          onUpdate: undefined,
+          ctx: { sessionManager: { buildContextEntries(): unknown[] } },
+        ): Promise<{ content: Array<{ type: string; text: string }> }>;
+      }
+    | undefined;
+  const calls: Array<{ task: string; recentContext: string }> = [];
+  const router: Pick<JevRouter, "route"> = {
+    async route(task, recentContext) {
+      calls.push({ task, recentContext: recentContext ?? "" });
+      return {
+        prompt: "routed",
+        selected: [],
+        needsAnyTool: 0,
+        workflowShape: "single_call",
+        needsCheckpoint: 0,
+      };
+    },
+  };
+  const pi = {
+    registerTool(tool: typeof routeTool) {
+      routeTool = tool;
+    },
+    getActiveTools() {
+      return ["codemcp_route"];
+    },
+    setActiveTools() {},
+  } as unknown as ExtensionAPI;
+  registerJevRouteTool(pi, () => router);
+
+  const result = await routeTool?.execute("id", {}, undefined, undefined, {
+    sessionManager: {
+      buildContextEntries: () => [
+        { type: "message", message: { role: "user", content: "Use Linear" } },
+        {
+          type: "message",
+          message: { role: "assistant", content: [{ type: "text", text: "Which team?" }] },
+        },
+        {
+          type: "message",
+          message: { role: "user", content: [{ type: "text", text: "ENG. Do it." }] },
+        },
+        {
+          type: "message",
+          message: { role: "assistant", content: [{ type: "toolCall", name: "codemcp_route" }] },
+        },
+      ],
+    },
+  });
+
+  expect(calls).toEqual([
+    {
+      task: "ENG. Do it.",
+      recentContext: "User: Use Linear\n\nAssistant: Which team?",
+    },
+  ]);
+  expect(result?.content[0]?.text).toBe("routed");
 });

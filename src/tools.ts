@@ -75,13 +75,7 @@ const SearchParameters = Type.Object({
   ),
 });
 
-const JevRouteParameters = Type.Object({
-  task: Type.String({
-    minLength: 1,
-    description:
-      "Self-contained current task, including conversation details needed to select and compose MCP calls",
-  }),
-});
+const JevRouteParameters = Type.Object({});
 
 const InspectParameters = Type.Object({
   calls: Type.Array(Type.String({ minLength: 1 }), {
@@ -174,7 +168,7 @@ const EditExecuteParameters = Type.Object({
 
 export function registerJevRouteTool(
   pi: ExtensionAPI,
-  getRouter: () => JevRouter | undefined,
+  getRouter: () => Pick<JevRouter, "route"> | undefined,
 ): void {
   pi.registerTool({
     name: "codemcp_route",
@@ -183,20 +177,21 @@ export function registerJevRouteTool(
       "Use Jev to select every configured MCP call relevant to a complete task, classify each call's workflow role, recommend parallel or dependent composition, and return exact typed SDK contracts. Use when the task may require external services or saved workflows. If no configured capability applies, returns no calls.",
     promptSnippet: "Select and compose MCP calls for a complete task with Jev",
     promptGuidelines: [
-      "Use codemcp_route once when a task may require MCP capabilities; pass the complete task rather than capability keywords.",
+      "Use codemcp_route once per distinct task when MCP capabilities may be needed; route again only if the task changes or the selected contracts cannot complete it. It reads the current request and recent conversation context automatically.",
       "After codemcp_route returns contracts, immediately write and run the recommended minimal codemcp_execute program instead of stopping to describe the plan.",
       "Follow codemcp_route composition guidance: gather independent calls, sequence dependent calls, and preserve a model turn only for semantic decisions or approvals.",
     ],
     parameters: JevRouteParameters,
-    async execute(_toolCallId, params, signal, onUpdate) {
+    async execute(_toolCallId, _params, signal, onUpdate, ctx) {
       const router = getRouter();
       if (!router) throw new Error("Jev routing requires TYPESAFE_API_KEY");
+      const { task, recentContext } = currentRouteTask(ctx.sessionManager.buildContextEntries());
       onUpdate?.({
         content: [{ type: "text", text: "Jev is selecting and composing MCP calls..." }],
         details: undefined,
       });
       try {
-        const route = await router.route(params.task, "", signal);
+        const route = await router.route(task, recentContext, signal);
         return {
           content: [{ type: "text", text: route.prompt }],
           details: {
@@ -218,12 +213,8 @@ export function registerJevRouteTool(
         throw error;
       }
     },
-    renderCall(args, theme) {
-      return new Text(
-        `${theme.fg("toolTitle", theme.bold("Jev MCP Route "))}${theme.fg("accent", `"${args.task}"`)}`,
-        0,
-        0,
-      );
+    renderCall(_args, theme) {
+      return new Text(theme.fg("toolTitle", theme.bold("Jev MCP Route")), 0, 0);
     },
     renderResult(result, { expanded, isPartial }, theme) {
       if (isPartial) return new Text(theme.fg("warning", "Jev is routing..."), 0, 0);
@@ -730,6 +721,40 @@ function renderExpandedJson(content: readonly unknown[]): Text {
 function outputLimits(lifecycle: CodeMcpLifecycle): { maxBytes: number } {
   const settings = lifecycle.loadSettings();
   return { maxBytes: settings.outputLimitKiB * 1024 };
+}
+
+function currentRouteTask(entries: readonly unknown[]): {
+  task: string;
+  recentContext: string;
+} {
+  const messages: Array<{ role: "user" | "assistant"; text: string }> = [];
+  for (const entry of entries) {
+    if (!isRecord(entry) || !isRecord(entry.message)) continue;
+    const role = entry.message.role;
+    if (role !== "user" && role !== "assistant") continue;
+    const text = messageText(entry.message.content).trim();
+    if (text) messages.push({ role, text });
+  }
+  let currentIndex = messages.length - 1;
+  while (currentIndex >= 0 && messages[currentIndex]?.role !== "user") currentIndex -= 1;
+  const current = messages[currentIndex];
+  if (!current) throw new Error("Jev routing requires a text user request");
+  const recentContext = messages
+    .slice(Math.max(0, currentIndex - 3), currentIndex)
+    .map((message) => `${message.role === "user" ? "User" : "Assistant"}: ${message.text}`)
+    .join("\n\n")
+    .slice(-6_000);
+  return { task: current.text, recentContext };
+}
+
+function messageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .flatMap((item) =>
+      isRecord(item) && item.type === "text" && typeof item.text === "string" ? [item.text] : [],
+    )
+    .join("\n");
 }
 
 function truncate(value: string, maxLength: number): string {
