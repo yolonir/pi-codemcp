@@ -17,14 +17,14 @@ test("settings persist product controls and per-tool policy", async () => {
     const defaults = loadCodeMcpSettings(path);
     expect(defaults).toEqual(DEFAULT_CODEMCP_SETTINGS);
 
-    const withJev = setEditableSetting(defaults, "discoveryMode", "jev");
+    const withJev = setEditableSetting(defaults, "jevEnabled", true);
     const withLimit = setEditableSetting(withJev, "outputLimitKiB", 100);
     const withDisabledTool = setToolEnabled(withLimit, "linear", "delete_issue", false);
     saveCodeMcpSettings(path, withDisabledTool);
 
     expect(loadCodeMcpSettings(path)).toEqual({
       ...DEFAULT_CODEMCP_SETTINGS,
-      discoveryMode: "jev",
+      jevEnabled: true,
       outputLimitKiB: 100,
       disabledTools: { linear: ["delete_issue"] },
     });
@@ -42,16 +42,24 @@ test("settings migrate the removed version-one line limit", async () => {
   try {
     await writeFile(
       path,
-      JSON.stringify({ version: 1, outputLimitKiB: 100, outputLineLimit: 500 }),
+      JSON.stringify({
+        version: 1,
+        discoveryMode: "jev",
+        outputLimitKiB: 100,
+        outputLineLimit: 500,
+      }),
       "utf8",
     );
     const migrated = loadCodeMcpSettings(path);
     expect(migrated.outputLimitKiB).toBe(100);
+    expect(migrated.jevEnabled).toBe(true);
     expect(migrated).not.toHaveProperty("outputLineLimit");
 
     saveCodeMcpSettings(path, migrated);
     const persisted = JSON.parse(await readFile(path, "utf8"));
     expect(persisted.version).toBe(2);
+    expect(persisted.jevEnabled).toBe(true);
+    expect(persisted).not.toHaveProperty("discoveryMode");
     expect(persisted).not.toHaveProperty("outputLineLimit");
   } finally {
     await rm(temporary, { recursive: true, force: true });

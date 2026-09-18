@@ -238,7 +238,7 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   await showServerManagerModal(ctx, {
     servers,
     chains,
-    settings: { ...DEFAULT_CODEMCP_SETTINGS, discoveryMode: "jev", disabledTools: {} },
+    settings: { ...DEFAULT_CODEMCP_SETTINGS, jevEnabled: true, disabledTools: {} },
     stats: statsStateFromSnapshot({
       updated_at: 100,
       lifetime: {
@@ -430,7 +430,7 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   const settingsLines = (component?.render(90) ?? []).join("\n");
   expect(settingsLines).toContain("[Settings]");
   expect(settingsLines).toContain("Extension is broken!");
-  expect(settingsLines).toContain("\x1b[38;2;255;92;92mJ");
+  expect(settingsLines).toContain("true");
   component?.handleInput?.("\u001b[C");
   expect((component?.render(90) ?? []).join("\n")).toContain("off");
   await Bun.sleep(25);

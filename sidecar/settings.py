@@ -26,7 +26,7 @@ class CodeMcpSettings(BaseModel):
     )
 
     version: Literal[2] = 2
-    discovery_mode: Literal["search", "jev"] = "search"
+    jev_enabled: bool = False
     background_warmup: bool = True
     cache_ttl_hours: int = Field(default=24, ge=0, le=720)
     execution_timeout_seconds: int = Field(default=30, ge=1, le=300)
@@ -61,4 +61,10 @@ def load_settings(path: Path) -> CodeMcpSettings:
     if isinstance(value, dict) and value.get("version", 1) == 1:
         value = {key: item for key, item in value.items() if key != "outputLineLimit"}
         value["version"] = 2
+    if isinstance(value, dict) and "discoveryMode" in value:
+        mode = value.pop("discoveryMode")
+        if not isinstance(mode, str) or mode not in {"search", "jev"}:
+            value["discoveryMode"] = mode
+        else:
+            value.setdefault("jevEnabled", mode == "jev")
     return CodeMcpSettings.model_validate(value)

@@ -81,9 +81,9 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
             onSetSetting: async (key, value) => {
               const updated = setEditableSetting(lifecycle.loadSettings(), key, value);
               saveCodeMcpSettings(lifecycle.settingsPath, updated);
-              if (key !== "discoveryMode") await lifecycle.request("reload_settings", {});
-              setDiscoveryTools(pi, updated.discoveryMode === "jev" && jevRouter !== undefined);
-              if (updated.discoveryMode === "jev" && !jevRouter) {
+              if (key !== "jevEnabled") await lifecycle.request("reload_settings", {});
+              setDiscoveryTools(pi, updated.jevEnabled && jevRouter !== undefined);
+              if (updated.jevEnabled && !jevRouter) {
                 ctx.ui.notify("Jev mode requires TYPESAFE_API_KEY; using local search", "warning");
               }
               return updated;
@@ -121,9 +121,9 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
         ctx.ui.notify(`CodeMCP settings failed: ${summarizeError(error)}`, "warning");
         return;
       }
-      const useJev = settings.discoveryMode === "jev" && jevRouter !== undefined;
+      const useJev = settings.jevEnabled && jevRouter !== undefined;
       setDiscoveryTools(pi, useJev);
-      if (settings.discoveryMode === "jev" && !jevRouter) {
+      if (settings.jevEnabled && !jevRouter) {
         ctx.ui.notify("Jev mode requires TYPESAFE_API_KEY; using local search", "warning");
       }
       if (!settings.backgroundWarmup) return;

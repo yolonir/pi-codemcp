@@ -134,7 +134,7 @@ Settings live at `<agent-dir>/pi-codemcp/settings.json` and can also be edited i
 ```json
 {
   "version": 2,
-  "discoveryMode": "search",
+  "jevEnabled": false,
   "backgroundWarmup": true,
   "cacheTtlHours": 24,
   "executionTimeoutSeconds": 30,
@@ -152,7 +152,7 @@ The Python sidecar enforces catalog cache TTL, execution timeout, per-tool timeo
 
 ### Jev discovery mode
 
-Set `discoveryMode` to `"jev"` in `/codemcp` and provide `TYPESAFE_API_KEY`. This replaces `codemcp_search` with the on-demand `codemcp_route` tool, so ordinary messages have no routing delay. When a task may need MCP, the agent sends the complete task plus every enabled MCP call's name and description to TypeSafe in bounded parallel chunks. Jev scores every call, classifies its workflow role, and checks whether an intermediate model/user checkpoint is required; pi-codemcp merges those raw answers into parallel or dependent composition guidance. The result includes exact typed contracts and directs the agent into the appropriate `codemcp_execute` program.
+Enable Jev in `/codemcp` and provide `TYPESAFE_API_KEY`. This replaces `codemcp_search` with the on-demand `codemcp_route` tool, so ordinary messages have no routing delay. When a task may need MCP, the agent sends the complete task plus every enabled MCP call's name and description to TypeSafe in bounded parallel chunks. Jev scores every call, classifies its workflow role, and checks whether an intermediate model/user checkpoint is required; pi-codemcp merges those raw answers into parallel or dependent composition guidance. The result includes exact typed contracts and directs the agent into the appropriate `codemcp_execute` program.
 
 Jev mode is opt-in because routed task text and enabled tool descriptions leave the machine. If the API key is missing, pi-codemcp keeps local `codemcp_search` active. If a Jev route fails, search is activated as an in-session fallback. `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL` are honored by the official TypeSafe SDK.
 
