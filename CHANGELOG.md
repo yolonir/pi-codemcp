@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1](https://github.com/yolonir/pi-codemcp/compare/v1.5.0...v1.5.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* route Jev using the agent's current intent ([#54](https://github.com/yolonir/pi-codemcp/issues/54)) ([510be89](https://github.com/yolonir/pi-codemcp/commit/510be8943fe55cb6d39b40567c6e9d2e60423e8a))
+
 ## [1.5.0](https://github.com/yolonir/pi-codemcp/compare/v1.4.0...v1.5.0) (2026-09-18)
 
 
