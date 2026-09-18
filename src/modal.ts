@@ -161,7 +161,7 @@ const SETTING_DEFINITIONS: SettingDefinition[] = [
     key: "discoveryMode",
     label: "Tool discovery",
     description:
-      "Use local search, or let Jev select relevant MCP contracts before each agent run. Jev requires TYPESAFE_API_KEY and sends the request and enabled tool descriptions to TypeSafe.",
+      "Use local search, or let the agent call Jev on demand to select and compose relevant MCP contracts. Jev requires TYPESAFE_API_KEY and sends routed tasks and enabled tool descriptions to TypeSafe.",
     choices: [
       { value: "search", label: "search" },
       { value: "jev", label: "Jev" },

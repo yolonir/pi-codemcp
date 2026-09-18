@@ -36,7 +36,7 @@ describe("Pi extension registration", () => {
     expect(messages[0]).toContain("Do not autosumbit issue without clear approval");
   });
 
-  test("registers search, inspect, execute, edit, save, and one manager command", () => {
+  test("registers search, Jev route, execution tools, and one manager command", () => {
     const tools: Array<{ name: string; description?: string; parameters?: unknown }> = [];
     const commands: string[] = [];
     const events: string[] = [];
@@ -61,9 +61,10 @@ describe("Pi extension registration", () => {
       "codemcp_edit",
       "codemcp_save_chain",
       "codemcp_manage_chains",
+      "codemcp_route",
     ]);
     expect(commands).toEqual(["codemcp"]);
-    expect(events).toEqual(["session_start", "before_agent_start", "session_shutdown"]);
+    expect(events).toEqual(["session_start", "session_shutdown"]);
 
     const search = tools[0];
     expect(search?.description).toContain("compact inventory");
@@ -96,6 +97,7 @@ describe("Pi extension registration", () => {
         confirmedByUser: { type: "boolean" },
       },
     });
+    expect(tools[6]?.parameters).toMatchObject({ properties: { task: { type: "string" } } });
   });
 
   test("discovering a disabled server enables it without an extra step", async () => {

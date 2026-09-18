@@ -1,26 +1,51 @@
 import { randomUUID } from "node:crypto";
-import { noul, type Questions, type TypeSafeClient } from "@typesafe-ai/sdk";
+import { choice, noul, type Questions, type TypeSafeClient } from "@typesafe-ai/sdk";
 import type { CodeMcpLifecycle } from "./lifecycle.js";
 
-const RELEVANCE_THRESHOLD = 0.3;
+const TOOL_RELEVANCE_THRESHOLD = 0.65;
+const NOUL_THRESHOLD = 0.5;
 // ponytail: bound injected schemas; raise only if routing evals show recall loss.
 const MAX_SELECTED_TOOLS = 8;
 const CATALOG_PAGE_SIZE = 20;
-const RECENT_CONTEXT_CHAR_LIMIT = 6_000;
+const JEV_CHUNK_SIZE = 40;
+
+type ToolRole = "source" | "enrichment" | "sink" | "standalone" | "unspecified";
+const TOOL_ROLE_BY_CHOICE: Readonly<Record<string, ToolRole>> = {
+  source: "source",
+  enrichment: "enrichment",
+  sink: "sink",
+  standalone: "standalone",
+  irrelevant: "unspecified",
+};
+type WorkflowShape = "single_call" | "parallel" | "pipeline" | "mixed";
 
 interface CatalogTool {
   call: string;
   description?: string;
 }
 
-interface ScoredTool extends CatalogTool {
+interface IndexedTool {
+  index: number;
+  tool: CatalogTool;
+}
+
+interface ChunkResult {
+  tools: JevSelectedTool[];
+  needsAnyTool?: number;
+  needsCheckpoint?: number;
+}
+
+export interface JevSelectedTool extends CatalogTool {
   relevance: number;
+  role: ToolRole;
 }
 
 export interface JevRoute {
   prompt: string;
-  selected: ScoredTool[];
+  selected: JevSelectedTool[];
   needsAnyTool: number;
+  workflowShape: WorkflowShape;
+  needsCheckpoint: number;
 }
 
 export class JevRouter {
@@ -29,75 +54,35 @@ export class JevRouter {
     private readonly client: TypeSafeClient,
   ) {}
 
-  async route(task: string, recentContext: string, signal?: AbortSignal): Promise<JevRoute> {
+  async route(task: string, recentContext = "", signal?: AbortSignal): Promise<JevRoute> {
     const catalog = await this.loadCatalog(signal);
-    if (catalog.length === 0) {
-      return {
-        prompt: jevPrompt([], undefined),
-        selected: [],
-        needsAnyTool: 0,
-      };
-    }
+    if (catalog.length === 0) return emptyRoute();
 
-    const questions: Questions = {
-      needs_any_tool: noul(
-        "Does satisfying the user's request require calling at least one of the configured external-service or saved-workflow tools?",
-        {
-          true: "The request needs current, private, or external state, or asks for an action provided by a configured tool.",
-          false:
-            "The request can be fully satisfied with explanation, reasoning, or local coding tools alone.",
-        },
-      ),
-    };
-    for (const [index, tool] of catalog.entries()) {
-      questions[`tool_${index}`] = noul(
-        {
-          question:
-            "Would calling this tool materially help satisfy an explicit part of the user's request?",
-          tool: {
-            call: tool.call,
-            description: tool.description ?? tool.call,
-          },
-        },
-        {
-          true: "This tool directly provides information or performs an action needed by the request.",
-          false:
-            "This tool is unrelated, merely adjacent, or unnecessary for satisfying the request.",
-        },
-      );
-    }
-
-    const response = await this.client.systemOne(
-      {
-        state: {
-          task,
-          ...(recentContext ? { recent_context: recentContext } : {}),
-        },
-        questions,
-      },
-      signal ? { signal } : undefined,
+    const chunks = chunk(
+      catalog.map((tool, index) => ({ tool, index })),
+      JEV_CHUNK_SIZE,
     );
-    const needsAnyTool = noulValue(response.answers.needs_any_tool);
-    const ranked = catalog
-      .map((tool, index) => ({
-        ...tool,
-        relevance: noulValue(response.answers[`tool_${index}`]),
-      }))
+    const results = await Promise.all(
+      chunks.map((tools, index) =>
+        this.evaluateChunk(task, recentContext, tools, index === 0, signal),
+      ),
+    );
+    const needsAnyTool = results[0]?.needsAnyTool ?? 0;
+    const needsCheckpoint = results[0]?.needsCheckpoint ?? 0;
+    const ranked = results
+      .flatMap((result) => result.tools)
       .sort(
         (left, right) => right.relevance - left.relevance || left.call.localeCompare(right.call),
       );
     const selected =
-      needsAnyTool >= RELEVANCE_THRESHOLD
+      needsAnyTool >= NOUL_THRESHOLD
         ? ranked
-            .filter((tool) => tool.relevance >= RELEVANCE_THRESHOLD)
+            .filter((tool) => tool.relevance >= TOOL_RELEVANCE_THRESHOLD)
             .slice(0, MAX_SELECTED_TOOLS)
         : [];
+    const workflowShape = workflowShapeFor(selected);
     if (selected.length === 0) {
-      return {
-        prompt: jevPrompt([], undefined),
-        selected,
-        needsAnyTool,
-      };
+      return { ...emptyRoute(), needsAnyTool, needsCheckpoint, workflowShape };
     }
 
     const inspection = await this.lifecycle.request(
@@ -120,9 +105,96 @@ export class JevRouter {
     }
 
     return {
-      prompt: jevPrompt(selected, [prelude, ...stubs].filter(Boolean).join("\n\n")),
+      prompt: jevPrompt(
+        selected,
+        workflowShape,
+        needsCheckpoint,
+        [prelude, ...stubs].filter(Boolean).join("\n\n"),
+      ),
       selected,
       needsAnyTool,
+      workflowShape,
+      needsCheckpoint,
+    };
+  }
+
+  private async evaluateChunk(
+    task: string,
+    recentContext: string,
+    tools: IndexedTool[],
+    includeTaskQuestions: boolean,
+    signal?: AbortSignal,
+  ): Promise<ChunkResult> {
+    const questions: Questions = {};
+    if (includeTaskQuestions) {
+      questions.needs_any_tool = noul(
+        "Does satisfying the user's request require at least one configured external-service or saved-workflow tool?",
+        {
+          true: "The request needs current, private, or external state, or asks for an external action.",
+          false: "Explanation, reasoning, or local coding tools can fully satisfy the request.",
+        },
+      );
+      questions.needs_checkpoint = noul(
+        "Must the agent inspect an intermediate result, make a semantic decision, or obtain user approval before the next external call?",
+        {
+          true: "A model or user decision is required between tool stages.",
+          false: "One deterministic CodeMCP program can safely run the complete workflow.",
+        },
+      );
+    }
+    for (const { index, tool } of tools) {
+      const toolDescription = {
+        call: tool.call,
+        description: tool.description ?? tool.call,
+      };
+      questions[`tool_${index}`] = noul(
+        {
+          question:
+            "Is this exact tool necessary to satisfy an explicit part of the user's request?",
+          tool: toolDescription,
+        },
+        {
+          true: "The minimal correct workflow needs this capability.",
+          false: "The tool is unrelated, redundant, optional, or merely adjacent.",
+        },
+      );
+      questions[`role_${index}`] = choice(
+        {
+          question: "What role should this tool have in the minimal requested workflow?",
+          tool: toolDescription,
+        },
+        {
+          source: "Retrieves initial data.",
+          enrichment: "Retrieves data using an earlier result.",
+          sink: "Performs a downstream action using earlier results.",
+          standalone: "Independently completes one requested action.",
+          irrelevant: "Should not be used for this task.",
+        },
+      );
+    }
+
+    const response = await this.client.systemOne(
+      {
+        state: {
+          task,
+          ...(recentContext ? { recent_context: recentContext } : {}),
+        },
+        questions,
+      },
+      signal ? { signal } : undefined,
+    );
+    return {
+      tools: tools.map(({ index, tool }) => ({
+        ...tool,
+        relevance: noulValue(response.answers[`tool_${index}`]),
+        role: toolRoleValue(response.answers[`role_${index}`]),
+      })),
+      ...(includeTaskQuestions
+        ? {
+            needsAnyTool: noulValue(response.answers.needs_any_tool),
+            needsCheckpoint: noulValue(response.answers.needs_checkpoint),
+          }
+        : {}),
     };
   }
 
@@ -158,32 +230,72 @@ export class JevRouter {
   }
 }
 
-export function recentConversation(messages: readonly unknown[], currentPrompt: string): string {
-  const sections: string[] = [];
-  for (const value of messages) {
-    if (!isRecord(value)) continue;
-    const message = isRecord(value.message) ? value.message : value;
-    if (message.role !== "user" && message.role !== "assistant") continue;
-    const text = textContent(message.content).trim();
-    if (!text || (message.role === "user" && text === currentPrompt.trim())) continue;
-    sections.push(`${message.role === "user" ? "User" : "Assistant"}: ${text}`);
-  }
-  return sections.slice(-4).join("\n\n").slice(-RECENT_CONTEXT_CHAR_LIMIT);
+function emptyRoute(): JevRoute {
+  return {
+    prompt: "Jev found no configured MCP tool relevant to this request.",
+    selected: [],
+    needsAnyTool: 0,
+    workflowShape: "single_call",
+    needsCheckpoint: 0,
+  };
 }
 
-function jevPrompt(selected: ScoredTool[], contracts: string | undefined): string {
-  if (selected.length === 0 || !contracts) {
-    return "<codemcp_jev>Jev found no configured MCP tool relevant to this request.</codemcp_jev>";
-  }
+function workflowShapeFor(selected: JevSelectedTool[]): WorkflowShape {
+  if (selected.length <= 1) return "single_call";
+  const independent = selected.filter(
+    (tool) => tool.role === "source" || tool.role === "standalone",
+  ).length;
+  const downstream = selected.some((tool) => tool.role === "enrichment" || tool.role === "sink");
+  if (!downstream) return "parallel";
+  return independent > 1 ? "mixed" : "pipeline";
+}
+
+function jevPrompt(
+  selected: JevSelectedTool[],
+  workflowShape: WorkflowShape,
+  needsCheckpoint: number,
+  contracts: string,
+): string {
+  const roles = selected.map((tool) => `- ${tool.call}: ${tool.role}`).join("\n");
+  const execution =
+    needsCheckpoint >= NOUL_THRESHOLD
+      ? "Run only the first stage in codemcp_execute, return compact decision data, then preserve a model/user checkpoint before downstream calls."
+      : workflowInstruction(workflowShape);
   return [
-    "<codemcp_jev>",
-    `Jev selected these MCP calls for the current request: ${selected.map((tool) => tool.call).join(", ")}.`,
-    "Use their exact typed SDK contracts through codemcp_execute:",
+    `Jev selected these MCP calls:\n${roles}`,
+    `Composition: ${workflowShape}.`,
+    `Execution recommendation: ${execution}`,
+    "Use these exact typed SDK contracts:",
     "```python",
     contracts,
     "```",
-    "</codemcp_jev>",
-  ].join("\n");
+  ].join("\n\n");
+}
+
+function workflowInstruction(shape: WorkflowShape): string {
+  switch (shape) {
+    case "single_call":
+      return "Write and run one minimal codemcp_execute program using the selected call.";
+    case "parallel":
+      return "Write and run one codemcp_execute program using asyncio.gather for independent calls, then combine their results locally.";
+    case "pipeline":
+      return "Write and run one codemcp_execute program that passes earlier outputs into dependent calls.";
+    case "mixed":
+      return "Write and run one codemcp_execute program that gathers independent source calls, then feeds their results into downstream calls.";
+  }
+}
+
+function toolRoleValue(answer: unknown): ToolRole {
+  const role = TOOL_ROLE_BY_CHOICE[choiceValue(answer)];
+  if (!role) throw new Error("TypeSafe returned an invalid Jev tool role");
+  return role;
+}
+
+function choiceValue(answer: unknown): string {
+  if (!isRecord(answer) || answer.type !== "choice" || typeof answer.choice !== "string") {
+    throw new Error("TypeSafe returned an invalid Jev routing choice");
+  }
+  return answer.choice;
 }
 
 function noulValue(answer: unknown): number {
@@ -198,14 +310,12 @@ function noulValue(answer: unknown): number {
   return answer.noul;
 }
 
-function textContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .flatMap((item) =>
-      isRecord(item) && item.type === "text" && typeof item.text === "string" ? [item.text] : [],
-    )
-    .join("\n");
+function chunk<T>(values: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

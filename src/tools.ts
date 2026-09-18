@@ -12,6 +12,7 @@ import {
   previewExecutionValue,
   renderExecutionResult,
 } from "./execution-rendering.js";
+import type { JevRouter } from "./jev-router.js";
 import type { CodeMcpLifecycle } from "./lifecycle.js";
 import type { SidecarProgress } from "./mcp-client.js";
 import { type CodeMcpOutputDetails, formatCodeMcpOutput } from "./output.js";
@@ -72,6 +73,14 @@ const SearchParameters = Type.Object({
       description: "Exact configured server name, or chains for saved chains",
     }),
   ),
+});
+
+const JevRouteParameters = Type.Object({
+  task: Type.String({
+    minLength: 1,
+    description:
+      "Self-contained current task, including conversation details needed to select and compose MCP calls",
+  }),
 });
 
 const InspectParameters = Type.Object({
@@ -162,6 +171,79 @@ const EditExecuteParameters = Type.Object({
     description: "Replacement text; may be empty",
   }),
 });
+
+export function registerJevRouteTool(
+  pi: ExtensionAPI,
+  getRouter: () => JevRouter | undefined,
+): void {
+  pi.registerTool({
+    name: "codemcp_route",
+    label: "Jev MCP Route",
+    description:
+      "Use Jev to select every configured MCP call relevant to a complete task, classify each call's workflow role, recommend parallel or dependent composition, and return exact typed SDK contracts. Use when the task may require external services or saved workflows. If no configured capability applies, returns no calls.",
+    promptSnippet: "Select and compose MCP calls for a complete task with Jev",
+    promptGuidelines: [
+      "Use codemcp_route once when a task may require MCP capabilities; pass the complete task rather than capability keywords.",
+      "After codemcp_route returns contracts, immediately write and run the recommended minimal codemcp_execute program instead of stopping to describe the plan.",
+      "Follow codemcp_route composition guidance: gather independent calls, sequence dependent calls, and preserve a model turn only for semantic decisions or approvals.",
+    ],
+    parameters: JevRouteParameters,
+    async execute(_toolCallId, params, signal, onUpdate) {
+      const router = getRouter();
+      if (!router) throw new Error("Jev routing requires TYPESAFE_API_KEY");
+      onUpdate?.({
+        content: [{ type: "text", text: "Jev is selecting and composing MCP calls..." }],
+        details: undefined,
+      });
+      try {
+        const route = await router.route(params.task, "", signal);
+        return {
+          content: [{ type: "text", text: route.prompt }],
+          details: {
+            selected: route.selected.map((tool) => ({
+              call: tool.call,
+              relevance: tool.relevance,
+              role: tool.role,
+            })),
+            needsAnyTool: route.needsAnyTool,
+            workflowShape: route.workflowShape,
+            needsCheckpoint: route.needsCheckpoint,
+          },
+        };
+      } catch (error) {
+        const active = pi.getActiveTools();
+        if (!active.includes("codemcp_search")) {
+          pi.setActiveTools([...active, "codemcp_search"]);
+        }
+        throw error;
+      }
+    },
+    renderCall(args, theme) {
+      return new Text(
+        `${theme.fg("toolTitle", theme.bold("Jev MCP Route "))}${theme.fg("accent", `"${args.task}"`)}`,
+        0,
+        0,
+      );
+    },
+    renderResult(result, { expanded, isPartial }, theme) {
+      if (isPartial) return new Text(theme.fg("warning", "Jev is routing..."), 0, 0);
+      if (expanded) return renderExpandedJson(result.content);
+      const details = result.details as
+        | { selected?: Array<{ call?: string }>; workflowShape?: string }
+        | undefined;
+      const selected = details?.selected ?? [];
+      let text = theme.fg(
+        "success",
+        `${selected.length} calls · ${details?.workflowShape ?? "no workflow"}`,
+      );
+      for (const tool of selected.slice(0, 4)) {
+        if (tool.call) text += `\n${theme.fg("dim", `  ${tool.call}`)}`;
+      }
+      text += `\n${theme.fg("muted", keyHint("app.tools.expand", "routing details"))}`;
+      return new Text(text, 0, 0);
+    },
+  });
+}
 
 export function registerCodeMcpTools(
   pi: ExtensionAPI,

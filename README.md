@@ -5,7 +5,7 @@ Fast, typed, sandboxed **Code Mode for every MCP server configured in Pi**.
 Instead of putting every upstream MCP tool definition into the model context, pi-codemcp gives the agent a small interface for discovery, execution, and reuse:
 
 - `codemcp_search` ranks capabilities or pages through a compact inventory without loading full schemas.
-- Optional Jev discovery selects all relevant calls in one parallel TypeSafe request and injects their exact contracts before the agent starts.
+- Optional Jev discovery lets the agent route complete MCP tasks on demand, returning relevant calls, composition guidance, and exact contracts through bounded parallel TypeSafe requests.
 - `codemcp_inspect` returns exact typed SDK stubs only for selected calls.
 - `codemcp_execute` runs one sandboxed Python call graph across one or many MCP servers.
 - `codemcp_edit` applies one exact replacement to the previous execution and reruns it without resending the full code.
@@ -152,9 +152,9 @@ The Python sidecar enforces catalog cache TTL, execution timeout, per-tool timeo
 
 ### Jev discovery mode
 
-Set `discoveryMode` to `"jev"` in `/codemcp` and provide `TYPESAFE_API_KEY`. Before each agent run, pi-codemcp sends the current request, a small recent-conversation window, and every enabled MCP call's name and description to TypeSafe. One Jev request independently scores whether any MCP capability is needed and whether each call materially helps. pi-codemcp injects exact typed contracts for the relevant calls and hides `codemcp_search`.
+Set `discoveryMode` to `"jev"` in `/codemcp` and provide `TYPESAFE_API_KEY`. This replaces `codemcp_search` with the on-demand `codemcp_route` tool, so ordinary messages have no routing delay. When a task may need MCP, the agent sends the complete task plus every enabled MCP call's name and description to TypeSafe in bounded parallel chunks. Jev scores every call, classifies its workflow role, and checks whether an intermediate model/user checkpoint is required; pi-codemcp merges those raw answers into parallel or dependent composition guidance. The result includes exact typed contracts and directs the agent into the appropriate `codemcp_execute` program.
 
-Jev mode is opt-in because request text and enabled tool descriptions leave the machine. If the API key is missing or Jev fails, pi-codemcp keeps local `codemcp_search` available for that session. `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL` are honored by the official TypeSafe SDK.
+Jev mode is opt-in because routed task text and enabled tool descriptions leave the machine. If the API key is missing, pi-codemcp keeps local `codemcp_search` active. If a Jev route fails, search is activated as an in-session fallback. `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL` are honored by the official TypeSafe SDK.
 
 ## Search and execute flow
 

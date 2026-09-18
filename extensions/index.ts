@@ -8,7 +8,7 @@ import { TypeSafeClient } from "@typesafe-ai/sdk";
 import { newCodeMcpTraceId, SavedChainManager } from "../src/chains.js";
 import { setMcpServerEnabled } from "../src/config.js";
 import { summarizeError } from "../src/errors.js";
-import { JevRouter, recentConversation } from "../src/jev-router.js";
+import { JevRouter } from "../src/jev-router.js";
 import { CodeMcpLifecycle } from "../src/lifecycle.js";
 import type { SidecarClientOptions } from "../src/mcp-client.js";
 import {
@@ -24,7 +24,7 @@ import {
   setEditableSetting,
   setToolEnabled,
 } from "../src/settings.js";
-import { registerCodeMcpTools } from "../src/tools.js";
+import { registerCodeMcpTools, registerJevRouteTool } from "../src/tools.js";
 
 export interface CodeMcpExtensionOptions extends SidecarClientOptions {
   jevClient?: TypeSafeClient;
@@ -37,8 +37,8 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
     const chains = new SavedChainManager(pi, lifecycle);
     const routerClient = jevClient ?? createJevClient();
     const jevRouter = routerClient ? new JevRouter(lifecycle, routerClient) : undefined;
-    let jevFailureNotified = false;
     registerCodeMcpTools(pi, lifecycle, chains);
+    registerJevRouteTool(pi, () => jevRouter);
 
     pi.registerCommand("codemcp", {
       description: "Manage CodeMCP servers, saved chains, tools, and settings",
@@ -82,7 +82,7 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
               const updated = setEditableSetting(lifecycle.loadSettings(), key, value);
               saveCodeMcpSettings(lifecycle.settingsPath, updated);
               if (key !== "discoveryMode") await lifecycle.request("reload_settings", {});
-              setSearchActive(pi, updated.discoveryMode !== "jev" || !jevRouter);
+              setDiscoveryTools(pi, updated.discoveryMode === "jev" && jevRouter !== undefined);
               if (updated.discoveryMode === "jev" && !jevRouter) {
                 ctx.ui.notify("Jev mode requires TYPESAFE_API_KEY; using local search", "warning");
               }
@@ -122,7 +122,7 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
         return;
       }
       const useJev = settings.discoveryMode === "jev" && jevRouter !== undefined;
-      setSearchActive(pi, !useJev);
+      setDiscoveryTools(pi, useJev);
       if (settings.discoveryMode === "jev" && !jevRouter) {
         ctx.ui.notify("Jev mode requires TYPESAFE_API_KEY; using local search", "warning");
       }
@@ -130,29 +130,6 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
       void lifecycle.warmup().catch((error: unknown) => {
         ctx.ui.notify(`CodeMCP background warmup failed: ${summarizeError(error)}`, "warning");
       });
-    });
-
-    pi.on("before_agent_start", async (event, ctx) => {
-      if (lifecycle.loadSettings().discoveryMode !== "jev" || !jevRouter) return;
-      try {
-        const recent = recentConversation(ctx.sessionManager.buildContextEntries(), event.prompt);
-        const route = await jevRouter.route(event.prompt, recent, ctx.signal);
-        setSearchActive(pi, false);
-        jevFailureNotified = false;
-        return { systemPrompt: `${event.systemPrompt}\n\n${route.prompt}` };
-      } catch (error) {
-        setSearchActive(pi, true);
-        if (!jevFailureNotified) {
-          ctx.ui.notify(
-            `Jev routing failed; using local search: ${summarizeError(error)}`,
-            "warning",
-          );
-          jevFailureNotified = true;
-        }
-        return {
-          systemPrompt: `${event.systemPrompt}\n\nJev routing is unavailable for this turn; use codemcp_search for MCP discovery.`,
-        };
-      }
     });
 
     pi.on("session_shutdown", async () => {
@@ -200,11 +177,17 @@ function createJevClient(): TypeSafeClient | undefined {
   return process.env.TYPESAFE_API_KEY?.trim() ? new TypeSafeClient() : undefined;
 }
 
-function setSearchActive(pi: ExtensionAPI, enabled: boolean): void {
+function setDiscoveryTools(pi: ExtensionAPI, useJev: boolean): void {
+  const selected = useJev ? "codemcp_route" : "codemcp_search";
   const current = pi.getActiveTools();
-  if (current.includes("codemcp_search") === enabled) return;
-  const active = current.filter((name) => name !== "codemcp_search");
-  pi.setActiveTools(enabled ? [...active, "codemcp_search"] : active);
+  if (
+    current.includes(selected) &&
+    !current.includes(useJev ? "codemcp_search" : "codemcp_route")
+  ) {
+    return;
+  }
+  const active = current.filter((name) => name !== "codemcp_search" && name !== "codemcp_route");
+  pi.setActiveTools([...active, selected]);
 }
 
 export async function promptForProblemReport(
