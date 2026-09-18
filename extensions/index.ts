@@ -1,4 +1,5 @@
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
   CONFIG_DIR_NAME,
   type ExtensionAPI,
@@ -9,6 +10,7 @@ import { newCodeMcpTraceId, SavedChainManager } from "../src/chains.js";
 import { setMcpServerEnabled } from "../src/config.js";
 import { summarizeError } from "../src/errors.js";
 import { JevRouter } from "../src/jev-router.js";
+import { readJsonObject, writeJsonObjectAtomically } from "../src/json-file.js";
 import { CodeMcpLifecycle } from "../src/lifecycle.js";
 import type { SidecarClientOptions } from "../src/mcp-client.js";
 import {
@@ -111,6 +113,11 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
     });
 
     pi.on("session_start", (_event, ctx) => {
+      try {
+        showChangelogOnce(ctx, join(dirname(lifecycle.settingsPath), "changelog.json"));
+      } catch (error) {
+        ctx.ui.notify(`CodeMCP changelog failed: ${summarizeError(error)}`, "warning");
+      }
       bindProjectChainScope(ctx, lifecycle, chains);
       chains.activatePersisted();
       for (const error of chains.startupErrors) ctx.ui.notify(error, "warning");
@@ -172,6 +179,21 @@ export async function setServerEnabledFromManager(
 }
 
 export default createCodeMcpExtension();
+
+const CHANGELOG_ID = "jev-routing-v1";
+const CHANGELOG_MESSAGE =
+  "pi-codemcp update: optional Jev routing is now available. Enable Jev in /codemcp → Settings to select and compose MCP calls on demand without slowing ordinary messages.";
+
+export function showChangelogOnce(
+  ctx: Pick<ExtensionCommandContext, "mode" | "ui">,
+  path: string,
+): void {
+  if (ctx.mode !== "tui") return;
+  const state = existsSync(path) ? readJsonObject(path, "CodeMCP changelog state") : {};
+  if (state.lastSeen === CHANGELOG_ID) return;
+  ctx.ui.notify(CHANGELOG_MESSAGE, "info");
+  writeJsonObjectAtomically(path, { lastSeen: CHANGELOG_ID });
+}
 
 function createJevClient(): TypeSafeClient | undefined {
   return process.env.TYPESAFE_API_KEY?.trim() ? new TypeSafeClient() : undefined;
