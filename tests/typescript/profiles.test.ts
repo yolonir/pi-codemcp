@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { manageProfilesFromManager, setServerEnabledFromManager } from "../../extensions/index.js";
+import { changeProfileFromManager, setServerEnabledFromManager } from "../../extensions/index.js";
 import {
   activateProfile,
   activeToolPolicy,
@@ -89,9 +89,7 @@ test("manager saves, activates, edits, and deletes profiles without rewriting mc
   const settingsPath = join(temporary, "settings.json");
   const configPath = join(temporary, "mcp.json");
   const config = '{"mcpServers":{"alpha":{"command":"unused","disabled":true}}}';
-  const selections: string[] = [];
   const lifecycleCalls: string[] = [];
-  let confirmation = false;
   const server = {
     name: "alpha",
     transport: "stdio",
@@ -114,24 +112,11 @@ test("manager saves, activates, edits, and deletes profiles without rewriting mc
       return { upstreams: [{ name: "alpha", transport: "stdio", enabled: true }] };
     },
   };
-  const ctx = {
-    ui: {
-      async select(_title: string, _options: string[]) {
-        return selections.shift();
-      },
-      async input() {
-        return "work";
-      },
-      async confirm() {
-        return confirmation;
-      },
-      notify() {},
-    },
-  } as unknown as Parameters<typeof manageProfilesFromManager>[1];
   try {
     await writeFile(configPath, config);
-    selections.push("Save current setup as a new profile");
-    await manageProfilesFromManager(lifecycle, ctx);
+    const saved = await changeProfileFromManager(lifecycle, { action: "save", name: "work" });
+    expect(saved.settings.activeProfile).toBe("work");
+    expect(saved.servers[0]?.name).toBe("alpha");
     expect(lifecycle.loadSettings().profiles.work?.servers).toEqual(["alpha"]);
     expect(lifecycleCalls).toEqual(["status", "reload", "status"]);
 
@@ -139,19 +124,12 @@ test("manager saves, activates, edits, and deletes profiles without rewriting mc
     expect(lifecycle.loadSettings().profiles.work?.servers).toEqual([]);
     expect(await readFile(configPath, "utf8")).toBe(config);
 
-    selections.push("Use base configuration");
-    await manageProfilesFromManager(lifecycle, ctx);
+    await changeProfileFromManager(lifecycle, { action: "activate", name: null });
     expect(lifecycle.loadSettings().activeProfile).toBeNull();
-    selections.push("Activate: work");
-    await manageProfilesFromManager(lifecycle, ctx);
+    await changeProfileFromManager(lifecycle, { action: "activate", name: "work" });
     expect(lifecycle.loadSettings().activeProfile).toBe("work");
 
-    selections.push("Delete a profile", "work");
-    await manageProfilesFromManager(lifecycle, ctx);
-    expect(lifecycle.loadSettings().activeProfile).toBe("work");
-    confirmation = true;
-    selections.push("Delete a profile", "work");
-    await manageProfilesFromManager(lifecycle, ctx);
+    await changeProfileFromManager(lifecycle, { action: "delete", name: "work" });
     expect(lifecycle.loadSettings().activeProfile).toBeNull();
     expect(lifecycle.loadSettings().profiles).toEqual({});
     expect(await readFile(configPath, "utf8")).toBe(config);

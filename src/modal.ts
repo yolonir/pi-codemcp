@@ -7,7 +7,7 @@ import {
   Input,
   Key,
   matchesKey,
-  Text,
+  SelectList,
   truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
@@ -106,13 +106,23 @@ interface Keybindings {
   matches(data: string, id: "tui.select.up" | "tui.select.down" | "tui.select.cancel"): boolean;
 }
 
-export type ServerManagerResult = "report-problem" | "manage-profiles" | undefined;
+export type ServerManagerResult = "report-problem" | undefined;
+
+export type ProfileAction =
+  | { action: "activate"; name: string | null }
+  | { action: "save" | "delete"; name: string };
+
+export interface ProfileManagerState {
+  settings: CodeMcpSettings;
+  servers: ServerModalState[];
+}
 
 interface ServerManagerOptions {
   servers: ServerModalState[];
   chains: ChainModalState[];
   settings: CodeMcpSettings;
   stats: StatsModalState;
+  onChangeProfile(action: ProfileAction): Promise<ProfileManagerState>;
   onSetServerEnabled(server: ServerModalState, enabled: boolean): Promise<ServerModalState>;
   onDiscover(server: ServerModalState): Promise<ServerModalState>;
   onSetToolEnabled(
@@ -226,6 +236,7 @@ export async function showServerManagerModal(
         keybindings,
         (result) => done(result),
         () => tui.requestRender(),
+        () => tui.terminal.rows,
       ),
     { overlay: true, overlayOptions: OVERLAY_OPTIONS },
   );
@@ -337,7 +348,15 @@ export function serverStatesFromStatus(status: Record<string, unknown>): ServerM
 
 class ServerManagerModal implements Component, Focusable {
   private readonly search = new Input();
-  private activeTab: "servers" | "chains" | "stats" | "settings" | "profiles" = "servers";
+  private readonly profileName = new Input();
+  private profileView:
+    | { kind: "select"; list: SelectList }
+    | { kind: "save" }
+    | { kind: "delete"; name: string }
+    | undefined;
+  private profileBusy = false;
+  private profileError: string | undefined;
+  private activeTab: "servers" | "chains" | "stats" | "settings" = "servers";
   private activePane: "servers" | "tools" = "servers";
   private selectedServerIndex = 0;
   private selectedToolIndex = 0;
@@ -353,6 +372,7 @@ class ServerManagerModal implements Component, Focusable {
     private readonly keybindings: Keybindings,
     private readonly close: (result?: ServerManagerResult) => void,
     private readonly requestRender: () => void,
+    private readonly terminalRows: () => number,
   ) {}
 
   get focused(): boolean {
@@ -361,7 +381,9 @@ class ServerManagerModal implements Component, Focusable {
 
   set focused(value: boolean) {
     this._focused = value;
-    this.search.focused = value && !["stats", "settings", "profiles"].includes(this.activeTab);
+    this.search.focused =
+      value && !this.profileView && !["stats", "settings"].includes(this.activeTab);
+    this.profileName.focused = value && this.profileView?.kind === "save";
   }
 
   render(width: number): string[] {
@@ -372,23 +394,41 @@ class ServerManagerModal implements Component, Focusable {
     });
     content.addChild({
       render: (bodyWidth: number) => {
-        if (this.activeTab === "servers") return this.renderServers(bodyWidth);
-        if (this.activeTab === "chains") return this.renderChains(bodyWidth);
-        if (this.activeTab === "stats") return this.renderStats(bodyWidth);
-        if (this.activeTab === "profiles") return this.renderProfiles(bodyWidth);
-        return this.renderSettings(bodyWidth);
+        const lines =
+          this.activeTab === "servers"
+            ? this.renderServers(bodyWidth)
+            : this.activeTab === "chains"
+              ? this.renderChains(bodyWidth)
+              : this.activeTab === "stats"
+                ? this.renderStats(bodyWidth)
+                : this.renderSettings(bodyWidth);
+        const height = this.bodyRows();
+        return Array.from({ length: height }, (_, index) => lines[index] ?? "");
       },
       invalidate: () => this.search.invalidate(),
     });
-    content.addChild(new Text(this.theme.fg("dim", this.footer()), 0, 0));
+    content.addChild({
+      render: (contentWidth: number) => [
+        truncateToWidth(this.theme.fg("dim", this.footer()), contentWidth),
+      ],
+      invalidate: () => {},
+    });
     return renderRoundedFrame(content, width, this.theme);
   }
 
   invalidate(): void {
     this.search.invalidate();
+    this.profileName.invalidate();
+    if (this.profileView?.kind === "select") this.profileView.list.invalidate();
   }
 
   handleInput(data: string): void {
+    if (this.profileBusy) return;
+    if (this.profileView) {
+      this.handleProfileInput(data);
+      this.requestRender();
+      return;
+    }
     if (data === "R" && this.activeTab !== "chains") {
       this.focusProblemReport();
       this.requestRender();
@@ -412,34 +452,35 @@ class ServerManagerModal implements Component, Focusable {
             ? "stats"
             : this.activeTab === "stats"
               ? "settings"
-              : this.activeTab === "settings"
-                ? "profiles"
-                : "servers";
+              : "servers";
       this.search.setValue("");
-      this.search.focused =
-        this._focused && !["stats", "settings", "profiles"].includes(this.activeTab);
+      this.focused = this._focused;
       this.requestRender();
       return;
     }
-    if (this.activeTab === "profiles") {
-      if (matchesKey(data, Key.enter) || data === " ") {
-        if (
-          !this.settingBusy &&
-          !this.options.chains.some((chain) => chain.busy) &&
-          !this.options.servers.some(
-            (server) => server.busy || server.tools.some((tool) => tool.busy),
-          )
-        ) {
-          this.close("manage-profiles");
-        }
-      }
-    } else if (this.activeTab === "settings") this.handleSettingsInput(data);
+    if (this.activeTab === "settings") this.handleSettingsInput(data);
     else if (this.activeTab === "chains") this.handleChainInput(data);
     else if (this.activeTab === "servers") this.handleServerInput(data);
     this.requestRender();
   }
 
   private handleServerInput(data: string): void {
+    if (["P", "N", "X"].includes(data)) {
+      if (
+        this.settingBusy ||
+        this.options.chains.some((chain) => chain.busy) ||
+        this.options.servers.some((server) => server.busy || server.tools.some((tool) => tool.busy))
+      )
+        return;
+      this.profileError = undefined;
+      if (data === "P") this.openProfilePicker();
+      else if (data === "N") this.profileView = { kind: "save" };
+      else if (this.options.settings.activeProfile !== null) {
+        this.profileView = { kind: "delete", name: this.options.settings.activeProfile };
+      }
+      this.focused = this._focused;
+      return;
+    }
     if (data === "D") {
       this.discoverSelected();
       return;
@@ -550,11 +591,7 @@ class ServerManagerModal implements Component, Focusable {
       this.activeTab === "settings"
         ? this.theme.fg("accent", this.theme.bold("[Settings]"))
         : this.theme.fg("muted", "Settings");
-    const profiles =
-      this.activeTab === "profiles"
-        ? this.theme.fg("accent", this.theme.bold("[Profiles]"))
-        : this.theme.fg("muted", "Profiles");
-    const tabs = `${servers}  ${chains}  ${stats}  ${settings}  ${profiles}`;
+    const tabs = `${servers}  ${chains}  ${stats}  ${settings}`;
     const title = this.theme.fg(
       "dim",
       this.theme.bold(
@@ -567,8 +604,16 @@ class ServerManagerModal implements Component, Focusable {
 
   private renderServers(width: number): string[] {
     const filterLabel = this.activePane === "servers" ? "Filter servers" : "Filter tools";
-    const lines = [this.theme.fg("dim", filterLabel), ...this.search.render(width), ""];
-    const splitHeight = Math.max(1, modalBodyRows() - lines.length);
+    const controls = this.renderProfileControls(width);
+    if (this.profileView?.kind === "select")
+      return [...controls, ...this.profileView.list.render(width)];
+    const lines = [
+      ...controls,
+      this.theme.fg("dim", filterLabel),
+      ...this.search.render(width),
+      "",
+    ];
+    const splitHeight = Math.max(1, this.bodyRows() - lines.length);
     const leftWidth = Math.min(36, Math.max(24, Math.floor(width * 0.32)));
     const rightWidth = Math.max(1, width - leftWidth - 3);
     const left = this.renderServerList(leftWidth, splitHeight);
@@ -686,7 +731,7 @@ class ServerManagerModal implements Component, Focusable {
 
   private renderChains(width: number): string[] {
     const lines = [this.theme.fg("dim", "Filter chains"), ...this.search.render(width), ""];
-    const splitHeight = Math.max(1, modalBodyRows() - lines.length);
+    const splitHeight = Math.max(1, this.bodyRows() - lines.length);
     const leftWidth = Math.min(38, Math.max(26, Math.floor(width * 0.36)));
     const rightWidth = Math.max(1, width - leftWidth - 3);
     const chains = this.filteredChains();
@@ -823,11 +868,11 @@ class ServerManagerModal implements Component, Focusable {
         ),
       );
     }
-    return lines.slice(0, Math.max(1, modalBodyRows()));
+    return lines.slice(0, this.bodyRows());
   }
 
   private renderSettings(width: number): string[] {
-    const splitHeight = Math.max(1, modalBodyRows());
+    const splitHeight = this.bodyRows();
     const leftWidth = Math.min(38, Math.max(28, Math.floor(width * 0.42)));
     const rightWidth = Math.max(1, width - leftWidth - 3);
     const left = [this.theme.fg("dim", this.theme.bold("SETTINGS"))];
@@ -893,35 +938,125 @@ class ServerManagerModal implements Component, Focusable {
     return lines;
   }
 
-  private renderProfiles(width: number): string[] {
-    const { activeProfile, profiles } = this.options.settings;
-    const lines = [
-      this.theme.fg(
-        "accent",
-        this.theme.bold(`Active profile: ${activeProfile ?? "Base configuration"}`),
-      ),
-      this.theme.fg(
-        "muted",
-        "Profiles store server selections and tool exclusions, not connections or credentials.",
-      ),
-      this.theme.fg("dim", "Enter to switch, save the current setup, or delete a profile."),
-      "",
-      ...Object.entries(profiles).map(
-        ([name, profile]) =>
-          `${name === activeProfile ? "✓" : "○"} ${name} · ${profile.servers.length} servers · ${Object.values(profile.disabledTools).reduce((total, tools) => total + tools.length, 0)} excluded tools`,
-      ),
+  private renderProfileControls(width: number): string[] {
+    const name = truncateToWidth(
+      this.options.settings.activeProfile ?? "Base configuration",
+      Math.max(1, width - 42),
+      "…",
+    );
+    const title = this.theme.fg("accent", `Profile: ${name} · [P] Switch · [N] Save · [X] Delete`);
+    if (this.profileBusy) return [title, this.theme.fg("warning", "Applying profile…")];
+    if (this.profileView?.kind === "save") {
+      return [
+        this.theme.fg(
+          "accent",
+          this.profileError ? `Error: ${this.profileError}` : "Save current setup — profile name:",
+        ),
+        ...this.profileName.render(width),
+      ];
+    }
+    if (this.profileView?.kind === "delete") {
+      return [
+        this.theme.fg("warning", `Delete profile ${this.profileView.name}? [y/N]`),
+        this.theme.fg(
+          "dim",
+          this.profileView.name === this.options.settings.activeProfile
+            ? "The base configuration will be restored."
+            : "Only this saved profile will be removed.",
+        ),
+      ];
+    }
+    return [
+      title,
+      this.profileError ? this.theme.fg("warning", `Error: ${this.profileError}`) : "",
     ];
-    if (Object.keys(profiles).length === 0) lines.push(this.theme.fg("muted", "No saved profiles"));
-    return lines.slice(0, Math.max(1, modalBodyRows())).map((line) => truncateToWidth(line, width));
+  }
+
+  private openProfilePicker(): void {
+    const names = ["", ...Object.keys(this.options.settings.profiles).sort()];
+    const list = new SelectList(
+      names.map((name) => ({
+        value: name,
+        label: name || "Base configuration",
+        ...(name === (this.options.settings.activeProfile ?? "") ? { description: "active" } : {}),
+      })),
+      Math.max(1, this.bodyRows() - 3),
+      {
+        selectedPrefix: (text) => this.theme.fg("accent", text),
+        selectedText: (text) => this.theme.fg("accent", text),
+        description: (text) => this.theme.fg("muted", text),
+        scrollInfo: (text) => this.theme.fg("dim", text),
+        noMatch: (text) => this.theme.fg("warning", text),
+      },
+    );
+    list.setSelectedIndex(names.indexOf(this.options.settings.activeProfile ?? ""));
+    list.onSelect = (item) => this.changeProfile({ action: "activate", name: item.value || null });
+    list.onCancel = () => this.endProfileEdit();
+    this.profileView = { kind: "select", list };
+  }
+
+  private handleProfileInput(data: string): void {
+    const view = this.profileView;
+    if (!view) return;
+    if (this.keybindings.matches(data, "tui.select.cancel") || matchesKey(data, Key.escape)) {
+      this.endProfileEdit();
+    } else if (view.kind === "select") {
+      const selected = view.list.getSelectedItem();
+      if (data === "X" && selected?.value)
+        this.profileView = { kind: "delete", name: selected.value };
+      else view.list.handleInput(data);
+    } else if (view.kind === "save") {
+      if (matchesKey(data, Key.enter)) {
+        const name = this.profileName.getValue().trim();
+        if (name) this.changeProfile({ action: "save", name });
+      } else this.profileName.handleInput(data);
+    } else if (data === "y" || data === "Y") {
+      this.changeProfile({ action: "delete", name: view.name });
+    } else if (data === "n" || data === "N") {
+      this.endProfileEdit();
+    }
+  }
+
+  private endProfileEdit(): void {
+    this.profileView = undefined;
+    this.profileName.setValue("");
+    this.focused = this._focused;
+  }
+
+  private changeProfile(action: ProfileAction): void {
+    this.profileBusy = true;
+    this.profileError = undefined;
+    this.requestRender();
+    void this.options
+      .onChangeProfile(action)
+      .then(({ settings, servers }) => {
+        this.options.settings = settings;
+        this.options.servers.splice(0, this.options.servers.length, ...servers);
+        this.search.setValue("");
+        this.resetSelections();
+        this.endProfileEdit();
+      })
+      .catch((error: unknown) => {
+        this.profileError = summarizeError(error);
+      })
+      .finally(() => {
+        this.profileBusy = false;
+        this.requestRender();
+      });
+  }
+
+  private bodyRows(): number {
+    return modalBodyRows(this.terminalRows());
   }
 
   private footer(): string {
     const report = ` · ${PROBLEM_REPORT_SHORTCUT}`;
+    if (this.profileView?.kind === "select")
+      return "↑/↓ profile · enter apply · X delete · esc back";
+    if (this.profileView?.kind === "save") return "enter save profile · esc cancel";
+    if (this.profileView?.kind === "delete") return "y delete profile · n/esc cancel";
     if (this.activeTab === "settings") {
-      return `tab profiles · ↑/↓ navigate · ←/→ change · enter select · esc close${report}`;
-    }
-    if (this.activeTab === "profiles") {
-      return `tab servers · enter manage profiles · esc close${report}`;
+      return `tab servers · ↑/↓ navigate · ←/→ change · enter select · esc close${report}`;
     }
     if (this.activeTab === "chains") {
       return "tab stats · ↑/↓ navigate · space toggle · R revalidate · del delete · esc close";
@@ -929,7 +1064,7 @@ class ServerManagerModal implements Component, Focusable {
     if (this.activeTab === "stats") {
       return `tab settings · bounded local rollups · esc close${report}`;
     }
-    return `tab chains · ←/→ pane · ↑/↓ navigate · space toggle · D discover · esc close${report}`;
+    return `tab chains · ←/→ pane · ↑/↓ · space toggle · esc close${report}`;
   }
 
   private moveSelection(direction: -1 | 1): void {
@@ -1408,8 +1543,7 @@ function wrapPlainText(text: string, width: number): string[] {
   return lines;
 }
 
-function modalBodyRows(): number {
-  const reportedRows = process.stdout.rows;
+function modalBodyRows(reportedRows: number): number {
   const terminalRows = typeof reportedRows === "number" && reportedRows > 0 ? reportedRows : 24;
   const overlayRows = Math.floor(terminalRows * 0.85);
   // Frame, Box padding, header, and footer consume six rows; keep one row as
