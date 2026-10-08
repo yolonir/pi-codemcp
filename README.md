@@ -30,7 +30,7 @@ pi install npm:pi-codemcp
 
 Reads `<agent-dir>/mcp.json`. Supports stdio, Streamable HTTP, SSE, bearer authentication, and FastMCP-managed OAuth.
 
-Open **`/codemcp`** to manage servers, individual tools, saved chains, settings, and usage stats. Changes are saved immediately. Tool output expands with Pi's normal `Ctrl+O`.
+Open **`/codemcp`** to manage servers, individual tools, profiles, saved chains, settings, and usage stats. Changes are saved immediately. Tool output expands with Pi's normal `Ctrl+O`.
 
 No separate Python, uv, Bun, or just installation is needed. The package bootstraps a locked Python 3.13 runtime on first use; this needs network access unless already cached. Pi startup does not wait for MCP connections.
 
@@ -112,6 +112,33 @@ Edit settings in `/codemcp` or `<agent-dir>/pi-codemcp/settings.json`. Defaults:
 Older settings are migrated on load, including `discoveryMode` → `jevEnabled`.
 
 </details>
+
+## Profiles
+
+In **`/codemcp` → Profiles**, press Enter to save the current setup, activate a saved profile, return to the base configuration, or delete a profile. Saving a new profile also activates it. Server and tool toggles then edit that profile automatically; other profiles and the base configuration stay unchanged.
+
+Profiles live in `<agent-dir>/pi-codemcp/settings.json`, alongside a persistent `activeProfile` selection:
+
+```json
+{
+  "version": 2,
+  "activeProfile": "research",
+  "profiles": {
+    "research": {
+      "servers": ["linear", "filesystem"],
+      "disabledTools": {"linear": ["delete_issue"]}
+    },
+    "observability": {
+      "servers": ["grafana"],
+      "disabledTools": {}
+    }
+  }
+}
+```
+
+Only server names and tool exclusions are stored—connection definitions and credentials remain in `mcp.json`. An active profile replaces the base server enable flags and `disabledTools` policy: only its listed servers are enabled, including servers disabled in the base configuration. Unlisted/new servers stay disabled; newly discovered tools are enabled unless excluded. An empty server list disables all servers.
+
+Set `activeProfile` to `null` (the default) to use `mcp.json` enable flags and the base `disabledTools` again. Deleting the active profile also restores that base configuration, after confirmation. Unknown profile names and malformed profiles fail validation. Settings such as timeouts, Jev, and saved-chain enablement remain shared; chains cannot bypass the active profile's MCP policy. After editing profile JSON manually, reload Pi to apply server selection changes.
 
 ## Saved chains
 

@@ -18,6 +18,8 @@ import {
   type EditableSettingKey,
   type EditableSettingValue,
   setEditableSetting,
+  setProfileServerEnabled,
+  setToolEnabled,
 } from "./settings.js";
 
 export interface ToolModalState {
@@ -104,7 +106,7 @@ interface Keybindings {
   matches(data: string, id: "tui.select.up" | "tui.select.down" | "tui.select.cancel"): boolean;
 }
 
-export type ServerManagerResult = "report-problem" | undefined;
+export type ServerManagerResult = "report-problem" | "manage-profiles" | undefined;
 
 interface ServerManagerOptions {
   servers: ServerModalState[];
@@ -335,7 +337,7 @@ export function serverStatesFromStatus(status: Record<string, unknown>): ServerM
 
 class ServerManagerModal implements Component, Focusable {
   private readonly search = new Input();
-  private activeTab: "servers" | "chains" | "stats" | "settings" = "servers";
+  private activeTab: "servers" | "chains" | "stats" | "settings" | "profiles" = "servers";
   private activePane: "servers" | "tools" = "servers";
   private selectedServerIndex = 0;
   private selectedToolIndex = 0;
@@ -359,7 +361,7 @@ class ServerManagerModal implements Component, Focusable {
 
   set focused(value: boolean) {
     this._focused = value;
-    this.search.focused = value && !["stats", "settings"].includes(this.activeTab);
+    this.search.focused = value && !["stats", "settings", "profiles"].includes(this.activeTab);
   }
 
   render(width: number): string[] {
@@ -373,6 +375,7 @@ class ServerManagerModal implements Component, Focusable {
         if (this.activeTab === "servers") return this.renderServers(bodyWidth);
         if (this.activeTab === "chains") return this.renderChains(bodyWidth);
         if (this.activeTab === "stats") return this.renderStats(bodyWidth);
+        if (this.activeTab === "profiles") return this.renderProfiles(bodyWidth);
         return this.renderSettings(bodyWidth);
       },
       invalidate: () => this.search.invalidate(),
@@ -409,13 +412,28 @@ class ServerManagerModal implements Component, Focusable {
             ? "stats"
             : this.activeTab === "stats"
               ? "settings"
-              : "servers";
+              : this.activeTab === "settings"
+                ? "profiles"
+                : "servers";
       this.search.setValue("");
-      this.search.focused = this._focused && !["stats", "settings"].includes(this.activeTab);
+      this.search.focused =
+        this._focused && !["stats", "settings", "profiles"].includes(this.activeTab);
       this.requestRender();
       return;
     }
-    if (this.activeTab === "settings") this.handleSettingsInput(data);
+    if (this.activeTab === "profiles") {
+      if (matchesKey(data, Key.enter) || data === " ") {
+        if (
+          !this.settingBusy &&
+          !this.options.chains.some((chain) => chain.busy) &&
+          !this.options.servers.some(
+            (server) => server.busy || server.tools.some((tool) => tool.busy),
+          )
+        ) {
+          this.close("manage-profiles");
+        }
+      }
+    } else if (this.activeTab === "settings") this.handleSettingsInput(data);
     else if (this.activeTab === "chains") this.handleChainInput(data);
     else if (this.activeTab === "servers") this.handleServerInput(data);
     this.requestRender();
@@ -532,8 +550,17 @@ class ServerManagerModal implements Component, Focusable {
       this.activeTab === "settings"
         ? this.theme.fg("accent", this.theme.bold("[Settings]"))
         : this.theme.fg("muted", "Settings");
-    const tabs = `${servers}  ${chains}  ${stats}  ${settings}`;
-    const title = this.theme.fg("dim", this.theme.bold("CodeMCP"));
+    const profiles =
+      this.activeTab === "profiles"
+        ? this.theme.fg("accent", this.theme.bold("[Profiles]"))
+        : this.theme.fg("muted", "Profiles");
+    const tabs = `${servers}  ${chains}  ${stats}  ${settings}  ${profiles}`;
+    const title = this.theme.fg(
+      "dim",
+      this.theme.bold(
+        `CodeMCP${this.options.settings.activeProfile === null ? "" : ` · ${this.options.settings.activeProfile}`}`,
+      ),
+    );
     const gap = " ".repeat(Math.max(1, width - visibleWidth(tabs) - visibleWidth(title)));
     return truncateToWidth(`${tabs}${gap}${title}`, width);
   }
@@ -866,10 +893,35 @@ class ServerManagerModal implements Component, Focusable {
     return lines;
   }
 
+  private renderProfiles(width: number): string[] {
+    const { activeProfile, profiles } = this.options.settings;
+    const lines = [
+      this.theme.fg(
+        "accent",
+        this.theme.bold(`Active profile: ${activeProfile ?? "Base configuration"}`),
+      ),
+      this.theme.fg(
+        "muted",
+        "Profiles store server selections and tool exclusions, not connections or credentials.",
+      ),
+      this.theme.fg("dim", "Enter to switch, save the current setup, or delete a profile."),
+      "",
+      ...Object.entries(profiles).map(
+        ([name, profile]) =>
+          `${name === activeProfile ? "✓" : "○"} ${name} · ${profile.servers.length} servers · ${Object.values(profile.disabledTools).reduce((total, tools) => total + tools.length, 0)} excluded tools`,
+      ),
+    ];
+    if (Object.keys(profiles).length === 0) lines.push(this.theme.fg("muted", "No saved profiles"));
+    return lines.slice(0, Math.max(1, modalBodyRows())).map((line) => truncateToWidth(line, width));
+  }
+
   private footer(): string {
     const report = ` · ${PROBLEM_REPORT_SHORTCUT}`;
     if (this.activeTab === "settings") {
-      return `tab servers · ↑/↓ navigate · ←/→ change · enter select · esc close${report}`;
+      return `tab profiles · ↑/↓ navigate · ←/→ change · enter select · esc close${report}`;
+    }
+    if (this.activeTab === "profiles") {
+      return `tab servers · enter manage profiles · esc close${report}`;
     }
     if (this.activeTab === "chains") {
       return "tab stats · ↑/↓ navigate · space toggle · R revalidate · del delete · esc close";
@@ -906,7 +958,10 @@ class ServerManagerModal implements Component, Focusable {
     delete server.error;
     void this.options
       .onSetServerEnabled(server, enabled)
-      .then((updated) => applyServerUpdate(server, updated))
+      .then((updated) => {
+        applyServerUpdate(server, updated);
+        this.updateProfileServer(updated);
+      })
       .catch((error: unknown) => {
         server.error = summarizeError(error);
       })
@@ -924,7 +979,10 @@ class ServerManagerModal implements Component, Focusable {
     this.requestRender();
     void this.options
       .onDiscover(server)
-      .then((updated) => applyServerUpdate(server, updated))
+      .then((updated) => {
+        applyServerUpdate(server, updated);
+        this.updateProfileServer(updated);
+      })
       .catch((error: unknown) => {
         server.error = summarizeError(error);
       })
@@ -943,7 +1001,18 @@ class ServerManagerModal implements Component, Focusable {
     tool.busy = true;
     void this.options
       .onSetToolEnabled(server, tool, !tool.enabled)
-      .then((updated) => applyServerUpdate(server, updated))
+      .then((updated) => {
+        const updatedTool = updated.tools.find((candidate) => candidate.name === tool.name);
+        if (updatedTool) {
+          this.options.settings = setToolEnabled(
+            this.options.settings,
+            server.name,
+            tool.name,
+            updatedTool.enabled,
+          );
+        }
+        applyServerUpdate(server, updated);
+      })
       .catch((error: unknown) => {
         server.error = summarizeError(error);
       })
@@ -951,6 +1020,16 @@ class ServerManagerModal implements Component, Focusable {
         tool.busy = false;
         this.requestRender();
       });
+  }
+
+  private updateProfileServer(server: ServerModalState): void {
+    if (this.options.settings.activeProfile !== null) {
+      this.options.settings = setProfileServerEnabled(
+        this.options.settings,
+        server.name,
+        server.enabled,
+      );
+    }
   }
 
   private toggleSelectedChain(): void {

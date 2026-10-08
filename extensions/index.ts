@@ -21,9 +21,13 @@ import {
   statsStateFromSnapshot,
 } from "../src/modal.js";
 import {
+  activateProfile,
   type CodeMcpSettings,
+  deleteProfile,
   saveCodeMcpSettings,
+  saveProfile,
   setEditableSetting,
+  setProfileServerEnabled,
   setToolEnabled,
 } from "../src/settings.js";
 import { registerCodeMcpTools, registerJevRouteTool } from "../src/tools.js";
@@ -43,7 +47,7 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
     registerJevRouteTool(pi, () => jevRouter);
 
     pi.registerCommand("codemcp", {
-      description: "Manage CodeMCP servers, saved chains, tools, and settings",
+      description: "Manage CodeMCP servers, saved chains, tools, settings, and profiles",
       handler: async (_args, ctx) => {
         try {
           bindProjectChainScope(ctx, lifecycle, chains);
@@ -106,6 +110,7 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
             },
           });
           if (managerResult === "report-problem") await promptForProblemReport(pi, ctx);
+          if (managerResult === "manage-profiles") await manageProfilesFromManager(lifecycle, ctx);
         } catch (error) {
           ctx.ui.notify(summarizeError(error), "error");
         }
@@ -146,7 +151,10 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
 }
 
 export async function discoverServerFromManager(
-  lifecycle: Pick<CodeMcpLifecycle, "configPath" | "reload" | "request">,
+  lifecycle: Pick<
+    CodeMcpLifecycle,
+    "configPath" | "settingsPath" | "loadSettings" | "reload" | "request"
+  >,
   server: ServerModalState,
 ): Promise<ServerModalState> {
   if (!server.enabled) return setServerEnabledFromManager(lifecycle, server, true);
@@ -157,11 +165,22 @@ export async function discoverServerFromManager(
 }
 
 export async function setServerEnabledFromManager(
-  lifecycle: Pick<CodeMcpLifecycle, "configPath" | "reload" | "request">,
+  lifecycle: Pick<
+    CodeMcpLifecycle,
+    "configPath" | "settingsPath" | "loadSettings" | "reload" | "request"
+  >,
   previous: ServerModalState,
   enabled: boolean,
 ): Promise<ServerModalState> {
-  setMcpServerEnabled(lifecycle.configPath, previous.name, enabled);
+  const settings = lifecycle.loadSettings();
+  if (settings.activeProfile === null) {
+    setMcpServerEnabled(lifecycle.configPath, previous.name, enabled);
+  } else {
+    saveCodeMcpSettings(
+      lifecycle.settingsPath,
+      setProfileServerEnabled(settings, previous.name, enabled),
+    );
+  }
   await lifecycle.reload();
   try {
     const status = enabled
@@ -176,6 +195,58 @@ export async function setServerEnabledFromManager(
       throw error;
     }
   }
+}
+
+export async function manageProfilesFromManager(
+  lifecycle: Pick<CodeMcpLifecycle, "settingsPath" | "loadSettings" | "reload" | "request">,
+  ctx: Pick<ExtensionCommandContext, "ui">,
+): Promise<void> {
+  const settings = lifecycle.loadSettings();
+  const names = Object.keys(settings.profiles).sort();
+  const choices = [
+    "Use base configuration",
+    ...names.map((name) => `Activate: ${name}`),
+    "Save current setup as a new profile",
+    "Delete a profile",
+  ];
+  const selected = await ctx.ui.select(
+    `CodeMCP profiles · active: ${settings.activeProfile ?? "base"}`,
+    choices,
+  );
+  if (selected === undefined) return;
+  let updated: CodeMcpSettings;
+  if (selected === choices[0]) {
+    updated = activateProfile(settings, null);
+  } else if (selected === "Save current setup as a new profile") {
+    const name = await ctx.ui.input("Profile name");
+    if (!name?.trim()) return;
+    updated = saveProfile(
+      settings,
+      name.trim(),
+      serverStatesFromStatus(await lifecycle.request("status", {})),
+    );
+  } else if (selected === "Delete a profile") {
+    if (names.length === 0) {
+      ctx.ui.notify("No saved CodeMCP profiles", "info");
+      return;
+    }
+    const name = await ctx.ui.select("Delete CodeMCP profile", names);
+    if (name === undefined) return;
+    const message =
+      settings.activeProfile === name
+        ? "This deletes the active profile and restores the base configuration."
+        : "This deletes the saved server and tool selection.";
+    if (!(await ctx.ui.confirm(`Delete profile ${name}?`, message))) return;
+    updated = deleteProfile(settings, name);
+  } else {
+    const name = names[choices.indexOf(selected) - 1];
+    if (name === undefined) throw new Error("Unknown CodeMCP profile selection");
+    updated = activateProfile(settings, name);
+  }
+  saveCodeMcpSettings(lifecycle.settingsPath, updated);
+  await lifecycle.reload();
+  await lifecycle.request("status", {});
+  ctx.ui.notify(`CodeMCP profile: ${updated.activeProfile ?? "base configuration"}`, "info");
 }
 
 export default createCodeMcpExtension();

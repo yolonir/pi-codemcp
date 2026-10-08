@@ -442,6 +442,7 @@ def normalize_mcp_config(
     *,
     oauth_storage_dir: Path,
     oauth_client_name: str = "pi-codemcp",
+    enabled_servers: set[str] | None = None,
 ) -> NormalizedConfig:
     server_block = raw_config.get("mcpServers", raw_config)
     if not isinstance(server_block, dict):
@@ -465,7 +466,12 @@ def normalize_mcp_config(
             key: item for key, item in value.items() if key not in PI_ONLY_FIELDS
         }
         config_fingerprint = _server_config_fingerprint(name, cleaned)
-        if value.get("disabled") is True or value.get("enabled") is False:
+        disabled = (
+            name not in enabled_servers
+            if enabled_servers is not None
+            else value.get("disabled") is True or value.get("enabled") is False
+        )
+        if disabled:
             server_infos.append(_disabled_server_info(name, cleaned, config_fingerprint))
             continue
 

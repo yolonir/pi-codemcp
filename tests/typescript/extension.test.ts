@@ -9,6 +9,7 @@ import {
   promptForProblemReport,
   showChangelogOnce,
 } from "../../extensions/index.js";
+import { loadCodeMcpSettings } from "../../src/settings.js";
 
 describe("Pi extension registration", () => {
   test("problem report asks for a description and sends the agent an issue-preparation prompt", async () => {
@@ -138,8 +139,11 @@ describe("Pi extension registration", () => {
         "utf8",
       );
       const calls: string[] = [];
+      const settingsPath = join(temporary, "settings.json");
       const lifecycle = {
         configPath,
+        settingsPath,
+        loadSettings: () => loadCodeMcpSettings(settingsPath),
         async reload() {
           calls.push("reload");
         },

@@ -332,6 +332,7 @@ class GatewayRuntime:
         normalized = normalize_mcp_config(
             raw,
             oauth_storage_dir=oauth_storage_dir,
+            enabled_servers=settings.enabled_servers,
         )
         cache = CatalogCache(
             catalog_cache_dir,

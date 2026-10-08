@@ -338,6 +338,15 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   expect(problemReportLines).toContain("Well, that sucks.");
   for (let index = 0; index < 7; index += 1) component?.handleInput?.("\u001b[A");
   component?.handleInput?.("\t");
+  const profileLines = renderWithRows(component, 90, 60).join("\n");
+  expect(profileLines).toContain("[Profiles]");
+  expect(profileLines).toContain("Active profile: Base configuration");
+  expect(profileLines).toContain("No saved profiles");
+  component?.handleInput?.("\r");
+  expect(modalResult).toBe("manage-profiles");
+  expect(closed).toBe(1);
+  closed = 0;
+  component?.handleInput?.("\t");
 
   component?.handleInput?.("d");
   await Bun.sleep(0);
