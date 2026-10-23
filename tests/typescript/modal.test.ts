@@ -488,8 +488,13 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
     async onChangeProfile() {
       return { settings: { ...DEFAULT_CODEMCP_SETTINGS }, servers };
     },
-    async onSearchRegistry(query) {
+    async onSearchRegistry(query, signal) {
       catalogSearches.push(query);
+      if (query === "slow") {
+        return new Promise<never>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
       return [
         {
           id: "files-http",
@@ -610,6 +615,17 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   await Bun.sleep(0);
   expect(addedConfigs[0]).toContain('"url": "https://files.example.test/mcp"');
   expect(servers.map((server) => server.name)).toEqual(["grafana", "files"]);
+
+  component?.handleInput?.("A");
+  component?.handleInput?.("\r");
+  component?.handleInput?.("slow");
+  component?.handleInput?.("\r");
+  expect(renderWithRows(component, 90, 60).join("\n")).toContain("Cancel search");
+  component?.handleInput?.("\u001b");
+  expect(renderWithRows(component, 90, 60).join("\n")).not.toContain("Searching…");
+  component?.handleInput?.("\u001b");
+  component?.handleInput?.("\u001b");
+  expect(catalogSearches).toEqual(["files", "slow"]);
   component?.handleInput?.("\u001b[A");
 
   component?.handleInput?.("R");

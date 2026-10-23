@@ -131,7 +131,7 @@ interface ServerManagerOptions {
   settings: CodeMcpSettings;
   stats: StatsModalState;
   onChangeProfile(action: ProfileAction): Promise<ProfileManagerState>;
-  onSearchRegistry(query: string): Promise<RegistryServerCandidate[]>;
+  onSearchRegistry(query: string, signal: AbortSignal): Promise<RegistryServerCandidate[]>;
   onAddServer(config: string): Promise<AddedServerManagerState>;
   onSetServerEnabled(server: ServerModalState, enabled: boolean): Promise<ServerModalState>;
   onDiscover(server: ServerModalState): Promise<ServerModalState>;
@@ -391,6 +391,7 @@ class ServerManagerModal implements Component, Focusable {
     | undefined;
   private addBusy = false;
   private addError: string | undefined;
+  private registryAbort: AbortController | undefined;
   private activeTab: "servers" | "chains" | "stats" | "settings" = "servers";
   private activePane: "servers" | "tools" = "servers";
   private selectedServerIndex = 0;
@@ -475,7 +476,20 @@ class ServerManagerModal implements Component, Focusable {
   }
 
   handleInput(data: string): void {
-    if (this.profileBusy || this.addBusy) return;
+    if (this.profileBusy) return;
+    if (this.addBusy) {
+      if (
+        this.addView?.kind === "search" &&
+        (this.keybindings.matches(data, "tui.select.cancel") || matchesKey(data, Key.escape))
+      ) {
+        this.registryAbort?.abort();
+        this.registryAbort = undefined;
+        this.addBusy = false;
+        this.addError = undefined;
+        this.requestRender();
+      }
+      return;
+    }
     if (this.profileView) {
       this.handleProfileInput(data);
       this.requestRender();
@@ -1092,9 +1106,11 @@ class ServerManagerModal implements Component, Focusable {
     }
     this.addBusy = true;
     this.addError = undefined;
+    const controller = new AbortController();
+    this.registryAbort = controller;
     this.requestRender();
     void this.options
-      .onSearchRegistry(query)
+      .onSearchRegistry(query, controller.signal)
       .then((candidates) => {
         if (candidates.length === 0) throw new Error("No installable servers found");
         const list = new SelectList(
@@ -1121,11 +1137,14 @@ class ServerManagerModal implements Component, Focusable {
         this.focused = this._focused;
       })
       .catch((error: unknown) => {
-        this.addError = summarizeError(error);
+        if (!controller.signal.aborted) this.addError = summarizeError(error);
       })
       .finally(() => {
-        this.addBusy = false;
-        this.requestRender();
+        if (this.registryAbort === controller) {
+          this.registryAbort = undefined;
+          this.addBusy = false;
+          this.requestRender();
+        }
       });
   }
 
@@ -1372,7 +1391,9 @@ class ServerManagerModal implements Component, Focusable {
       return `${this.profileKey("↑↓", "Move")}   ${this.profileKey("enter", "Select")}   ${this.profileKey("esc", "Back")}`;
     }
     if (this.addView?.kind === "search") {
-      return `${this.profileKey("enter", "Search")}   ${this.profileKey("esc", "Back")}`;
+      return this.addBusy
+        ? this.profileKey("esc", "Cancel search")
+        : `${this.profileKey("enter", "Search")}   ${this.profileKey("esc", "Back")}`;
     }
     if (this.addView?.kind === "config") {
       return `${this.profileKey("enter", "Add server")}   ${this.profileKey("shift+enter", "New line")}   ${this.profileKey("esc", "Back")}`;

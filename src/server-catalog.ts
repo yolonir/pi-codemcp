@@ -21,7 +21,7 @@ type RegistryFetch = (input: string | URL, init?: RequestInit) => Promise<Respon
 
 export async function searchMcpRegistry(
   query: string,
-  fetcher: RegistryFetch = fetch,
+  options: { signal?: AbortSignal; fetcher?: RegistryFetch } = {},
 ): Promise<RegistryServerCandidate[]> {
   const trimmed = query.trim();
   if (!trimmed) throw new Error("Enter a catalog search term");
@@ -29,7 +29,10 @@ export async function searchMcpRegistry(
   url.searchParams.set("limit", "30");
   url.searchParams.set("version", "latest");
   url.searchParams.set("search", trimmed);
-  const response = await fetcher(url, { signal: AbortSignal.timeout(30_000) });
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, AbortSignal.timeout(60_000)])
+    : AbortSignal.timeout(60_000);
+  const response = await (options.fetcher ?? fetch)(url, { signal });
   if (!response.ok) throw new Error(`MCP Registry search failed (${response.status})`);
   const payload: unknown = await response.json();
   if (!isRecord(payload) || !Array.isArray(payload.servers)) {

@@ -78,7 +78,7 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
             settings,
             stats: statsStateFromSnapshot(stats),
             onChangeProfile: (action) => changeProfileFromManager(lifecycle, action),
-            onSearchRegistry: (query) => searchMcpRegistry(query),
+            onSearchRegistry: (query, signal) => searchMcpRegistry(query, { signal }),
             onAddServer: (config) => addServerFromManager(lifecycle, config),
             onSetServerEnabled: (server, enabled) =>
               setServerEnabledFromManager(lifecycle, server, enabled),

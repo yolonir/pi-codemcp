@@ -46,7 +46,7 @@ test("registry search maps supported remote and package transports into editable
     );
   };
 
-  const candidates = await searchMcpRegistry("filesystem", fetcher);
+  const candidates = await searchMcpRegistry("filesystem", { fetcher });
 
   expect(requested).toContain("search=filesystem");
   expect(requested).toContain("version=latest");
@@ -72,18 +72,30 @@ test("registry search maps supported remote and package transports into editable
   });
 });
 
+test("registry search can be cancelled while the registry is slow", async () => {
+  const controller = new AbortController();
+  const pending = searchMcpRegistry("figma", {
+    signal: controller.signal,
+    fetcher: (_input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      }),
+  });
+  controller.abort();
+  await expect(pending).rejects.toThrow();
+});
+
 test("registry search reports invalid responses and HTTP failures", async () => {
   await expect(
-    searchMcpRegistry("x", async () => new Response("no", { status: 503 })),
+    searchMcpRegistry("x", { fetcher: async () => new Response("no", { status: 503 }) }),
   ).rejects.toThrow("503");
   await expect(
-    searchMcpRegistry(
-      "x",
-      async () =>
+    searchMcpRegistry("x", {
+      fetcher: async () =>
         new Response("{}", {
           status: 200,
           headers: { "content-type": "application/json" },
         }),
-    ),
+    }),
   ).rejects.toThrow("invalid response");
 });
