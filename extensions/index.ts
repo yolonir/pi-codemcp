@@ -28,7 +28,7 @@ import {
   showServerManagerModal,
   statsStateFromSnapshot,
 } from "../src/modal.js";
-import { searchMcpRegistry } from "../src/server-catalog.js";
+import { searchMcpCatalog } from "../src/server-catalog.js";
 import {
   activateProfile,
   type CodeMcpSettings,
@@ -78,7 +78,7 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
             settings,
             stats: statsStateFromSnapshot(stats),
             onChangeProfile: (action) => changeProfileFromManager(lifecycle, action),
-            onSearchRegistry: (query, signal) => searchMcpRegistry(query, { signal }),
+            onSearchRegistry: (query, signal) => searchMcpCatalog(query, { signal }),
             onAddServer: (config) => addServerFromManager(lifecycle, config),
             onSetServerEnabled: (server, enabled) =>
               setServerEnabledFromManager(lifecycle, server, enabled),

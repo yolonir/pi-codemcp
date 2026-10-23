@@ -85,7 +85,7 @@ Use an `mcpServers` object or a root-level server map:
 
 Set `disabled: true` or `enabled: false` to disable a server. For stdio, only a safe base environment, comma-separated variables in `MY_PI_CHILD_ENV_ALLOWLIST` / `MY_PI_MCP_ENV_ALLOWLIST`, and explicit server `env` values are passed through. Remote `headers` can reference allowed environment variables with `${NAME}`.
 
-Press **A** on the Servers tab to add a server without leaving `/codemcp`. Search the official MCP Registry for an editable HTTP or stdio config, or paste one named server entry directly. The manager validates names and transport fields, rejects `-`/`_` collisions, writes `<agent-dir>/mcp.json` atomically, and hot-reloads the running sidecar. Registry secrets are emitted as `${NAME}` environment references rather than literal values.
+Press **A** on the Servers tab to add a server without leaving `/codemcp`. Search the public Agentage MCP Catalog mirror for an editable HTTP or stdio config, or paste one named server entry directly. The manager validates names and transport fields, rejects `-`/`_` collisions, writes `<agent-dir>/mcp.json` atomically, and hot-reloads the running sidecar. Catalog secrets are emitted as `${NAME}` environment references rather than literal values.
 
 ## Settings
 

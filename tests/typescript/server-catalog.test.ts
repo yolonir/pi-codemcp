@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { searchMcpRegistry } from "../../src/server-catalog.js";
+import { searchMcpCatalog } from "../../src/server-catalog.js";
 
 test("registry search maps supported remote and package transports into editable configs", async () => {
   let requested = "";
@@ -39,18 +39,27 @@ test("registry search maps supported remote and package transports into editable
               ],
             },
           },
+          {
+            server: {
+              name: "com.figma.mcp/mcp",
+              title: "Figma MCP Server",
+              description: "Figma design context",
+              remotes: [{ type: "streamable-http", url: "https://mcp.figma.com/mcp" }],
+            },
+          },
         ],
-        metadata: { count: 1 },
+        metadata: { count: 2 },
       }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
   };
 
-  const candidates = await searchMcpRegistry("filesystem", { fetcher });
+  const candidates = await searchMcpCatalog("filesystem", { fetcher });
 
+  expect(requested).toStartWith("https://api.agentage.io/api/mcp/v0.1/servers?");
   expect(requested).toContain("search=filesystem");
   expect(requested).toContain("version=latest");
-  expect(candidates).toHaveLength(2);
+  expect(candidates).toHaveLength(3);
   expect(candidates[0]).toMatchObject({
     name: "filesystem-mcp",
     title: "Filesystem",
@@ -70,11 +79,16 @@ test("registry search maps supported remote and package transports into editable
       description: "Read files",
     },
   });
+  expect(candidates[2]).toMatchObject({
+    name: "figma",
+    title: "Figma MCP Server",
+    config: { url: "https://mcp.figma.com/mcp" },
+  });
 });
 
 test("registry search can be cancelled while the registry is slow", async () => {
   const controller = new AbortController();
-  const pending = searchMcpRegistry("figma", {
+  const pending = searchMcpCatalog("figma", {
     signal: controller.signal,
     fetcher: (_input, init) =>
       new Promise<Response>((_resolve, reject) => {
@@ -87,10 +101,10 @@ test("registry search can be cancelled while the registry is slow", async () => 
 
 test("registry search reports invalid responses and HTTP failures", async () => {
   await expect(
-    searchMcpRegistry("x", { fetcher: async () => new Response("no", { status: 503 }) }),
+    searchMcpCatalog("x", { fetcher: async () => new Response("no", { status: 503 }) }),
   ).rejects.toThrow("503");
   await expect(
-    searchMcpRegistry("x", {
+    searchMcpCatalog("x", {
       fetcher: async () =>
         new Response("{}", {
           status: 200,

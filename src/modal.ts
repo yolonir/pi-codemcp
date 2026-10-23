@@ -1071,7 +1071,7 @@ class ServerManagerModal implements Component, Focusable {
         {
           value: "search",
           label: "Search catalog",
-          description: "Official MCP Registry",
+          description: "Agentage MCP Catalog",
         },
         {
           value: "paste",
@@ -1163,7 +1163,7 @@ class ServerManagerModal implements Component, Focusable {
     if (view.kind === "search") {
       return [
         ...lines,
-        this.theme.fg("muted", "Search MCP Registry"),
+        this.theme.fg("muted", "Search MCP Catalog"),
         ...this.registrySearch.render(width),
         "",
         this.addBusy

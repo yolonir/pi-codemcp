@@ -1,6 +1,6 @@
 import type { JsonRecord } from "./json-file.js";
 
-const REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0.1/servers";
+const REGISTRY_URL = "https://api.agentage.io/api/mcp/v0.1/servers";
 const SUPPORTED_PACKAGE_RUNTIMES: Record<string, string> = {
   npm: "npx",
   pypi: "uvx",
@@ -19,7 +19,7 @@ export interface RegistryServerCandidate {
 
 type RegistryFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
-export async function searchMcpRegistry(
+export async function searchMcpCatalog(
   query: string,
   options: { signal?: AbortSignal; fetcher?: RegistryFetch } = {},
 ): Promise<RegistryServerCandidate[]> {
@@ -30,13 +30,13 @@ export async function searchMcpRegistry(
   url.searchParams.set("version", "latest");
   url.searchParams.set("search", trimmed);
   const signal = options.signal
-    ? AbortSignal.any([options.signal, AbortSignal.timeout(60_000)])
-    : AbortSignal.timeout(60_000);
+    ? AbortSignal.any([options.signal, AbortSignal.timeout(15_000)])
+    : AbortSignal.timeout(15_000);
   const response = await (options.fetcher ?? fetch)(url, { signal });
-  if (!response.ok) throw new Error(`MCP Registry search failed (${response.status})`);
+  if (!response.ok) throw new Error(`MCP catalog search failed (${response.status})`);
   const payload: unknown = await response.json();
   if (!isRecord(payload) || !Array.isArray(payload.servers)) {
-    throw new Error("MCP Registry returned an invalid response");
+    throw new Error("MCP catalog returned an invalid response");
   }
   return payload.servers.flatMap((entry, serverIndex) => registryCandidates(entry, serverIndex));
 }
@@ -45,8 +45,8 @@ function registryCandidates(value: unknown, serverIndex: number): RegistryServer
   if (!isRecord(value) || !isRecord(value.server)) return [];
   const server = value.server;
   if (typeof server.name !== "string" || typeof server.description !== "string") return [];
-  const name = suggestedServerName(server.name);
   const title = typeof server.title === "string" ? server.title : server.name;
+  const name = suggestedServerName(server.name, title);
   const base = {
     name,
     title,
@@ -208,9 +208,17 @@ function environmentName(value: string, fallback: string): string {
   );
 }
 
-function suggestedServerName(registryName: string): string {
+function suggestedServerName(registryName: string, title: string): string {
   const tail = registryName.split("/").at(-1) ?? registryName;
-  return tail.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "server";
+  const source = /^(mcp|mcp-server|server)$/i.test(tail)
+    ? title.replace(/\bMCP(?: Server)?\b/gi, "").trim() || tail
+    : tail;
+  return (
+    source
+      .replace(/[^A-Za-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .toLowerCase() || "server"
+  );
 }
 
 function compactRecord(value: JsonRecord): JsonRecord {
