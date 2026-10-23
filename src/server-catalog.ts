@@ -29,7 +29,7 @@ export async function searchMcpRegistry(
   url.searchParams.set("limit", "30");
   url.searchParams.set("version", "latest");
   url.searchParams.set("search", trimmed);
-  const response = await fetcher(url, { signal: AbortSignal.timeout(10_000) });
+  const response = await fetcher(url, { signal: AbortSignal.timeout(30_000) });
   if (!response.ok) throw new Error(`MCP Registry search failed (${response.status})`);
   const payload: unknown = await response.json();
   if (!isRecord(payload) || !Array.isArray(payload.servers)) {

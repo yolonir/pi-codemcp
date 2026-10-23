@@ -85,6 +85,8 @@ Use an `mcpServers` object or a root-level server map:
 
 Set `disabled: true` or `enabled: false` to disable a server. For stdio, only a safe base environment, comma-separated variables in `MY_PI_CHILD_ENV_ALLOWLIST` / `MY_PI_MCP_ENV_ALLOWLIST`, and explicit server `env` values are passed through. Remote `headers` can reference allowed environment variables with `${NAME}`.
 
+Press **A** on the Servers tab to add a server without leaving `/codemcp`. Search the official MCP Registry for an editable HTTP or stdio config, or paste one named server entry directly. The manager validates names and transport fields, rejects `-`/`_` collisions, writes `<agent-dir>/mcp.json` atomically, and hot-reloads the running sidecar. Registry secrets are emitted as `${NAME}` environment references rather than literal values.
+
 ## Settings
 
 Edit settings in `/codemcp` or `<agent-dir>/pi-codemcp/settings.json`. Defaults: 30-second execution and tool timeouts, 50 upstream calls, 16 KiB returned data, 50 KiB rendered output, and a 24-hour catalog cache.
@@ -136,7 +138,7 @@ Profiles live in `<agent-dir>/pi-codemcp/settings.json`, alongside a persistent 
 }
 ```
 
-Only server names and tool exclusions are stored—connection definitions and credentials remain in `mcp.json`. An active profile replaces the base server enable flags and `disabledTools` policy: only its listed servers are enabled, including servers disabled in the base configuration. Unlisted/new servers stay disabled; newly discovered tools are enabled unless excluded. An empty server list disables all servers.
+Only server names and tool exclusions are stored—connection definitions and credentials remain in `mcp.json`. An active profile replaces the base server enable flags and `disabledTools` policy: only its listed servers are enabled, including servers disabled in the base configuration. Servers added through `/codemcp` are included in the active profile; servers added outside the manager stay disabled until selected. Newly discovered tools are enabled unless excluded. An empty server list disables all servers.
 
 Set `activeProfile` to `null` (the default) to use `mcp.json` enable flags and the base `disabledTools` again. Deleting the active profile also restores that base configuration, after confirmation. Unknown profile names and malformed profiles fail validation. Settings such as timeouts, Jev, and saved-chain enablement remain shared; chains cannot bypass the active profile's MCP policy. After editing profile JSON manually, reload Pi to apply server selection changes.
 

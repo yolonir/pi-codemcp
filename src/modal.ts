@@ -2,17 +2,20 @@ import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-a
 import {
   Box,
   type Component,
+  Editor,
   type Focusable,
   fuzzyFilter,
   Input,
   Key,
   matchesKey,
   SelectList,
+  type TUI,
   truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { ChainScope, SavedChainView } from "./chains.js";
 import { summarizeError } from "./errors.js";
+import type { RegistryServerCandidate } from "./server-catalog.js";
 import {
   type CodeMcpSettings,
   type EditableSettingKey,
@@ -117,12 +120,19 @@ export interface ProfileManagerState {
   servers: ServerModalState[];
 }
 
+export interface AddedServerManagerState {
+  name: string;
+  servers: ServerModalState[];
+}
+
 interface ServerManagerOptions {
   servers: ServerModalState[];
   chains: ChainModalState[];
   settings: CodeMcpSettings;
   stats: StatsModalState;
   onChangeProfile(action: ProfileAction): Promise<ProfileManagerState>;
+  onSearchRegistry(query: string): Promise<RegistryServerCandidate[]>;
+  onAddServer(config: string): Promise<AddedServerManagerState>;
   onSetServerEnabled(server: ServerModalState, enabled: boolean): Promise<ServerModalState>;
   onDiscover(server: ServerModalState): Promise<ServerModalState>;
   onSetToolEnabled(
@@ -134,6 +144,13 @@ interface ServerManagerOptions {
   onSetChainEnabled(chain: ChainModalState, enabled: boolean): Promise<ChainModalState[]>;
   onRevalidateChain(chain: ChainModalState): Promise<ChainModalState[]>;
   onDeleteChain(chain: ChainModalState): Promise<ChainModalState[]>;
+}
+
+interface CatalogResultsView {
+  kind: "results";
+  query: string;
+  candidates: RegistryServerCandidate[];
+  list: SelectList;
 }
 
 interface SettingChoice {
@@ -154,6 +171,12 @@ const OVERLAY_OPTIONS = {
   maxHeight: "85%",
 } as const;
 const CREATE_PROFILE_VALUE = "\u0000create";
+const MANUAL_SERVER_TEMPLATE = `{
+  "name": "server-name",
+  "config": {
+    "url": "https://example.com/mcp"
+  }
+}`;
 const PROBLEM_REPORT_LABEL = "Extension is broken!";
 const PROBLEM_REPORT_DESCRIPTION =
   "Well, that sucks. With this button you can ask the agent to describe the problem and prepare a GitHub issue for review. The goal is to make pi-codemcp usable for everyone, don't be lazy - submit an issue. Don't worry, you will see all prompts, this is a transparent process.";
@@ -238,6 +261,7 @@ export async function showServerManagerModal(
         (result) => done(result),
         () => tui.requestRender(),
         () => tui.terminal.rows,
+        tui,
       ),
     { overlay: true, overlayOptions: OVERLAY_OPTIONS },
   );
@@ -350,6 +374,8 @@ export function serverStatesFromStatus(status: Record<string, unknown>): ServerM
 class ServerManagerModal implements Component, Focusable {
   private readonly search = new Input();
   private readonly profileName = new Input();
+  private readonly registrySearch = new Input();
+  private readonly serverConfig: Editor;
   private profileView:
     | { kind: "select"; list: SelectList }
     | { kind: "save" }
@@ -357,6 +383,14 @@ class ServerManagerModal implements Component, Focusable {
     | undefined;
   private profileBusy = false;
   private profileError: string | undefined;
+  private addView:
+    | { kind: "menu"; list: SelectList }
+    | { kind: "search" }
+    | CatalogResultsView
+    | { kind: "config"; back: "menu" | CatalogResultsView }
+    | undefined;
+  private addBusy = false;
+  private addError: string | undefined;
   private activeTab: "servers" | "chains" | "stats" | "settings" = "servers";
   private activePane: "servers" | "tools" = "servers";
   private selectedServerIndex = 0;
@@ -374,7 +408,14 @@ class ServerManagerModal implements Component, Focusable {
     private readonly close: (result?: ServerManagerResult) => void,
     private readonly requestRender: () => void,
     private readonly terminalRows: () => number,
-  ) {}
+    tui: TUI,
+  ) {
+    this.serverConfig = new Editor(tui, {
+      borderColor: (text) => theme.fg("accent", text),
+      selectList: this.selectListTheme(),
+    });
+    this.serverConfig.onSubmit = (value) => this.addServer(value);
+  }
 
   get focused(): boolean {
     return this._focused;
@@ -383,8 +424,13 @@ class ServerManagerModal implements Component, Focusable {
   set focused(value: boolean) {
     this._focused = value;
     this.search.focused =
-      value && !this.profileView && !["stats", "settings"].includes(this.activeTab);
+      value &&
+      !this.profileView &&
+      !this.addView &&
+      !["stats", "settings"].includes(this.activeTab);
     this.profileName.focused = value && this.profileView?.kind === "save";
+    this.registrySearch.focused = value && this.addView?.kind === "search";
+    this.serverConfig.focused = value && this.addView?.kind === "config";
   }
 
   render(width: number): string[] {
@@ -420,13 +466,23 @@ class ServerManagerModal implements Component, Focusable {
   invalidate(): void {
     this.search.invalidate();
     this.profileName.invalidate();
+    this.registrySearch.invalidate();
+    this.serverConfig.invalidate();
     if (this.profileView?.kind === "select") this.profileView.list.invalidate();
+    if (this.addView?.kind === "menu" || this.addView?.kind === "results") {
+      this.addView.list.invalidate();
+    }
   }
 
   handleInput(data: string): void {
-    if (this.profileBusy) return;
+    if (this.profileBusy || this.addBusy) return;
     if (this.profileView) {
       this.handleProfileInput(data);
+      this.requestRender();
+      return;
+    }
+    if (this.addView) {
+      this.handleAddInput(data);
       this.requestRender();
       return;
     }
@@ -466,6 +522,16 @@ class ServerManagerModal implements Component, Focusable {
   }
 
   private handleServerInput(data: string): void {
+    if (data === "A") {
+      if (
+        this.settingBusy ||
+        this.options.chains.some((chain) => chain.busy) ||
+        this.options.servers.some((server) => server.busy || server.tools.some((tool) => tool.busy))
+      )
+        return;
+      this.openAddMenu();
+      return;
+    }
     if (["P", "N", "X"].includes(data)) {
       if (
         this.settingBusy ||
@@ -604,6 +670,7 @@ class ServerManagerModal implements Component, Focusable {
     if (this.profileView?.kind === "select")
       return [...controls, ...this.profileView.list.render(width)];
     if (this.profileView?.kind === "save") return this.renderProfileCreation(width);
+    if (this.addView) return [...controls, ...this.renderAddServer(width)];
     const lines = [
       ...controls,
       this.theme.fg("dim", filterLabel),
@@ -972,6 +1039,192 @@ class ServerManagerModal implements Component, Focusable {
     return `${this.theme.fg("accent", this.theme.bold(`[${key}]`))} ${this.theme.fg("muted", label)}`;
   }
 
+  private selectListTheme() {
+    return {
+      selectedPrefix: (text: string) => this.theme.fg("accent", text),
+      selectedText: (text: string) =>
+        this.theme.bg("selectedBg", this.theme.fg("accent", this.theme.bold(text))),
+      description: (text: string) => this.theme.fg("muted", text),
+      scrollInfo: (text: string) => this.theme.fg("dim", text),
+      noMatch: (text: string) => this.theme.fg("warning", text),
+    };
+  }
+
+  private openAddMenu(): void {
+    this.addError = undefined;
+    const list = new SelectList(
+      [
+        {
+          value: "search",
+          label: "Search catalog",
+          description: "Official MCP Registry",
+        },
+        {
+          value: "paste",
+          label: "Paste config",
+          description: "One named MCP server entry",
+        },
+      ],
+      2,
+      this.selectListTheme(),
+    );
+    list.onSelect = (item) => {
+      if (item.value === "search") this.openCatalogSearch();
+      else this.openServerConfig(MANUAL_SERVER_TEMPLATE, "menu");
+    };
+    list.onCancel = () => this.endAddServer();
+    this.addView = { kind: "menu", list };
+    this.focused = this._focused;
+  }
+
+  private openCatalogSearch(): void {
+    this.addError = undefined;
+    this.registrySearch.setValue("");
+    this.addView = { kind: "search" };
+    this.focused = this._focused;
+  }
+
+  private searchRegistry(): void {
+    const query = this.registrySearch.getValue().trim();
+    if (!query) {
+      this.addError = "Enter a catalog search term.";
+      return;
+    }
+    this.addBusy = true;
+    this.addError = undefined;
+    this.requestRender();
+    void this.options
+      .onSearchRegistry(query)
+      .then((candidates) => {
+        if (candidates.length === 0) throw new Error("No installable servers found");
+        const list = new SelectList(
+          candidates.map((candidate) => ({
+            value: candidate.id,
+            label: candidate.title,
+            description: `${candidate.source}  ${candidate.name}`,
+          })),
+          Math.max(1, this.bodyRows() - 5),
+          this.selectListTheme(),
+        );
+        const results: CatalogResultsView = { kind: "results", query, candidates, list };
+        list.onSelect = (item) => {
+          const candidate = candidates.find((entry) => entry.id === item.value);
+          if (candidate) {
+            this.openServerConfig(
+              JSON.stringify({ name: candidate.name, config: candidate.config }, null, 2),
+              results,
+            );
+          }
+        };
+        list.onCancel = () => this.openCatalogSearch();
+        this.addView = results;
+        this.focused = this._focused;
+      })
+      .catch((error: unknown) => {
+        this.addError = summarizeError(error);
+      })
+      .finally(() => {
+        this.addBusy = false;
+        this.requestRender();
+      });
+  }
+
+  private openServerConfig(template: string, back: "menu" | CatalogResultsView): void {
+    this.addError = undefined;
+    this.serverConfig.setText(template);
+    this.addView = { kind: "config", back };
+    this.focused = this._focused;
+  }
+
+  private renderAddServer(width: number): string[] {
+    const view = this.addView;
+    if (!view) return [];
+    const lines = [this.theme.fg("accent", this.theme.bold("Add server")), ""];
+    if (view.kind === "menu") return [...lines, ...view.list.render(width)];
+    if (view.kind === "search") {
+      return [
+        ...lines,
+        this.theme.fg("muted", "Search MCP Registry"),
+        ...this.registrySearch.render(width),
+        "",
+        this.addBusy
+          ? this.theme.fg("warning", "Searching…")
+          : this.addError
+            ? this.theme.fg("error", this.addError)
+            : "",
+      ];
+    }
+    if (view.kind === "results") {
+      return [
+        ...lines,
+        this.theme.fg("muted", `Results for ${view.query}`),
+        "",
+        ...view.list.render(width),
+      ];
+    }
+    return [
+      ...lines,
+      ...this.serverConfig.render(width),
+      ...(this.addError ? ["", this.theme.fg("error", this.addError)] : []),
+    ];
+  }
+
+  private handleAddInput(data: string): void {
+    const view = this.addView;
+    if (!view) return;
+    if (this.keybindings.matches(data, "tui.select.cancel") || matchesKey(data, Key.escape)) {
+      if (view.kind === "menu") this.endAddServer();
+      else if (view.kind === "search") this.openAddMenu();
+      else if (view.kind === "results") this.openCatalogSearch();
+      else if (view.back === "menu") this.openAddMenu();
+      else {
+        this.addView = view.back;
+        this.focused = this._focused;
+      }
+      return;
+    }
+    this.addError = undefined;
+    if (view.kind === "menu" || view.kind === "results") view.list.handleInput(data);
+    else if (view.kind === "search") {
+      if (matchesKey(data, Key.enter)) this.searchRegistry();
+      else this.registrySearch.handleInput(data);
+    } else this.serverConfig.handleInput(data);
+  }
+
+  private addServer(config: string): void {
+    this.addBusy = true;
+    this.addError = undefined;
+    this.requestRender();
+    void this.options
+      .onAddServer(config)
+      .then(({ name, servers }) => {
+        this.options.servers.splice(0, this.options.servers.length, ...servers);
+        this.search.setValue("");
+        this.activePane = "servers";
+        this.selectedServerIndex = Math.max(
+          0,
+          this.options.servers.findIndex((server) => server.name === name),
+        );
+        this.selectedToolIndex = 0;
+        this.endAddServer();
+      })
+      .catch((error: unknown) => {
+        this.addError = summarizeError(error);
+      })
+      .finally(() => {
+        this.addBusy = false;
+        this.requestRender();
+      });
+  }
+
+  private endAddServer(): void {
+    this.addView = undefined;
+    this.addError = undefined;
+    this.registrySearch.setValue("");
+    this.serverConfig.setText("");
+    this.focused = this._focused;
+  }
+
   private openProfileCreation(): void {
     this.profileError = undefined;
     this.profileName.setValue("");
@@ -1115,6 +1368,15 @@ class ServerManagerModal implements Component, Focusable {
 
   private footer(): string {
     const report = `   ${PROBLEM_REPORT_SHORTCUT}`;
+    if (this.addView?.kind === "menu" || this.addView?.kind === "results") {
+      return `${this.profileKey("↑↓", "Move")}   ${this.profileKey("enter", "Select")}   ${this.profileKey("esc", "Back")}`;
+    }
+    if (this.addView?.kind === "search") {
+      return `${this.profileKey("enter", "Search")}   ${this.profileKey("esc", "Back")}`;
+    }
+    if (this.addView?.kind === "config") {
+      return `${this.profileKey("enter", "Add server")}   ${this.profileKey("shift+enter", "New line")}   ${this.profileKey("esc", "Back")}`;
+    }
     if (this.profileView?.kind === "select") {
       const creating = this.profileView.list.getSelectedItem()?.value === CREATE_PROFILE_VALUE;
       return [
@@ -1139,7 +1401,7 @@ class ServerManagerModal implements Component, Focusable {
     if (this.activeTab === "stats") {
       return `tab settings · bounded local rollups · esc close${report}`;
     }
-    return `tab chains   ←/→ pane   ↑/↓   space toggle   esc close${report}`;
+    return `tab chains   ←/→ pane   ↑/↓   space toggle   A add   esc close${report}`;
   }
 
   private moveSelection(direction: -1 | 1): void {
