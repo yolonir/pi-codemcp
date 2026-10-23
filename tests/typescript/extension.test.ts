@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
+  addServerFromManager,
   createCodeMcpExtension,
   discoverServerFromManager,
   promptForProblemReport,
   showChangelogOnce,
 } from "../../extensions/index.js";
-import { loadCodeMcpSettings } from "../../src/settings.js";
+import { loadCodeMcpSettings, saveCodeMcpSettings } from "../../src/settings.js";
 
 describe("Pi extension registration", () => {
   test("problem report asks for a description and sends the agent an issue-preparation prompt", async () => {
@@ -181,6 +182,99 @@ describe("Pi extension registration", () => {
       expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
         mcpServers: { alpha: { command: "alpha", disabled: false } },
       });
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  });
+
+  test("adding a server persists it, includes it in the active profile, and hot-reloads", async () => {
+    const temporary = await mkdtemp(join(tmpdir(), "pi-codemcp-add-"));
+    const configPath = join(temporary, "mcp.json");
+    const settingsPath = join(temporary, "settings.json");
+    try {
+      await writeFile(
+        configPath,
+        JSON.stringify({ mcpServers: { alpha: { command: "alpha" } } }),
+        "utf8",
+      );
+      saveCodeMcpSettings(settingsPath, {
+        ...loadCodeMcpSettings(settingsPath),
+        profiles: { work: { servers: ["alpha"], disabledTools: {} } },
+        activeProfile: "work",
+      });
+      const calls: string[] = [];
+      const result = await addServerFromManager(
+        {
+          configPath,
+          settingsPath,
+          loadSettings: () => loadCodeMcpSettings(settingsPath),
+          async request(name) {
+            calls.push(name);
+            return {
+              upstreams: [
+                { name: "alpha", transport: "stdio", enabled: true },
+                { name: "beta", transport: "http", enabled: true },
+              ],
+            };
+          },
+        },
+        JSON.stringify({
+          name: "beta",
+          config: { url: "https://example.test/mcp", description: "Example" },
+        }),
+      );
+
+      expect(calls).toEqual(["reload_settings"]);
+      expect(result.name).toBe("beta");
+      expect(result.servers.map((server) => server.name)).toEqual(["alpha", "beta"]);
+      expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
+        mcpServers: {
+          alpha: { command: "alpha" },
+          beta: { url: "https://example.test/mcp", description: "Example" },
+        },
+      });
+      expect(loadCodeMcpSettings(settingsPath).profiles.work?.servers).toEqual(["alpha", "beta"]);
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  });
+
+  test("a failed hot-reload rolls back the new server and active profile", async () => {
+    const temporary = await mkdtemp(join(tmpdir(), "pi-codemcp-add-"));
+    const configPath = join(temporary, "mcp.json");
+    const settingsPath = join(temporary, "settings.json");
+    try {
+      await writeFile(
+        configPath,
+        JSON.stringify({ mcpServers: { alpha: { command: "alpha" } } }),
+        "utf8",
+      );
+      saveCodeMcpSettings(settingsPath, {
+        ...loadCodeMcpSettings(settingsPath),
+        profiles: { work: { servers: ["alpha"], disabledTools: {} } },
+        activeProfile: "work",
+      });
+      let calls = 0;
+      await expect(
+        addServerFromManager(
+          {
+            configPath,
+            settingsPath,
+            loadSettings: () => loadCodeMcpSettings(settingsPath),
+            async request() {
+              calls += 1;
+              throw new Error("invalid server");
+            },
+          },
+          '{"beta":{"command":"beta"}}',
+        ),
+      ).rejects.toThrow("invalid server");
+
+      expect(calls).toBe(2);
+      expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
+        mcpServers: { alpha: { command: "alpha" } },
+      });
+      expect(loadCodeMcpSettings(settingsPath).profiles.work?.servers).toEqual(["alpha"]);
     } finally {
       await rm(temporary, { recursive: true, force: true });
     }

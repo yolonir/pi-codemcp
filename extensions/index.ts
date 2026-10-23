@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   CONFIG_DIR_NAME,
@@ -7,13 +7,19 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import { newCodeMcpTraceId, SavedChainManager } from "../src/chains.js";
-import { setMcpServerEnabled } from "../src/config.js";
+import {
+  addMcpServer,
+  parseMcpServerDraft,
+  removeMcpServer,
+  setMcpServerEnabled,
+} from "../src/config.js";
 import { summarizeError } from "../src/errors.js";
 import { JevRouter } from "../src/jev-router.js";
 import { readJsonObject, writeJsonObjectAtomically } from "../src/json-file.js";
 import { CodeMcpLifecycle } from "../src/lifecycle.js";
 import type { SidecarClientOptions } from "../src/mcp-client.js";
 import {
+  type AddedServerManagerState,
   chainStatesFromViews,
   type ProfileAction,
   type ProfileManagerState,
@@ -22,6 +28,7 @@ import {
   showServerManagerModal,
   statsStateFromSnapshot,
 } from "../src/modal.js";
+import { searchMcpCatalog } from "../src/server-catalog.js";
 import {
   activateProfile,
   type CodeMcpSettings,
@@ -71,6 +78,8 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
             settings,
             stats: statsStateFromSnapshot(stats),
             onChangeProfile: (action) => changeProfileFromManager(lifecycle, action),
+            onSearchRegistry: (query, signal) => searchMcpCatalog(query, { signal }),
+            onAddServer: (config) => addServerFromManager(lifecycle, config),
             onSetServerEnabled: (server, enabled) =>
               setServerEnabledFromManager(lifecycle, server, enabled),
             onDiscover: (server) => discoverServerFromManager(lifecycle, server),
@@ -150,6 +159,38 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
       await lifecycle.shutdown();
     });
   };
+}
+
+export async function addServerFromManager(
+  lifecycle: Pick<CodeMcpLifecycle, "configPath" | "settingsPath" | "loadSettings" | "request">,
+  config: string,
+): Promise<AddedServerManagerState> {
+  const draft = parseMcpServerDraft(config);
+  const settings = lifecycle.loadSettings();
+  const configExisted = existsSync(lifecycle.configPath);
+  const updatedSettings =
+    settings.activeProfile === null
+      ? settings
+      : setProfileServerEnabled(settings, draft.name, true);
+  addMcpServer(lifecycle.configPath, draft);
+  try {
+    if (updatedSettings !== settings) saveCodeMcpSettings(lifecycle.settingsPath, updatedSettings);
+    const servers = serverStatesFromStatus(await lifecycle.request("reload_settings", {}));
+    if (!servers.some((server) => server.name === draft.name)) {
+      throw new Error(`CodeMCP returned no status for ${draft.name}`);
+    }
+    return { name: draft.name, servers };
+  } catch (error) {
+    if (configExisted) removeMcpServer(lifecycle.configPath, draft.name);
+    else unlinkSync(lifecycle.configPath);
+    if (updatedSettings !== settings) saveCodeMcpSettings(lifecycle.settingsPath, settings);
+    try {
+      await lifecycle.request("reload_settings", {});
+    } catch {
+      // Preserve the add failure after best-effort rollback.
+    }
+    throw error;
+  }
 }
 
 export async function discoverServerFromManager(

@@ -99,6 +99,12 @@ test("profiles stay in the server tab and the frame stays fixed across tabs and 
             : saveProfile(settings, action.name, [server]);
       return { settings, servers: [{ ...server, enabled: true }] };
     },
+    async onSearchRegistry() {
+      return [];
+    },
+    async onAddServer() {
+      return { name: server.name, servers: [server] };
+    },
     async onSetServerEnabled() {
       return server;
     },
@@ -420,6 +426,8 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   const chainToggles: boolean[] = [];
   const discoveries: string[] = [];
   const revalidated: string[] = [];
+  const catalogSearches: string[] = [];
+  const addedConfigs: string[] = [];
   let closed = 0;
   let modalResult: ServerManagerResult;
 
@@ -479,6 +487,43 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
     }),
     async onChangeProfile() {
       return { settings: { ...DEFAULT_CODEMCP_SETTINGS }, servers };
+    },
+    async onSearchRegistry(query, signal) {
+      catalogSearches.push(query);
+      if (query === "slow") {
+        return new Promise<never>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
+      return [
+        {
+          id: "files-http",
+          name: "files",
+          title: "Files",
+          description: "Read files",
+          source: "HTTP files.example.test",
+          config: { url: "https://files.example.test/mcp", description: "Read files" },
+        },
+      ];
+    },
+    async onAddServer(config) {
+      addedConfigs.push(config);
+      return {
+        name: "files",
+        servers: [
+          ...servers,
+          {
+            name: "files",
+            transport: "http",
+            enabled: true,
+            connected: false,
+            discovered: false,
+            toolCount: 0,
+            totalToolCount: 0,
+            tools: [],
+          },
+        ],
+      };
     },
     async onSetServerEnabled(server, enabled) {
       serverToggles.push({ name: server.name, enabled });
@@ -546,7 +591,42 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   expect(header).toContain("CodeMCP");
   expect(lines.join("\n")).toContain("grafana");
   expect(lines.join("\n")).toContain("[D] Discover tools");
+  expect(lines.join("\n")).toContain("A add");
   expect(lines.join("\n")).toContain("Report issue: R");
+
+  component?.handleInput?.("A");
+  const addMenu = renderWithRows(component, 90, 60).join("\n");
+  expect(addMenu).toContain("Add server");
+  expect(addMenu).toContain("Search catalog");
+  expect(addMenu).toContain("Paste config");
+  expect(addMenu).not.toContain("·");
+  component?.handleInput?.("\r");
+  component?.handleInput?.("files");
+  component?.handleInput?.("\r");
+  await Bun.sleep(0);
+  expect(catalogSearches).toEqual(["files"]);
+  expect(renderWithRows(component, 90, 60).join("\n")).toContain("HTTP files.example.test");
+  component?.handleInput?.("\r");
+  const draft = renderWithRows(component, 90, 60).join("\n");
+  expect(draft).toContain('"name": "files"');
+  expect(draft).toContain("shift+enter");
+  expect(draft).not.toContain("·");
+  component?.handleInput?.("\r");
+  await Bun.sleep(0);
+  expect(addedConfigs[0]).toContain('"url": "https://files.example.test/mcp"');
+  expect(servers.map((server) => server.name)).toEqual(["grafana", "files"]);
+
+  component?.handleInput?.("A");
+  component?.handleInput?.("\r");
+  component?.handleInput?.("slow");
+  component?.handleInput?.("\r");
+  expect(renderWithRows(component, 90, 60).join("\n")).toContain("Cancel search");
+  component?.handleInput?.("\u001b");
+  expect(renderWithRows(component, 90, 60).join("\n")).not.toContain("Searching…");
+  component?.handleInput?.("\u001b");
+  component?.handleInput?.("\u001b");
+  expect(catalogSearches).toEqual(["files", "slow"]);
+  component?.handleInput?.("\u001b[A");
 
   component?.handleInput?.("R");
   const problemReportLines = renderWithRows(component, 90, 60).join("\n");
