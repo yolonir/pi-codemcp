@@ -11,7 +11,7 @@ export const EXECUTE_PROMPT_GUIDELINES = [
   "Use bounded execution to deterministically filter, aggregate, sample, join, or reduce upstream data in the sandbox; do not return raw payloads.",
   "Keep a model turn between calls when an intermediate result changes the semantic decision or user approval is required.",
   "Return the smallest answer. If an oversized result provides result_ref, refine it via inputRef instead of repeating upstream calls.",
-  "SDK facades are prebound globals and must not be imported. Use `import asyncio` for `asyncio.gather`; other imports, classes, `asyncio.create_task`, and `__import__` are unsupported.",
+  "SDK facades are prebound globals and must not be imported. Use `import asyncio` for `asyncio.gather`; other imports, generators, `asyncio.create_task`, and `__import__` are unsupported.",
 ] as const;
 
 export const SAVE_CHAIN_PROMPT_GUIDELINES = [

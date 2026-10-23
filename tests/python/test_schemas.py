@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import httpx
+import httpx2 as httpx
 import pytest
 from fastmcp.client.auth import OAuth
 from fastmcp.mcp_config import RemoteMCPServer, StdioMCPServer
@@ -47,8 +47,8 @@ def make_tool(
     return mcp_types.Tool(
         name=name,
         description=description,
-        inputSchema=input_schema,
-        outputSchema=output_schema,
+        input_schema=input_schema,
+        output_schema=output_schema,
     )
 
 
@@ -809,13 +809,13 @@ def test_selective_type_stubs_remain_small_with_260_tools() -> None:
         mcp_types.Tool(
             name=f"tool_{index}",
             description=f"Return record {index}.",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {"id": {"type": "string"}},
                 "required": ["id"],
                 "additionalProperties": False,
             },
-            outputSchema={
+            output_schema={
                 "type": "object",
                 "properties": {"value": {"type": "integer"}},
                 "required": ["value"],
@@ -973,8 +973,8 @@ def test_result_normalization_preserves_json_aliases(kind: str, tmp_path: Path) 
     )
     result = mcp_types.CallToolResult(
         content=[],
-        structuredContent={"result": supplied} if wrapped else supplied,
-        _meta={"fastmcp": {"wrap_result": True}} if kind == "wrapped_meta" else None,
+        structured_content={"result": supplied} if wrapped else supplied,
+        meta={"fastmcp": {"wrap_result": True}} if kind == "wrapped_meta" else None,
     )
     assert catalog.normalize_result("demo_echo", result) == supplied
 

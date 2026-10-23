@@ -9,7 +9,7 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Any, override
 from urllib.parse import urlsplit
 
-import httpx
+import httpx2 as httpx
 from fastmcp.client.auth import OAuth
 from fastmcp.client.auth.oauth import TokenStorageAdapter
 from fastmcp.mcp_config import (

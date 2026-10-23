@@ -16,7 +16,6 @@ from sidecar.json_types import JsonObject, JsonValue
 from sidecar.refinement_cache import RefinementCache
 from sidecar.tool_catalog import ToolCatalog
 
-
 OBJECT = {"type": "object", "properties": {}, "additionalProperties": False}
 
 
@@ -37,13 +36,13 @@ def tool(
 ) -> mcp_types.Tool:
     return mcp_types.Tool(
         name=name,
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": properties,
             "required": required,
             "additionalProperties": False,
         },
-        outputSchema=output,
+        output_schema=output,
     )
 
 
@@ -162,6 +161,27 @@ async def test_preflight_errors_make_zero_calls(code: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_sandbox_print_does_not_leak_into_sidecar_protocol(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls = 0
+
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        nonlocal calls
+        calls += 1
+        return {"value": 1}
+
+    response = await MontyExecutor(catalog()).execute(
+        'print("sandbox output")\nreturn await alpha.get({"id": "one"})', call
+    )
+
+    assert response.ok is True
+    assert response.result == {"value": 1}
+    assert calls == response.calls_made == 1
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.asyncio
 async def test_progress_reports_execution_phase_and_each_call() -> None:
     events: list[tuple[int, str]] = []
 
@@ -231,19 +251,19 @@ async def test_invalid_sdk_arguments_are_rejected_before_mcp_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unsupported_class_definition_is_a_preflight_error() -> None:
+async def test_unsupported_generator_is_a_preflight_error() -> None:
     async def call(_: str, __: JsonObject) -> JsonValue:
         raise AssertionError("no MCP tool call expected")
 
     response = await MontyExecutor(catalog()).execute(
-        "class Item:\n    pass\nreturn 1",
+        'await alpha.get({"id": "one"})\ndef items():\n    yield 1\nreturn 1',
         call,
     )
 
     assert response.ok is False
     assert response.failure_stage == "preflight"
     assert response.calls_made == 0
-    assert response.error and "class definitions" in response.error
+    assert response.error and "yield" in response.error
 
 
 @pytest.mark.asyncio
@@ -752,7 +772,7 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
                 text='{"columns":["1"],"rows":[[1]]}',
             )
         ],
-        isError=False,
+        is_error=False,
     )
     assert current.normalize_result("alpha_dynamic", object_result) == {
         "columns": ["1"],
@@ -761,7 +781,7 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
 
     array_result = mcp_types.CallToolResult(
         content=[mcp_types.TextContent(type="text", text='[{"id":1}]')],
-        isError=False,
+        is_error=False,
     )
     assert current.normalize_result("alpha_dynamic", array_result) == [{"id": 1}]
 
@@ -776,7 +796,7 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
     ):
         result = mcp_types.CallToolResult(
             content=[mcp_types.TextContent(type="text", text=text)],
-            isError=False,
+            is_error=False,
         )
         assert current.normalize_result("alpha_dynamic", result) == expected
 
@@ -799,8 +819,8 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
     )
     wrapped = mcp_types.CallToolResult(
         content=[],
-        structuredContent={"result": '{"columns":["1"],"rows":[[1]]}'},
-        isError=False,
+        structured_content={"result": '{"columns":["1"],"rows":[[1]]}'},
+        is_error=False,
     )
     assert clickhouse_catalog.normalize_result("clickhouse_run_query", wrapped) == {
         "columns": ["1"],
@@ -809,8 +829,8 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
 
     wrapped_null = mcp_types.CallToolResult(
         content=[],
-        structuredContent={"result": "null"},
-        isError=False,
+        structured_content={"result": "null"},
+        is_error=False,
     )
     assert (
         clickhouse_catalog.normalize_result("clickhouse_run_query", wrapped_null)
@@ -819,11 +839,11 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
 
     declared = mcp_types.CallToolResult(
         content=[],
-        structuredContent={
+        structured_content={
             "value": "null",
             "payload": '{"nested": true}',
         },
-        isError=False,
+        is_error=False,
     )
     declared_catalog = ToolCatalog.from_server_tools(
         {
@@ -897,15 +917,15 @@ async def test_normalize_result_validates_declared_output() -> None:
     current = catalog()
     result = mcp_types.CallToolResult(
         content=[],
-        structuredContent={"value": 4},
-        isError=False,
+        structured_content={"value": 4},
+        is_error=False,
     )
     assert current.normalize_result("alpha_get", result) == {"value": 4}
 
     bad = mcp_types.CallToolResult(
         content=[],
-        structuredContent={"value": "bad"},
-        isError=False,
+        structured_content={"value": "bad"},
+        is_error=False,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         current.normalize_result("alpha_get", bad)

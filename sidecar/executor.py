@@ -395,7 +395,6 @@ class MontyExecutor:
         type_stubs = catalog.type_stubs_for(referenced, include=spec.name)
         async with self._execution_lock:
             await self._type_check(wrapped, catalog, type_stubs)
-            await self._compile_runtime(code, catalog, has_input=True)
 
     def _new_context(
         self,
@@ -449,7 +448,7 @@ class MontyExecutor:
             return self._failure(
                 context,
                 "preflight",
-                error.display("concise", color=False).strip(),
+                error.display().strip(),
             )
         except pydantic_monty.MontySyntaxError as error:
             context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
@@ -457,7 +456,7 @@ class MontyExecutor:
         except pydantic_monty.MontyRuntimeError as error:
             context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
             return self._failure(context, "preflight", error.display("type-msg").strip())
-        except RuntimeError as error:
+        except (pydantic_monty.MontyCrashedError, RuntimeError) as error:
             context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
             return self._failure(
                 context,
@@ -467,7 +466,7 @@ class MontyExecutor:
         context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
 
         try:
-            monty = await self._compile_runtime(
+            runtime_code = self._compile_runtime(
                 code,
                 context.catalog,
                 has_input=has_input,
@@ -622,11 +621,16 @@ class MontyExecutor:
             await context.progress(context.total_calls, "executing")
         runtime_started = time.perf_counter()
         try:
-            async with asyncio.timeout(remaining + 0.1):
+            async with (
+                asyncio.timeout(remaining + 0.1),
+                pydantic_monty.AsyncMonty(max_processes=1, request_timeout=remaining) as pool,
+                pool.checkout(script_name="codemcp_execute.py", limits=limits) as session,
+            ):
                 result = JSON_VALUE_ADAPTER.validate_python(
-                    await monty.run_async(
-                        external_functions=external_functions,
-                        limits=limits,
+                    await session.feed_run(
+                        runtime_code,
+                        external_lookup=external_functions,
+                        print_callback=lambda _stream, _text: None,
                     )
                 )
         except asyncio.CancelledError:
@@ -638,6 +642,9 @@ class MontyExecutor:
                 "timeout",
                 f"Execution timed out after {context.settings.timeout_seconds:g}s",
             )
+        except pydantic_monty.MontyCrashedError as error:
+            context.metrics.runtime_ms += _elapsed_ms(runtime_started)
+            return self._failure(context, "timeout" if error.timed_out else "runtime", str(error))
         except ValidationError as error:
             context.metrics.runtime_ms += _elapsed_ms(runtime_started)
             return self._failure(
@@ -713,18 +720,14 @@ class MontyExecutor:
         return response
 
     @staticmethod
-    async def _compile_runtime(
+    def _compile_runtime(
         code: str,
         catalog: ToolCatalog,
         *,
         has_input: bool,
-    ) -> pydantic_monty.Monty:
+    ) -> str:
         runtime_wrapped = _wrap_code(code, typed=False, has_input=has_input)
-        runtime_code = _rewrite_sdk_calls(runtime_wrapped, catalog)
-        return await pydantic_monty.Monty.acreate(
-            runtime_code,
-            script_name="codemcp_execute.py",
-        )
+        return _rewrite_sdk_calls(runtime_wrapped, catalog)
 
     async def _type_check(
         self,
@@ -737,12 +740,22 @@ class MontyExecutor:
         ).hexdigest()
         if key in self._validated_programs:
             return
-        await pydantic_monty.Monty.acreate(
-            wrapped_code,
-            script_name="codemcp_execute.py",
-            type_check=True,
-            type_check_stubs=type_stubs,
-        )
+        async with (
+            pydantic_monty.AsyncMonty(
+                max_processes=1, request_timeout=self.settings.timeout_seconds
+            ) as pool,
+            pool.checkout(
+                script_name="codemcp_execute.py",
+                type_check=True,
+                type_check_stubs=type_stubs,
+                type_check_format="concise",
+                limits={"max_memory": self.settings.max_memory_bytes},
+            ) as session,
+        ):
+            # The typed wrapper only defines the function; preflight must not execute it.
+            await session.feed_run(wrapped_code)
+            await session.feed_run(_rewrite_sdk_calls(wrapped_code, catalog), skip_type_check=True)
+
         self._validated_programs.add(key)
 
     @staticmethod
@@ -1076,7 +1089,7 @@ def _wrap_code(
     else:
         signature = ""
         return_annotation = ""
-    if typed and uses_input:
+    if typed:
         invocation = ""
     elif uses_input:
         invocation = f"await __codemcp_main(await {CHAIN_INPUT_EXTERNAL}())\n"

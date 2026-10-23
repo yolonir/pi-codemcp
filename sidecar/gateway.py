@@ -940,6 +940,7 @@ class GatewayRuntime:
         try:
             await self.executor.validate_saved_chain(code, candidate_catalog, spec)
         except (
+            pydantic_monty.MontyCrashedError,
             pydantic_monty.MontyTypingError,
             pydantic_monty.MontySyntaxError,
             pydantic_monty.MontyRuntimeError,
@@ -947,7 +948,7 @@ class GatewayRuntime:
             RuntimeError,
         ) as error:
             if isinstance(error, pydantic_monty.MontyTypingError):
-                message = error.display("concise", color=False).strip()
+                message = error.display().strip()
             elif isinstance(
                 error,
                 (pydantic_monty.MontySyntaxError, pydantic_monty.MontyRuntimeError),
@@ -1080,6 +1081,7 @@ class GatewayRuntime:
         try:
             await self.executor.validate_saved_chain(current.code, candidate_catalog, spec)
         except (
+            pydantic_monty.MontyCrashedError,
             pydantic_monty.MontyTypingError,
             pydantic_monty.MontySyntaxError,
             pydantic_monty.MontyRuntimeError,
@@ -1087,7 +1089,7 @@ class GatewayRuntime:
             RuntimeError,
         ) as error:
             if isinstance(error, pydantic_monty.MontyTypingError):
-                message = error.display("concise", color=False).strip()
+                message = error.display().strip()
             elif isinstance(
                 error,
                 (pydantic_monty.MontySyntaxError, pydantic_monty.MontyRuntimeError),

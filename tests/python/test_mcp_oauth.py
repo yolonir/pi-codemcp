@@ -4,7 +4,7 @@ import json
 import time
 from typing import TYPE_CHECKING
 
-import httpx
+import httpx2 as httpx
 from key_value.aio.stores.filetree import FileTreeStore
 from key_value.aio.stores.filetree.store import (
     FileTreeV1CollectionSanitizationStrategy,

@@ -119,8 +119,8 @@ class ToolCatalog(BaseModel):
                 mcp_types.Tool(
                     name=chain.name,
                     description=chain.description,
-                    inputSchema=chain.input_schema,
-                    outputSchema=chain.output_schema,
+                    input_schema=chain.input_schema,
+                    output_schema=chain.output_schema,
                 ),
                 chain.public_name,
                 "chains",
@@ -181,8 +181,8 @@ class ToolCatalog(BaseModel):
                 "kind": kind,
                 "chainId": chain_id,
                 "description": tool.description,
-                "inputSchema": tool.inputSchema,
-                "outputSchema": tool.outputSchema,
+                "inputSchema": tool.input_schema,
+                "outputSchema": tool.output_schema,
             }
             for tool, public_name, server, namespace, method, kind, chain_id in prepared
         ]
@@ -199,10 +199,10 @@ class ToolCatalog(BaseModel):
         for tool, public_name, server, namespace, method, kind, chain_id in prepared:
             if public_name in specs:
                 raise ValueError(f"Duplicate MCP tool name after namespacing: {public_name}")
-            input_schema = JSON_OBJECT_ADAPTER.validate_python(tool.inputSchema)
+            input_schema = JSON_OBJECT_ADAPTER.validate_python(tool.input_schema)
             output_schema = (
-                JSON_OBJECT_ADAPTER.validate_python(tool.outputSchema)
-                if tool.outputSchema is not None
+                JSON_OBJECT_ADAPTER.validate_python(tool.output_schema)
+                if tool.output_schema is not None
                 else None
             )
             builder = StubBuilder(
@@ -469,19 +469,19 @@ class ToolCatalog(BaseModel):
 
     def normalize_result(self, tool_name: str, result: mcp_types.CallToolResult) -> JsonValue:
         spec = self.tools[tool_name]
-        if result.isError:
+        if result.is_error:
             message = "Upstream MCP tool returned an error"
             if result.content and isinstance(result.content[0], mcp_types.TextContent):
                 message = result.content[0].text
             raise RuntimeError(f"{tool_name}: {message}")
 
         if spec.output_schema:
-            if result.structuredContent is None:
+            if result.structured_content is None:
                 raise RuntimeError(
                     f"{tool_name}: upstream returned no structuredContent "
                     "for its declared output schema"
                 )
-            structured = JSON_VALUE_ADAPTER.validate_python(result.structuredContent)
+            structured = JSON_VALUE_ADAPTER.validate_python(result.structured_content)
             raw_meta: object = (result.meta or {}).get("fastmcp")
             wrap_from_meta = isinstance(raw_meta, dict) and bool(raw_meta.get("wrap_result"))
             if spec.output_wrap_result or wrap_from_meta:
@@ -502,9 +502,9 @@ class ToolCatalog(BaseModel):
                 return _normalize_text_result(normalized)
             return normalized
 
-        if result.structuredContent is not None:
+        if result.structured_content is not None:
             return _normalize_json_value(
-                JSON_VALUE_ADAPTER.validate_python(to_jsonable_python(result.structuredContent))
+                JSON_VALUE_ADAPTER.validate_python(to_jsonable_python(result.structured_content))
             )
         if len(result.content) == 1 and isinstance(result.content[0], mcp_types.TextContent):
             return _normalize_text_result(result.content[0].text)
