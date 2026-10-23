@@ -700,9 +700,9 @@ def test_catalog_progressively_discloses_and_paginates_inventory(
     assert "def expect_list" in prelude
     assert "def expect_string" in prelude
     assert "def expect_integer" in prelude
-    assert "Supported: import asyncio; asyncio.gather" in prelude
-    assert "collections.Counter, base64, gzip, asyncio.create_task" in prelude
-    assert "__import__. Use dict counts" in prelude
+    assert "Supported: asyncio.gather, collections.Counter" in prelude
+    assert "itertools.batched, base64, dataclasses" in prelude
+    assert "Unavailable: yield, gzip, asyncio.create_task, __import__" in prelude
     inspected_stub = inspected[0].stub
     assert inspected_stub is not None
     assert "JsonValue: TypeAlias" not in inspected_stub

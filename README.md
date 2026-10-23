@@ -162,6 +162,7 @@ Project chains override same-named global chains, even when disabled. Manifests 
 
 [FastMCP](https://github.com/jlowin/fastmcp) handles transports, validation, and OAuth. [Pydantic Monty](https://github.com/pydantic/monty) type-checks and executes Python without host filesystem, environment, network, or subprocess access. External access is only through the exposed MCP and saved-chain calls.
 
+- Use Python's `collections.Counter` for counts, `itertools.batched` for batches, `base64` for encoding, and classes or `dataclasses` for local data processing. Import these modules normally; SDK namespaces are prebound, not importable. Generator functions (`yield`), `gzip`, `asyncio.create_task`, and `__import__` remain unsupported.
 - Type errors stop execution **before any upstream call**. Time, memory, call count, and output size are bounded.
 - Enabled tools retain their upstream permissions. Chains cannot bypass server or per-tool policy.
 - No automatic call retries or cross-service rollback: a later failure does not undo earlier side effects.

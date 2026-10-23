@@ -161,6 +161,41 @@ async def test_preflight_errors_make_zero_calls(code: str) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (
+            'from collections import Counter\nreturn dict(Counter(["a", "b", "a"]))',
+            {"a": 2, "b": 1},
+        ),
+        (
+            (
+                "from itertools import batched\n"
+                "return [list(batch) for batch in batched([1, 2, 3], 2)]"
+            ),
+            [[1, 2], [3]],
+        ),
+        ('import base64\nreturn base64.b64decode("aGk=").decode()', "hi"),
+        (
+            (
+                "from dataclasses import dataclass\n@dataclass\nclass Item:\n"
+                '    name: str\nreturn Item("hello").name'
+            ),
+            "hello",
+        ),
+    ],
+)
+async def test_documented_python_capabilities(code: str, expected: JsonValue) -> None:
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        raise AssertionError("pure data processing must not call MCP")
+
+    response = await MontyExecutor(catalog()).execute(code, call)
+    assert response.ok is True, response.error
+    assert response.result == expected
+    assert response.calls_made == 0
+
+
+@pytest.mark.asyncio
 async def test_sandbox_print_does_not_leak_into_sidecar_protocol(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
