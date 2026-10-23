@@ -24,8 +24,16 @@ type ModalFactory = (
   done: (result?: ServerManagerResult) => void,
 ) => Component;
 
+const colors: Array<{ layer: string; color: string; text: string }> = [];
 const theme = {
-  fg: (_color: string, text: string) => text,
+  fg: (color: string, text: string) => {
+    colors.push({ layer: "fg", color, text });
+    return text;
+  },
+  bg: (color: string, text: string) => {
+    colors.push({ layer: "bg", color, text });
+    return text;
+  },
   bold: (text: string) => text,
 } as unknown as Theme;
 
@@ -135,7 +143,25 @@ test("profiles stay in the server tab and the frame stays fixed across tabs and 
     // Changing stdout metadata must not change the TUI terminal's dimensions.
     expect(renderWithRows(manager, width, rows + 20)).toHaveLength(baseline.length);
     input("P");
-    expect(checkFrame()).toContain("existing");
+    colors.length = 0;
+    const picker = checkFrame();
+    expect(
+      colors.some(
+        (entry) =>
+          entry.layer === "bg" &&
+          entry.color === "selectedBg" &&
+          entry.text.includes("Base configuration"),
+      ),
+    ).toBe(true);
+    expect(
+      colors.some(
+        (entry) => entry.color === "success" && entry.text.includes("✓ Base configuration"),
+      ),
+    ).toBe(true);
+    expect(picker).toContain("existing");
+    expect(picker).toContain("+ Create profile");
+    expect(picker).toContain("✓ Base configuration");
+    expect(picker).not.toContain("·");
     input("\u001b");
     for (let tab = 0; tab < 3; tab += 1) {
       input("\t");
@@ -155,7 +181,12 @@ test("profiles stay in the server tab and the frame stays fixed across tabs and 
     input("\t");
     expect(checkFrame()).toContain("[Servers]");
     input("N");
-    expect(checkFrame()).toContain("profile name");
+    const creation = checkFrame();
+    expect(creation).toContain("profile name");
+    expect(creation).toContain("1 server included");
+    expect(creation).not.toContain("·");
+    input("\r");
+    expect(checkFrame()).toContain("Enter a profile name.");
     input("\u001b");
   }
   terminal.rows = 60;
@@ -172,7 +203,15 @@ test("profiles stay in the server tab and the frame stays fixed across tabs and 
   await Bun.sleep(0);
   expect(manager.render(100).join("\n")).toContain("already exists");
   input("\u001b");
-  input("N");
+  input("P");
+  input("\u001b[B");
+  const creating = manager.render(100).join("\n");
+  expect(creating).toContain("+ Create profile");
+  expect(creating).not.toContain("[X] Delete");
+  input("X");
+  expect(manager.render(100).join("\n")).not.toContain("Delete profile");
+  input("\r");
+  expect(manager.render(100).join("\n")).toContain("New profile name");
   input("work R");
   input("\r");
   await Bun.sleep(0);

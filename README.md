@@ -115,7 +115,7 @@ Older settings are migrated on load, including `discoveryMode` → `jevEnabled`.
 
 ## Profiles
 
-Profile controls sit above the server list on the first **`/codemcp`** tab. Press **P** to select a profile or the base configuration, **N** to save the current setup as a new profile, or **X** to delete the active profile (with inline confirmation). You can also delete a selected profile with **X** in the picker. All actions stay inside the same fixed-size manager window; Escape cancels profile editing without closing it. Saving a new profile also activates it. Server and tool toggles then edit that profile automatically; other profiles and the base configuration stay unchanged.
+Profile controls sit above the server list on the first **`/codemcp`** tab. Press **P** to open the profile picker: the active profile has a checkmark, the cursor selection is highlighted, and each profile shows its server and tool-exclusion counts. Choose **+ Create profile** (or press **N**) to name a copy of the current setup, with a preview of the included servers. Press **X** to delete the selected profile in the picker, or the active profile from the server list, with inline confirmation. All actions stay inside the same fixed-size manager window; Escape cancels profile editing without closing it. Creating a new profile also activates it. Server and tool toggles then edit that profile automatically; other profiles and the base configuration stay unchanged.
 
 Profiles live in `<agent-dir>/pi-codemcp/settings.json`, alongside a persistent `activeProfile` selection:
 
