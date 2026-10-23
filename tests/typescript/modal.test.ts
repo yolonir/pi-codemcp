@@ -162,6 +162,7 @@ test("profiles stay in the server tab and the frame stays fixed across tabs and 
     expect(picker).toContain("+ Create profile");
     expect(picker).toContain("✓ Base configuration");
     expect(picker).not.toContain("·");
+    expect(picker).not.toContain("CHOOSE A PROFILE");
     input("\u001b");
     for (let tab = 0; tab < 3; tab += 1) {
       input("\t");

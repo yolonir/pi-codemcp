@@ -147,7 +147,7 @@ describe("Pi extension registration", () => {
         async reload() {
           calls.push("reload");
         },
-        async request(name: "discover" | "status") {
+        async request(name: "discover" | "status" | "reload_settings") {
           calls.push(name);
           return {
             upstreams: [
@@ -176,7 +176,7 @@ describe("Pi extension registration", () => {
         tools: [],
       });
 
-      expect(calls).toEqual(["reload", "discover"]);
+      expect(calls).toEqual(["reload_settings", "discover"]);
       expect(updated).toMatchObject({ enabled: true, discovered: true, toolCount: 1 });
       expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
         mcpServers: { alpha: { command: "alpha", disabled: false } },

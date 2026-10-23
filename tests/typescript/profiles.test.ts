@@ -118,7 +118,12 @@ test("manager saves, activates, edits, and deletes profiles without rewriting mc
     expect(saved.settings.activeProfile).toBe("work");
     expect(saved.servers[0]?.name).toBe("alpha");
     expect(lifecycle.loadSettings().profiles.work?.servers).toEqual(["alpha"]);
-    expect(lifecycleCalls).toEqual(["status", "reload", "status"]);
+    expect(lifecycleCalls).toEqual(["status", "reload_settings"]);
+    lifecycleCalls.length = 0;
+    const persisted = await readFile(settingsPath, "utf8");
+    await changeProfileFromManager(lifecycle, { action: "activate", name: "work" });
+    expect(lifecycleCalls).toEqual(["status"]);
+    expect(await readFile(settingsPath, "utf8")).toBe(persisted);
 
     await setServerEnabledFromManager(lifecycle, server, false);
     expect(lifecycle.loadSettings().profiles.work?.servers).toEqual([]);
@@ -133,6 +138,7 @@ test("manager saves, activates, edits, and deletes profiles without rewriting mc
     expect(lifecycle.loadSettings().activeProfile).toBeNull();
     expect(lifecycle.loadSettings().profiles).toEqual({});
     expect(await readFile(configPath, "utf8")).toBe(config);
+    expect(lifecycleCalls).not.toContain("reload");
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

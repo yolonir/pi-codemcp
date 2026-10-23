@@ -153,10 +153,7 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
 }
 
 export async function discoverServerFromManager(
-  lifecycle: Pick<
-    CodeMcpLifecycle,
-    "configPath" | "settingsPath" | "loadSettings" | "reload" | "request"
-  >,
+  lifecycle: Pick<CodeMcpLifecycle, "configPath" | "settingsPath" | "loadSettings" | "request">,
   server: ServerModalState,
 ): Promise<ServerModalState> {
   if (!server.enabled) return setServerEnabledFromManager(lifecycle, server, true);
@@ -167,10 +164,7 @@ export async function discoverServerFromManager(
 }
 
 export async function setServerEnabledFromManager(
-  lifecycle: Pick<
-    CodeMcpLifecycle,
-    "configPath" | "settingsPath" | "loadSettings" | "reload" | "request"
-  >,
+  lifecycle: Pick<CodeMcpLifecycle, "configPath" | "settingsPath" | "loadSettings" | "request">,
   previous: ServerModalState,
   enabled: boolean,
 ): Promise<ServerModalState> {
@@ -183,11 +177,11 @@ export async function setServerEnabledFromManager(
       setProfileServerEnabled(settings, previous.name, enabled),
     );
   }
-  await lifecycle.reload();
+  const reloaded = await lifecycle.request("reload_settings", {});
   try {
     const status = enabled
       ? await lifecycle.request("discover", { server: previous.name })
-      : await lifecycle.request("status", {});
+      : reloaded;
     return requireServerStatus(status, previous.name);
   } catch (error) {
     try {
@@ -200,10 +194,13 @@ export async function setServerEnabledFromManager(
 }
 
 export async function changeProfileFromManager(
-  lifecycle: Pick<CodeMcpLifecycle, "settingsPath" | "loadSettings" | "reload" | "request">,
+  lifecycle: Pick<CodeMcpLifecycle, "settingsPath" | "loadSettings" | "request">,
   action: ProfileAction,
 ): Promise<ProfileManagerState> {
   const settings = lifecycle.loadSettings();
+  if (action.action === "activate" && action.name === settings.activeProfile) {
+    return { settings, servers: serverStatesFromStatus(await lifecycle.request("status", {})) };
+  }
   const updated =
     action.action === "activate"
       ? activateProfile(settings, action.name)
@@ -215,10 +212,9 @@ export async function changeProfileFromManager(
             serverStatesFromStatus(await lifecycle.request("status", {})),
           );
   saveCodeMcpSettings(lifecycle.settingsPath, updated);
-  await lifecycle.reload();
   return {
     settings: updated,
-    servers: serverStatesFromStatus(await lifecycle.request("status", {})),
+    servers: serverStatesFromStatus(await lifecycle.request("reload_settings", {})),
   };
 }
 

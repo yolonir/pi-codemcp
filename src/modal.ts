@@ -964,10 +964,7 @@ class ServerManagerModal implements Component, Focusable {
       title,
       this.profileError
         ? this.theme.fg("error", this.profileError)
-        : this.theme.fg(
-            "dim",
-            this.profileView?.kind === "select" ? "CHOOSE A PROFILE" : "─".repeat(width),
-          ),
+        : this.theme.fg("dim", "─".repeat(width)),
     ];
   }
 
