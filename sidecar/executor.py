@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import asyncio
 import hashlib
 import heapq
@@ -9,8 +8,9 @@ import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
+from functools import partial
 from itertools import islice
-from typing import TYPE_CHECKING, Literal, Self, assert_never, override
+from typing import TYPE_CHECKING, Literal, Self, assert_never
 
 import pydantic_monty
 from pydantic import (
@@ -31,7 +31,6 @@ from .sandbox_api import (
     EXPECT_OBJECT_NAME,
     EXPECT_STRING_NAME,
     INSPECT_JSON_NAME,
-    SANDBOX_FUNCTION_EXTERNALS,
 )
 from .tool_catalog import referenced_calls, schema_path_summary
 
@@ -120,7 +119,7 @@ class ExecutionContext:
 ToolCall = Callable[[str, JsonObject], Awaitable[JsonValue]]
 ContextToolCall = Callable[[str, JsonObject, ExecutionContext], Awaitable[JsonValue]]
 ProgressReporter = Callable[[int, str], Awaitable[None]]
-ExternalFunction = Callable[..., Awaitable[JsonValue]]
+SdkMethod = Callable[[JsonObject], Awaitable[JsonValue]]
 ResultRetainer = Callable[[JsonValue], RetainedResult | None]
 
 
@@ -246,6 +245,17 @@ class ExecutionSettings(BaseModel):
     tool_timeout_seconds: float = Field(default=30.0, gt=0)
     result_byte_limit: int = Field(default=RESULT_BYTE_LIMIT, gt=0)
     max_chain_depth: int = Field(default=16, gt=0)
+
+
+class SdkNamespace:
+    def __init__(self, methods: dict[str, SdkMethod]) -> None:
+        self._methods = methods
+
+    def __getattr__(self, name: str) -> SdkMethod:
+        try:
+            return self._methods[name]
+        except KeyError:
+            raise AttributeError(name) from None
 
 
 class MontyExecutor:
@@ -465,23 +475,7 @@ class MontyExecutor:
             )
         context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
 
-        try:
-            runtime_code = self._compile_runtime(
-                code,
-                context.catalog,
-                has_input=has_input,
-            )
-        except (
-            pydantic_monty.MontySyntaxError,
-            pydantic_monty.MontyRuntimeError,
-            RuntimeError,
-            NotImplementedError,
-        ) as error:
-            return self._failure(
-                context,
-                "preflight",
-                f"Sandbox compilation failed: {error}",
-            )
+        runtime_code = _wrap_code(code, typed=False, has_input=has_input)
 
         async def dispatch_wrapper(name: str, arguments: JsonObject) -> JsonValue:
             catalog = context.catalog
@@ -533,15 +527,12 @@ class MontyExecutor:
                 )
                 raise
 
-        external_functions: dict[str, ExternalFunction] = {}
-
-        async def inspect_json_external(
+        def inspect_json_external(
             value: JsonValue,
             *,
             samples: JsonValue = 2,
             max_depth: JsonValue = 3,
         ) -> JsonValue:
-            await asyncio.sleep(0)
             if not isinstance(samples, int) or isinstance(samples, bool):
                 raise TypeError("inspect_json samples must be an integer")
             if not isinstance(max_depth, int) or isinstance(max_depth, bool):
@@ -557,47 +548,40 @@ class MontyExecutor:
                 byte_limit=_inspection_byte_limit(context.settings.result_byte_limit),
             )
 
-        async def expect_object_external(value: JsonValue) -> JsonValue:
-            await asyncio.sleep(0)
+        def expect_object_external(value: JsonValue) -> JsonValue:
             if not isinstance(value, dict):
                 raise TypeError(f"expect_object expected object, got {_shape_label(value)}")
             return value
 
-        async def expect_list_external(value: JsonValue) -> JsonValue:
-            await asyncio.sleep(0)
+        def expect_list_external(value: JsonValue) -> JsonValue:
             if not isinstance(value, list):
                 raise TypeError(f"expect_list expected array, got {_shape_label(value)}")
             return value
 
-        async def expect_string_external(value: JsonValue) -> JsonValue:
-            await asyncio.sleep(0)
+        def expect_string_external(value: JsonValue) -> JsonValue:
             if not isinstance(value, str):
                 raise TypeError(f"expect_string expected string, got {_shape_label(value)}")
             return value
 
-        async def expect_integer_external(value: JsonValue) -> JsonValue:
-            await asyncio.sleep(0)
+        def expect_integer_external(value: JsonValue) -> JsonValue:
             if not isinstance(value, int) or isinstance(value, bool):
                 raise TypeError(f"expect_integer expected integer, got {_shape_label(value)}")
             return value
 
-        external_functions[SANDBOX_FUNCTION_EXTERNALS[INSPECT_JSON_NAME]] = inspect_json_external
-        external_functions[SANDBOX_FUNCTION_EXTERNALS[EXPECT_OBJECT_NAME]] = expect_object_external
-        external_functions[SANDBOX_FUNCTION_EXTERNALS[EXPECT_LIST_NAME]] = expect_list_external
-        external_functions[SANDBOX_FUNCTION_EXTERNALS[EXPECT_STRING_NAME]] = expect_string_external
-        external_functions[SANDBOX_FUNCTION_EXTERNALS[EXPECT_INTEGER_NAME]] = (
-            expect_integer_external
-        )
-        for spec in context.catalog.tools.values():
-
-            async def sdk_method(
-                arguments: JsonObject,
-                *,
-                _name: str = spec.name,
-            ) -> JsonValue:
-                return await dispatch_wrapper(_name, arguments)
-
-            external_functions[spec.external_name] = sdk_method
+        external_functions: dict[str, object] = {
+            INSPECT_JSON_NAME: inspect_json_external,
+            EXPECT_OBJECT_NAME: expect_object_external,
+            EXPECT_LIST_NAME: expect_list_external,
+            EXPECT_STRING_NAME: expect_string_external,
+            EXPECT_INTEGER_NAME: expect_integer_external,
+        }
+        namespaces: dict[str, dict[str, SdkMethod]] = {}
+        for (namespace, method), public_name in context.catalog.facade_calls.items():
+            namespaces.setdefault(namespace, {})[method] = partial(dispatch_wrapper, public_name)
+        for namespace, methods in namespaces.items():
+            external_functions[namespace] = pydantic_monty.ClassInstance(
+                SdkNamespace(methods), allowed_methods=methods
+            )
 
         if input_value is not None:
 
@@ -719,16 +703,6 @@ class MontyExecutor:
         response.metrics = context.metrics.model_copy()
         return response
 
-    @staticmethod
-    def _compile_runtime(
-        code: str,
-        catalog: ToolCatalog,
-        *,
-        has_input: bool,
-    ) -> str:
-        runtime_wrapped = _wrap_code(code, typed=False, has_input=has_input)
-        return _rewrite_sdk_calls(runtime_wrapped, catalog)
-
     async def _type_check(
         self,
         wrapped_code: str,
@@ -754,7 +728,6 @@ class MontyExecutor:
         ):
             # The typed wrapper only defines the function; preflight must not execute it.
             await session.feed_run(wrapped_code)
-            await session.feed_run(_rewrite_sdk_calls(wrapped_code, catalog), skip_type_check=True)
 
         self._validated_programs.add(key)
 
@@ -1100,41 +1073,3 @@ def _wrap_code(
         f"{textwrap.indent(normalized, '    ')}\n\n"
         f"{invocation}"
     )
-
-
-def _rewrite_sdk_calls(code: str, catalog: ToolCatalog) -> str:
-    tree = ast.parse(code, filename="codemcp_execute.py", mode="exec")
-
-    class FacadeCallRewriter(ast.NodeTransformer):
-        @override
-        def visit_Call(self, node: ast.Call) -> ast.AST:
-            self.generic_visit(node)
-            function = node.func
-            if isinstance(function, ast.Name):
-                external_name = SANDBOX_FUNCTION_EXTERNALS.get(function.id)
-                if external_name is not None:
-                    external_call = ast.Call(
-                        func=ast.Name(id=external_name, ctx=ast.Load()),
-                        args=node.args,
-                        keywords=node.keywords,
-                    )
-                    return ast.copy_location(ast.Await(value=external_call), node)
-            if not isinstance(function, ast.Attribute):
-                return node
-            if not isinstance(function.value, ast.Name):
-                return node
-            public_name = catalog.facade_calls.get((function.value.id, function.attr))
-            if public_name is None:
-                return node
-            node.func = ast.copy_location(
-                ast.Name(
-                    id=catalog.tools[public_name].external_name,
-                    ctx=ast.Load(),
-                ),
-                function,
-            )
-            return node
-
-    rewritten = FacadeCallRewriter().visit(tree)
-    ast.fix_missing_locations(rewritten)
-    return ast.unparse(rewritten)

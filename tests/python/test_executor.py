@@ -264,7 +264,11 @@ async def test_dynamically_built_sdk_arguments_are_validated_at_runtime() -> Non
 
 
 @pytest.mark.asyncio
-async def test_invalid_sdk_arguments_are_rejected_before_mcp_call() -> None:
+@pytest.mark.parametrize("prefix, namespace", [("", "alpha"), ("api = alpha\n", "api")])
+async def test_invalid_sdk_arguments_are_rejected_before_mcp_call(
+    prefix: str,
+    namespace: str,
+) -> None:
     calls = 0
 
     async def call(_: str, __: JsonObject) -> JsonValue:
@@ -273,7 +277,7 @@ async def test_invalid_sdk_arguments_are_rejected_before_mcp_call() -> None:
         return {}
 
     response = await MontyExecutor(catalog()).execute(
-        'return await alpha.get({"id": 1})',
+        prefix + f'return await {namespace}.get({{"id": 1}})',
         call,
     )
 
@@ -299,6 +303,44 @@ async def test_unsupported_generator_is_a_preflight_error() -> None:
     assert response.failure_stage == "preflight"
     assert response.calls_made == 0
     assert response.error and "yield" in response.error
+
+
+@pytest.mark.asyncio
+async def test_native_sdk_namespaces_and_synchronous_helper_references() -> None:
+    calls: list[str] = []
+
+    async def call(name: str, _: JsonObject) -> JsonValue:
+        calls.append(name)
+        return {"value": 7}
+
+    response = await MontyExecutor(catalog()).execute(
+        """
+        api = alpha
+        async def fetch():
+            return await api.get({"id": "one"})
+        result = await fetch()
+        narrow = expect_integer
+        return narrow(result["value"])
+        """,
+        call,
+    )
+    assert response.ok is True, response.error
+    assert response.result == 7
+    assert calls == ["alpha_get"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attribute", ["_methods", "__dict__", "missing"])
+async def test_native_sdk_does_not_expose_host_attributes(attribute: str) -> None:
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        raise AssertionError("no tool should run")
+
+    response = await MontyExecutor(catalog()).execute(
+        f"api = alpha\nreturn api.{attribute}", call
+    )
+    assert response.ok is False
+    assert response.calls_made == 0
+    assert response.error and attribute in response.error
 
 
 @pytest.mark.asyncio

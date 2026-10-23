@@ -44,7 +44,6 @@ class ToolSpec(BaseModel):
     namespace: str
     method: str
     call: str
-    external_name: str
     short_name: str
     description: str | None
     input_schema: JsonObject
@@ -225,7 +224,6 @@ class ToolCatalog(BaseModel):
                     wrapped_schema = raw_wrapped_schema
             if wrap_output and output_schema:
                 adapter_schema = wrapped_schema or True
-            external_name = f"__codemcp_{hashlib.sha256(public_name.encode()).hexdigest()[:16]}"
 
             spec = ToolSpec(
                 name=public_name,
@@ -234,7 +232,6 @@ class ToolCatalog(BaseModel):
                 namespace=namespace,
                 method=method,
                 call=call,
-                external_name=external_name,
                 short_name=tool.name,
                 description=tool.description,
                 input_schema=input_schema,
@@ -782,22 +779,46 @@ def schema_path_summary(schema: JsonObject, *, limit: int = 20) -> list[str]:
     return paths
 
 
-def referenced_calls(code: str, facade_calls: dict[tuple[str, str], str]) -> set[str]:
+def _parse_code(code: str) -> ast.AST | None:
     normalized = textwrap.dedent(code).strip("\n")
     wrapped = f"async def __codemcp_main():\n{textwrap.indent(normalized, '    ')}\n"
     try:
-        tree = ast.parse(wrapped, mode="exec")
+        return ast.parse(wrapped, mode="exec")
     except SyntaxError:
+        return None
+
+
+def referenced_namespaces(code: str, namespaces: set[str]) -> set[str]:
+    tree = _parse_code(code)
+    if tree is None:
+        return set()
+    return {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in namespaces
+    }
+
+
+def referenced_calls(code: str, facade_calls: dict[tuple[str, str], str]) -> set[str]:
+    tree = _parse_code(code)
+    if tree is None:
         return set()
     referenced: set[str] = set()
+    owners: set[ast.Name] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
             continue
-        if not isinstance(node.func.value, ast.Name):
-            continue
-        public_name = facade_calls.get((node.func.value.id, node.func.attr))
+        owners.add(node.value)
+        public_name = facade_calls.get((node.value.id, node.attr))
         if public_name is not None:
             referenced.add(public_name)
+    # Passing a namespace as a value exposes its whole interface, including through aliases.
+    escaped = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node not in owners
+    }
+    referenced.update(name for (namespace, _), name in facade_calls.items() if namespace in escaped)
     return referenced
 
 

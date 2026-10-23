@@ -595,9 +595,12 @@ async def test_execute_consumes_result_reference_and_rejects_foreign_reference(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prefix, namespace", [("", "alpha"), ("api = alpha\n", "api")])
 async def test_first_execute_discovers_and_connects_only_referenced_server(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+    namespace: str,
 ) -> None:
     root = Path(__file__).parents[2]
     fixture = root / "tests" / "fixtures" / "upstream_server.py"
@@ -614,7 +617,8 @@ async def test_first_execute_discovers_and_connects_only_referenced_server(
                 await client.call_tool(
                     "execute",
                     {
-                        "code": 'value = await alpha.get_number({"seed": 2})\n'
+                        "code": prefix
+                        + f'value = await {namespace}.get_number({{"seed": 2}})\n'
                         'return value["value"]',
                         "trace_id": TRACE_ID,
                     },
@@ -887,8 +891,9 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
             name="double_countdown",
             description="Compose the countdown chain twice.",
             code="""
-            first = await chains.countdown({"count": input["count"]})
-            second = await chains.countdown({"count": input["count"]})
+            api = chains
+            first = await api.countdown({"count": input["count"]})
+            second = await api.countdown({"count": input["count"]})
             return {"value": first["value"] + second["value"]}
             """,
             input_schema=integer_input,
