@@ -1009,8 +1009,6 @@ class ServerManagerModal implements Component, Focusable {
           width,
         ),
       ),
-      "",
-      this.theme.fg("dim", "The new profile becomes active. The original stays unchanged."),
     ];
   }
 
