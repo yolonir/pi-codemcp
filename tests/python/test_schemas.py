@@ -729,6 +729,81 @@ def test_catalog_selective_type_stubs_include_only_referenced_facades(
     assert len(selected) < len(representative_search_catalog.type_stubs) * 0.35
 
 
+@pytest.fixture
+def large_workspace_search_catalog() -> ToolCatalog:
+    products = (
+        "calendar",
+        "chat",
+        "contacts",
+        "docs",
+        "drive",
+        "forms",
+        "gmail",
+        "groups",
+        "meet",
+        "sheets",
+    )
+    actions = ("archive", "copy", "create", "delete", "export", "get", "list", "update")
+    resources = ("attachment", "comment", "record")
+    tools = [
+        make_search_fixture_tool(
+            f"{action}_{product}_{resource}",
+            f"{action.title()} one {product} {resource} in the organization.",
+            (f"{product}_id", f"{resource}_id"),
+        )
+        for product in products
+        for action in actions
+        for resource in resources
+    ]
+    tools.extend(
+        [
+            make_search_fixture_tool(
+                "read_sheet_range",
+                "Read spreadsheet cells and return their formatted values.",
+                ("spreadsheet_id", "range"),
+            ),
+            make_search_fixture_tool(
+                "download_thread_attachments",
+                "Download every attachment from a Gmail conversation thread.",
+                ("thread_id",),
+            ),
+            make_search_fixture_tool(
+                "find_calendar_availability",
+                "Find attendee availability and free busy windows for a calendar time range.",
+                ("attendee_emails", "time_min", "time_max"),
+            ),
+            make_search_fixture_tool(
+                "search_drive_content",
+                "Search Drive files by name, full text content, owner, and shared folder.",
+                ("query", "owner_email"),
+            ),
+        ]
+    )
+    return ToolCatalog.from_server_tools({"google-workspace": tools})
+
+
+def test_catalog_search_preserves_tool_relevance_in_large_server_catalog(
+    large_workspace_search_catalog: ToolCatalog,
+) -> None:
+    expected_matches = {
+        "google workspace sheet values": "google-workspace_read_sheet_range",
+        "google workspace gmail thread attachments": (
+            "google-workspace_download_thread_attachments"
+        ),
+        "google workspace calendar attendee availability": (
+            "google-workspace_find_calendar_availability"
+        ),
+    }
+
+    assert len(large_workspace_search_catalog.tools) == 244
+    for query, expected in expected_matches.items():
+        matches = large_workspace_search_catalog.search(query, limit=5)
+        assert matches[0].name == expected, query
+        assert matches[0].score is not None
+        assert matches[1].score is not None
+        assert matches[0].score > matches[1].score, query
+
+
 def test_selective_type_stubs_remain_small_with_260_tools() -> None:
     tools = [
         mcp_types.Tool(
