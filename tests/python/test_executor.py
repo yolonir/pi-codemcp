@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from collections.abc import AsyncIterator
 
+import pydantic_monty
 import pytest
 from mcp import types as mcp_types
 from pydantic import ValidationError
@@ -17,6 +20,26 @@ from sidecar.refinement_cache import RefinementCache
 from sidecar.tool_catalog import ToolCatalog
 
 OBJECT = {"type": "object", "properties": {}, "additionalProperties": False}
+
+
+@pytest.fixture(autouse=True)
+async def close_executors(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
+    executors: list[MontyExecutor] = []
+    original = MontyExecutor.__init__
+
+    def initialize(
+        self: MontyExecutor,
+        catalog: ToolCatalog,
+        *,
+        settings: ExecutionSettings | None = None,
+    ) -> None:
+        original(self, catalog, settings=settings)
+        executors.append(self)
+
+    monkeypatch.setattr(MontyExecutor, "__init__", initialize)
+    yield
+    for executor in executors:
+        await executor.close()
 
 
 def test_execution_models_reject_invalid_states_and_limits() -> None:
@@ -193,6 +216,56 @@ async def test_documented_python_capabilities(code: str, expected: JsonValue) ->
     assert response.ok is True, response.error
     assert response.result == expected
     assert response.calls_made == 0
+
+
+@pytest.mark.asyncio
+async def test_worker_reuse_isolates_programs_and_closes_processes() -> None:
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        raise AssertionError("no MCP calls expected")
+
+    executor = MontyExecutor(catalog())
+    code = """
+    if not isinstance(input, dict):
+        return None
+    input["value"] = expect_integer(input["value"]) + 1
+    return input
+    """
+    original: JsonObject = {"value": 1}
+    first = await executor.execute(code, call, input_value=original)
+    assert first.ok is True, first.error
+    assert first.result == {"value": 2}
+    assert original == {"value": 1}
+    pool = executor._pool
+    assert pool is not None
+    async with pool.checkout() as session:
+        pid = session.worker_pid
+        await session.feed_run("previous_session_value = 42")
+    assert pid is not None
+
+    second = await executor.execute(code, call, input_value={"value": 2})
+    assert second.ok is True, second.error
+    assert second.result == {"value": 3}
+    assert executor._pool is pool
+    async with pool.checkout() as session:
+        assert session.worker_pid == pid
+        with pytest.raises(pydantic_monty.MontyRuntimeError, match="NameError"):
+            await session.feed_run("previous_session_value")
+
+    executor.settings.max_calls = 1
+    third = await executor.execute(code, call, input_value=original)
+    assert third.ok is True, third.error
+    assert executor._pool is not pool
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    pool = executor._pool
+    async with pool.checkout() as session:
+        pid = session.worker_pid
+    assert pid is not None
+
+    await executor.close()
+    await executor.close()
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
 
 
 @pytest.mark.asyncio

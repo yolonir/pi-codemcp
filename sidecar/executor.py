@@ -7,6 +7,7 @@ import textwrap
 import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack
 from contextvars import ContextVar
 from functools import partial
 from itertools import islice
@@ -46,7 +47,6 @@ INSPECT_COLLECTION_LIMIT = 10
 INSPECT_STRING_LIMIT = 200
 INSPECT_KEY_LIMIT = 80
 INSPECT_BYTE_LIMIT = 8 * 1024
-CHAIN_INPUT_EXTERNAL = "__codemcp_saved_chain_input"
 
 
 type FailureStage = Literal["preflight", "arguments", "runtime", "timeout", "cancelled", "result"]
@@ -271,6 +271,28 @@ class MontyExecutor:
         self.settings = settings or ExecutionSettings()
         self._execution_lock = asyncio.Lock()
         self._validated_programs: set[str] = set()
+        self._pool_stack = AsyncExitStack()
+        self._pool: pydantic_monty.AsyncMonty | None = None
+        self._pool_settings: ExecutionSettings | None = None
+
+    async def _get_pool(self) -> pydantic_monty.AsyncMonty:
+        if self._pool is None or self._pool_settings != self.settings:
+            await self._pool_stack.aclose()
+            self._pool = None
+            # Each suspended parent retains a worker; leave room for every budgeted chain call.
+            self._pool = await self._pool_stack.enter_async_context(
+                pydantic_monty.AsyncMonty(
+                    max_processes=self.settings.max_calls + 1,
+                    request_timeout=self.settings.timeout_seconds,
+                )
+            )
+            self._pool_settings = self.settings.model_copy()
+        return self._pool
+
+    async def close(self) -> None:
+        async with self._execution_lock:
+            await self._pool_stack.aclose()
+            self._pool = None
 
     def update_catalog(self, catalog: ToolCatalog) -> None:
         self.catalog = catalog
@@ -583,13 +605,6 @@ class MontyExecutor:
                 SdkNamespace(methods), allowed_methods=methods
             )
 
-        if input_value is not None:
-
-            async def chain_input() -> JsonValue:  # ruff:ignore[unused-async]
-                return input_value
-
-            external_functions[CHAIN_INPUT_EXTERNAL] = chain_input
-
         remaining = context.remaining_seconds()
         if remaining <= 0:
             return self._failure(
@@ -605,14 +620,15 @@ class MontyExecutor:
             await context.progress(context.total_calls, "executing")
         runtime_started = time.perf_counter()
         try:
+            pool = await self._get_pool()
             async with (
                 asyncio.timeout(remaining + 0.1),
-                pydantic_monty.AsyncMonty(max_processes=1, request_timeout=remaining) as pool,
                 pool.checkout(script_name="codemcp_execute.py", limits=limits) as session,
             ):
                 result = JSON_VALUE_ADAPTER.validate_python(
                     await session.feed_run(
                         runtime_code,
+                        inputs={"input": input_value} if has_input else None,
                         external_lookup=external_functions,
                         print_callback=lambda _stream, _text: None,
                     )
@@ -714,18 +730,14 @@ class MontyExecutor:
         ).hexdigest()
         if key in self._validated_programs:
             return
-        async with (
-            pydantic_monty.AsyncMonty(
-                max_processes=1, request_timeout=self.settings.timeout_seconds
-            ) as pool,
-            pool.checkout(
-                script_name="codemcp_execute.py",
-                type_check=True,
-                type_check_stubs=type_stubs,
-                type_check_format="concise",
-                limits={"max_memory": self.settings.max_memory_bytes},
-            ) as session,
-        ):
+        pool = await self._get_pool()
+        async with pool.checkout(
+            script_name="codemcp_execute.py",
+            type_check=True,
+            type_check_stubs=type_stubs,
+            type_check_format="concise",
+            limits={"max_memory": self.settings.max_memory_bytes},
+        ) as session:
             # The typed wrapper only defines the function; preflight must not execute it.
             await session.feed_run(wrapped_code)
 
@@ -1065,7 +1077,7 @@ def _wrap_code(
     if typed:
         invocation = ""
     elif uses_input:
-        invocation = f"await __codemcp_main(await {CHAIN_INPUT_EXTERNAL}())\n"
+        invocation = "await __codemcp_main(input)\n"
     else:
         invocation = "await __codemcp_main()\n"
     return (

@@ -865,11 +865,13 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
             "chains.countdown"
         ]
 
+        runtime.executor.settings.max_calls = 3
         native = await runtime.chains.execute("countdown", {"count": 3}, TRACE_ID)
         assert native.ok is True
         assert native.result == {"value": 3}
         assert native.calls_made == 0
         assert native.chain_calls == 3
+        runtime.executor.settings.max_calls = 50
 
         composed = await runtime.execute(
             'result = await chains.countdown({"count": 2})\nreturn result["value"]',
@@ -891,9 +893,12 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
             name="double_countdown",
             description="Compose the countdown chain twice.",
             code="""
+            import asyncio
             api = chains
-            first = await api.countdown({"count": input["count"]})
-            second = await api.countdown({"count": input["count"]})
+            first, second = await asyncio.gather(
+                api.countdown({"count": input["count"]}),
+                api.countdown({"count": input["count"]}),
+            )
             return {"value": first["value"] + second["value"]}
             """,
             input_schema=integer_input,

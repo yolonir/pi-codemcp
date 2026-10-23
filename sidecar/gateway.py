@@ -361,6 +361,7 @@ class GatewayRuntime:
         )
 
     async def close(self) -> None:
+        await self.executor.close()
         self.refinement_cache.clear()
         await asyncio.gather(
             *(handle.close() for handle in self.handles.values()),
