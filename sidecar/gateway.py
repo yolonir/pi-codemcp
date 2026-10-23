@@ -157,6 +157,8 @@ class ServerHandle:
             await self._disconnect_locked()
 
     async def _connect_locked(self) -> Client[ClientTransport]:
+        if not self.info.enabled:
+            raise ValueError(f"MCP server is no longer enabled: {self.info.name}")
         if self._client is not None:
             return self._client
         exit_stack = AsyncExitStack()
@@ -280,21 +282,23 @@ class GatewayRuntime:
         *,
         config_path: Path,
         settings_path: Path,
+        oauth_storage_dir: Path,
+        catalog_cache_dir: Path,
         settings: CodeMcpSettings,
         normalized: NormalizedConfig,
         handles: dict[str, ServerHandle],
         chain_store: ScopedChainStore,
-        catalog: ToolCatalog,
-        executor: MontyExecutor,
     ) -> None:
         self.config_path = config_path
         self.settings_path = settings_path
+        self.oauth_storage_dir = oauth_storage_dir
+        self.catalog_cache_dir = catalog_cache_dir
         self.settings = settings
         self.normalized = normalized
         self.handles = handles
         self.chain_store = chain_store
-        self.catalog = catalog
-        self.executor = executor
+        self.catalog = self._build_catalog(chain_store.enabled())
+        self.executor = MontyExecutor(self.catalog, settings=settings.execution_settings())
         self.refinement_cache = RefinementCache()
         self.stats_store = StatsStore(
             settings_path.parent / "stats.sqlite3",
@@ -332,6 +336,7 @@ class GatewayRuntime:
         normalized = normalize_mcp_config(
             raw,
             oauth_storage_dir=oauth_storage_dir,
+            enabled_servers=settings.enabled_servers,
         )
         cache = CatalogCache(
             catalog_cache_dir,
@@ -346,25 +351,15 @@ class GatewayRuntime:
             global_chain_dir or catalog_cache_dir.parent / "chains",
             project_chain_dir,
         )
-        catalog = ToolCatalog.from_server_tools(
-            {
-                name: [
-                    tool for tool in handle.tools or [] if settings.tool_enabled(name, tool.name)
-                ]
-                for name, handle in handles.items()
-            },
-            handles.keys(),
-            chain_store.enabled(),
-        )
         return cls(
             config_path=config_path,
             settings_path=resolved_settings_path,
+            oauth_storage_dir=oauth_storage_dir,
+            catalog_cache_dir=catalog_cache_dir,
             settings=settings,
             normalized=normalized,
             handles=handles,
             chain_store=chain_store,
-            catalog=catalog,
-            executor=MontyExecutor(catalog, settings=settings.execution_settings()),
         )
 
     async def close(self) -> None:
@@ -704,6 +699,15 @@ class GatewayRuntime:
         return response
 
     async def _execute_chain(
+        self,
+        name: str,
+        arguments: JsonObject,
+        trace_id: str,
+    ) -> ExecutionResponse:
+        async with self._execute_lock:
+            return await self._execute_chain_locked(name, arguments, trace_id)
+
+    async def _execute_chain_locked(
         self,
         name: str,
         arguments: JsonObject,
@@ -1221,15 +1225,53 @@ class GatewayRuntime:
         return self.status()
 
     async def reload_settings(self) -> StatusResponse:
-        self._load_settings()
-        await self._rebuild_catalog()
-        return self.status()
-
-    def _load_settings(self) -> None:
-        self.settings = load_settings(self.settings_path)
-        for handle in self.handles.values():
-            handle.cache.max_age_seconds = self.settings.cache_ttl_seconds
-        self.executor.settings = self.settings.execution_settings()
+        async with self._execute_lock, self._catalog_lock:
+            settings = load_settings(self.settings_path)
+            normalized = normalize_mcp_config(
+                load_mcp_json(self.config_path),
+                oauth_storage_dir=self.oauth_storage_dir,
+                enabled_servers=settings.enabled_servers,
+            )
+            cache = CatalogCache(self.catalog_cache_dir, max_age_seconds=settings.cache_ttl_seconds)
+            info_by_name = {server.name: server for server in normalized.servers}
+            handles: dict[str, ServerHandle] = {}
+            for name, config in normalized.config.mcpServers.items():
+                previous = self.handles.get(name)
+                info = info_by_name[name]
+                if (
+                    previous is not None
+                    and previous.info.config_fingerprint == info.config_fingerprint
+                ):
+                    handles[name] = previous
+                else:
+                    handles[name] = ServerHandle.create(info, config, cache)
+            catalog = ToolCatalog.from_server_tools(
+                {
+                    name: [
+                        tool
+                        for tool in handle.tools or []
+                        if settings.tool_enabled(name, tool.name)
+                    ]
+                    for name, handle in handles.items()
+                },
+                handles.keys(),
+                self.chain_store.enabled(),
+            )
+            retired = [
+                handle for name, handle in self.handles.items() if handles.get(name) is not handle
+            ]
+            for handle in retired:
+                handle.info.enabled = False
+            for handle in handles.values():
+                handle.cache.max_age_seconds = settings.cache_ttl_seconds
+            self.settings = settings
+            self.normalized = normalized
+            self.handles = handles
+            self.catalog = catalog
+            self.executor.settings = settings.execution_settings()
+            self.executor.update_catalog(catalog)
+            await asyncio.gather(*(handle.close() for handle in retired))
+            return self.status()
 
     def status(self) -> StatusResponse:
         upstreams: list[UpstreamStatus] = []

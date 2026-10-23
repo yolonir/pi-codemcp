@@ -3,7 +3,9 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { changeProfileFromManager } from "../../extensions/index.js";
 import { SidecarClient, type SidecarToolName, sidecarToolTimeoutMs } from "../../src/mcp-client.js";
+import { loadCodeMcpSettings, saveCodeMcpSettings } from "../../src/settings.js";
 
 const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
@@ -271,10 +273,48 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     expect(status).toMatchObject({ connected: true, tool_count: 5 });
     sidecarPid = client.pid;
     expect(sidecarPid).not.toBeNull();
-    upstreamPids = [
-      Number(await readFile(alphaPidPath, "utf8")),
-      Number(await readFile(betaPidPath, "utf8")),
-    ];
+    const alphaPid = Number(await readFile(alphaPidPath, "utf8"));
+    upstreamPids = [alphaPid, Number(await readFile(betaPidPath, "utf8"))];
+    const settings = loadCodeMcpSettings(client.settingsPath);
+    saveCodeMcpSettings(client.settingsPath, {
+      ...settings,
+      profiles: { research: { servers: ["alpha"], disabledTools: { alpha: ["slow_number"] } } },
+    });
+    const switched = await changeProfileFromManager(
+      {
+        settingsPath: client.settingsPath,
+        loadSettings: () => loadCodeMcpSettings(client.settingsPath),
+        request: (name, args) => client.call(name, args),
+      },
+      { action: "activate", name: "research" },
+    );
+    expect(client.pid).toBe(sidecarPid);
+    expect(switched.servers.find((server) => server.name === "alpha")).toMatchObject({
+      enabled: true,
+      connected: true,
+      discovered: true,
+    });
+    expect(switched.servers.find((server) => server.name === "beta")?.enabled).toBe(false);
+    expect(
+      await client.call("execute_chain", {
+        trace_id: traceId,
+        name: "increment",
+        arguments: { seed: 4 },
+      }),
+    ).toMatchObject({ ok: true });
+    expect(Number(await readFile(alphaPidPath, "utf8"))).toBe(alphaPid);
+    expect(
+      await client.call("execute", {
+        trace_id: traceId,
+        code: 'return await beta.save_number({"value": 1})',
+      }),
+    ).toMatchObject({ ok: false, failure_stage: "preflight", calls_made: 0 });
+    expect(
+      await client.call("execute", {
+        trace_id: traceId,
+        code: 'return await alpha.slow_number({"delay_seconds": 0.01})',
+      }),
+    ).toMatchObject({ ok: false, failure_stage: "preflight", calls_made: 0 });
   } finally {
     await client.close();
     if (sidecarPid !== null) await waitForExit(sidecarPid);

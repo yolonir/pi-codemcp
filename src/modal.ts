@@ -7,7 +7,7 @@ import {
   Input,
   Key,
   matchesKey,
-  Text,
+  SelectList,
   truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
@@ -18,6 +18,8 @@ import {
   type EditableSettingKey,
   type EditableSettingValue,
   setEditableSetting,
+  setProfileServerEnabled,
+  setToolEnabled,
 } from "./settings.js";
 
 export interface ToolModalState {
@@ -106,11 +108,21 @@ interface Keybindings {
 
 export type ServerManagerResult = "report-problem" | undefined;
 
+export type ProfileAction =
+  | { action: "activate"; name: string | null }
+  | { action: "save" | "delete"; name: string };
+
+export interface ProfileManagerState {
+  settings: CodeMcpSettings;
+  servers: ServerModalState[];
+}
+
 interface ServerManagerOptions {
   servers: ServerModalState[];
   chains: ChainModalState[];
   settings: CodeMcpSettings;
   stats: StatsModalState;
+  onChangeProfile(action: ProfileAction): Promise<ProfileManagerState>;
   onSetServerEnabled(server: ServerModalState, enabled: boolean): Promise<ServerModalState>;
   onDiscover(server: ServerModalState): Promise<ServerModalState>;
   onSetToolEnabled(
@@ -141,6 +153,7 @@ const OVERLAY_OPTIONS = {
   minWidth: 72,
   maxHeight: "85%",
 } as const;
+const CREATE_PROFILE_VALUE = "\u0000create";
 const PROBLEM_REPORT_LABEL = "Extension is broken!";
 const PROBLEM_REPORT_DESCRIPTION =
   "Well, that sucks. With this button you can ask the agent to describe the problem and prepare a GitHub issue for review. The goal is to make pi-codemcp usable for everyone, don't be lazy - submit an issue. Don't worry, you will see all prompts, this is a transparent process.";
@@ -224,6 +237,7 @@ export async function showServerManagerModal(
         keybindings,
         (result) => done(result),
         () => tui.requestRender(),
+        () => tui.terminal.rows,
       ),
     { overlay: true, overlayOptions: OVERLAY_OPTIONS },
   );
@@ -335,6 +349,14 @@ export function serverStatesFromStatus(status: Record<string, unknown>): ServerM
 
 class ServerManagerModal implements Component, Focusable {
   private readonly search = new Input();
+  private readonly profileName = new Input();
+  private profileView:
+    | { kind: "select"; list: SelectList }
+    | { kind: "save" }
+    | { kind: "delete"; name: string }
+    | undefined;
+  private profileBusy = false;
+  private profileError: string | undefined;
   private activeTab: "servers" | "chains" | "stats" | "settings" = "servers";
   private activePane: "servers" | "tools" = "servers";
   private selectedServerIndex = 0;
@@ -351,6 +373,7 @@ class ServerManagerModal implements Component, Focusable {
     private readonly keybindings: Keybindings,
     private readonly close: (result?: ServerManagerResult) => void,
     private readonly requestRender: () => void,
+    private readonly terminalRows: () => number,
   ) {}
 
   get focused(): boolean {
@@ -359,7 +382,9 @@ class ServerManagerModal implements Component, Focusable {
 
   set focused(value: boolean) {
     this._focused = value;
-    this.search.focused = value && !["stats", "settings"].includes(this.activeTab);
+    this.search.focused =
+      value && !this.profileView && !["stats", "settings"].includes(this.activeTab);
+    this.profileName.focused = value && this.profileView?.kind === "save";
   }
 
   render(width: number): string[] {
@@ -370,22 +395,41 @@ class ServerManagerModal implements Component, Focusable {
     });
     content.addChild({
       render: (bodyWidth: number) => {
-        if (this.activeTab === "servers") return this.renderServers(bodyWidth);
-        if (this.activeTab === "chains") return this.renderChains(bodyWidth);
-        if (this.activeTab === "stats") return this.renderStats(bodyWidth);
-        return this.renderSettings(bodyWidth);
+        const lines =
+          this.activeTab === "servers"
+            ? this.renderServers(bodyWidth)
+            : this.activeTab === "chains"
+              ? this.renderChains(bodyWidth)
+              : this.activeTab === "stats"
+                ? this.renderStats(bodyWidth)
+                : this.renderSettings(bodyWidth);
+        const height = this.bodyRows();
+        return Array.from({ length: height }, (_, index) => lines[index] ?? "");
       },
       invalidate: () => this.search.invalidate(),
     });
-    content.addChild(new Text(this.theme.fg("dim", this.footer()), 0, 0));
+    content.addChild({
+      render: (contentWidth: number) => [
+        truncateToWidth(this.theme.fg("dim", this.footer()), contentWidth),
+      ],
+      invalidate: () => {},
+    });
     return renderRoundedFrame(content, width, this.theme);
   }
 
   invalidate(): void {
     this.search.invalidate();
+    this.profileName.invalidate();
+    if (this.profileView?.kind === "select") this.profileView.list.invalidate();
   }
 
   handleInput(data: string): void {
+    if (this.profileBusy) return;
+    if (this.profileView) {
+      this.handleProfileInput(data);
+      this.requestRender();
+      return;
+    }
     if (data === "R" && this.activeTab !== "chains") {
       this.focusProblemReport();
       this.requestRender();
@@ -411,7 +455,7 @@ class ServerManagerModal implements Component, Focusable {
               ? "settings"
               : "servers";
       this.search.setValue("");
-      this.search.focused = this._focused && !["stats", "settings"].includes(this.activeTab);
+      this.focused = this._focused;
       this.requestRender();
       return;
     }
@@ -422,6 +466,22 @@ class ServerManagerModal implements Component, Focusable {
   }
 
   private handleServerInput(data: string): void {
+    if (["P", "N", "X"].includes(data)) {
+      if (
+        this.settingBusy ||
+        this.options.chains.some((chain) => chain.busy) ||
+        this.options.servers.some((server) => server.busy || server.tools.some((tool) => tool.busy))
+      )
+        return;
+      this.profileError = undefined;
+      if (data === "P") this.openProfilePicker();
+      else if (data === "N") this.openProfileCreation();
+      else if (this.options.settings.activeProfile !== null) {
+        this.profileView = { kind: "delete", name: this.options.settings.activeProfile };
+      }
+      this.focused = this._focused;
+      return;
+    }
     if (data === "D") {
       this.discoverSelected();
       return;
@@ -540,8 +600,17 @@ class ServerManagerModal implements Component, Focusable {
 
   private renderServers(width: number): string[] {
     const filterLabel = this.activePane === "servers" ? "Filter servers" : "Filter tools";
-    const lines = [this.theme.fg("dim", filterLabel), ...this.search.render(width), ""];
-    const splitHeight = Math.max(1, modalBodyRows() - lines.length);
+    const controls = this.renderProfileControls(width);
+    if (this.profileView?.kind === "select")
+      return [...controls, ...this.profileView.list.render(width)];
+    if (this.profileView?.kind === "save") return this.renderProfileCreation(width);
+    const lines = [
+      ...controls,
+      this.theme.fg("dim", filterLabel),
+      ...this.search.render(width),
+      "",
+    ];
+    const splitHeight = Math.max(1, this.bodyRows() - lines.length);
     const leftWidth = Math.min(36, Math.max(24, Math.floor(width * 0.32)));
     const rightWidth = Math.max(1, width - leftWidth - 3);
     const left = this.renderServerList(leftWidth, splitHeight);
@@ -659,7 +728,7 @@ class ServerManagerModal implements Component, Focusable {
 
   private renderChains(width: number): string[] {
     const lines = [this.theme.fg("dim", "Filter chains"), ...this.search.render(width), ""];
-    const splitHeight = Math.max(1, modalBodyRows() - lines.length);
+    const splitHeight = Math.max(1, this.bodyRows() - lines.length);
     const leftWidth = Math.min(38, Math.max(26, Math.floor(width * 0.36)));
     const rightWidth = Math.max(1, width - leftWidth - 3);
     const chains = this.filteredChains();
@@ -796,11 +865,11 @@ class ServerManagerModal implements Component, Focusable {
         ),
       );
     }
-    return lines.slice(0, Math.max(1, modalBodyRows()));
+    return lines.slice(0, this.bodyRows());
   }
 
   private renderSettings(width: number): string[] {
-    const splitHeight = Math.max(1, modalBodyRows());
+    const splitHeight = this.bodyRows();
     const leftWidth = Math.min(38, Math.max(28, Math.floor(width * 0.42)));
     const rightWidth = Math.max(1, width - leftWidth - 3);
     const left = [this.theme.fg("dim", this.theme.bold("SETTINGS"))];
@@ -866,8 +935,201 @@ class ServerManagerModal implements Component, Focusable {
     return lines;
   }
 
+  private renderProfileControls(width: number): string[] {
+    const actions =
+      this.profileView?.kind === "select"
+        ? this.profileKey("N", "Create profile")
+        : `${this.profileKey("P", "Choose profile")}   ${this.profileKey("N", "Create")}`;
+    const name = truncateToWidth(
+      this.options.settings.activeProfile ?? "Base configuration",
+      Math.max(1, width - visibleWidth(actions) - 12),
+      "…",
+    );
+    const current = `${this.theme.fg("dim", "Profile: ")}${this.theme.fg("success", this.theme.bold(name))}`;
+    const gap = " ".repeat(Math.max(2, width - visibleWidth(current) - visibleWidth(actions)));
+    const title = `${current}${gap}${actions}`;
+    if (this.profileBusy) return [title, this.theme.fg("warning", "Applying profile…")];
+    if (this.profileView?.kind === "delete") {
+      return [
+        this.theme.fg("warning", `Delete profile ${this.profileView.name}? [y/N]`),
+        this.theme.fg(
+          "dim",
+          this.profileView.name === this.options.settings.activeProfile
+            ? "The base configuration will be restored."
+            : "Only this saved profile will be removed.",
+        ),
+      ];
+    }
+    return [
+      title,
+      this.profileError
+        ? this.theme.fg("error", this.profileError)
+        : this.theme.fg("dim", "─".repeat(width)),
+    ];
+  }
+
+  private profileKey(key: string, label: string): string {
+    return `${this.theme.fg("accent", this.theme.bold(`[${key}]`))} ${this.theme.fg("muted", label)}`;
+  }
+
+  private openProfileCreation(): void {
+    this.profileError = undefined;
+    this.profileName.setValue("");
+    this.profileView = { kind: "save" };
+    this.focused = this._focused;
+  }
+
+  private renderProfileCreation(width: number): string[] {
+    const servers = this.options.servers.filter((server) => server.enabled);
+    return [
+      this.theme.fg("accent", this.theme.bold("Create profile")),
+      this.theme.fg(
+        "muted",
+        `Copy the current setup from ${this.options.settings.activeProfile ?? "Base configuration"}.`,
+      ),
+      "",
+      this.theme.fg("accent", "New profile name"),
+      ...this.profileName.render(width),
+      this.profileBusy
+        ? this.theme.fg("warning", "Applying profile…")
+        : this.profileError
+          ? this.theme.fg("error", this.profileError)
+          : "",
+      this.theme.fg(
+        "dim",
+        `${servers.length} ${servers.length === 1 ? "server" : "servers"} included. Tool selections are preserved.`,
+      ),
+      this.theme.fg(
+        "muted",
+        truncateToWidth(
+          servers.map((server) => server.name).join(", ") || "No servers enabled",
+          width,
+        ),
+      ),
+    ];
+  }
+
+  private openProfilePicker(): void {
+    const names = ["", ...Object.keys(this.options.settings.profiles).sort()];
+    const list = new SelectList(
+      [
+        ...names.map((name) => {
+          const profile = this.options.settings.profiles[name];
+          const summary = profile
+            ? `${profile.servers.length} servers, ${Object.values(profile.disabledTools).reduce((total, tools) => total + tools.length, 0)} excluded tools`
+            : "Use the base server and tool settings";
+          const active = name === (this.options.settings.activeProfile ?? "");
+          return {
+            value: name,
+            label: `${active ? "✓" : " "} ${name || "Base configuration"}`,
+            description: active ? `Active — ${summary}` : summary,
+          };
+        }),
+        {
+          value: CREATE_PROFILE_VALUE,
+          label: "+ Create profile",
+          description: "Copy the current setup",
+        },
+      ],
+      Math.max(1, this.bodyRows() - 3),
+      {
+        selectedPrefix: (text) => this.theme.fg("accent", text),
+        selectedText: (text) =>
+          this.theme.bg(
+            "selectedBg",
+            this.theme.fg(text.startsWith("→ ✓") ? "success" : "accent", this.theme.bold(text)),
+          ),
+        description: (text) =>
+          this.theme.fg(text.trimStart().startsWith("Active") ? "success" : "muted", text),
+        scrollInfo: (text) => this.theme.fg("dim", text),
+        noMatch: (text) => this.theme.fg("warning", text),
+      },
+    );
+    list.setSelectedIndex(names.indexOf(this.options.settings.activeProfile ?? ""));
+    list.onSelect = (item) => {
+      if (item.value === CREATE_PROFILE_VALUE) this.openProfileCreation();
+      else this.changeProfile({ action: "activate", name: item.value || null });
+    };
+    list.onCancel = () => this.endProfileEdit();
+    this.profileView = { kind: "select", list };
+  }
+
+  private handleProfileInput(data: string): void {
+    const view = this.profileView;
+    if (!view) return;
+    if (this.keybindings.matches(data, "tui.select.cancel") || matchesKey(data, Key.escape)) {
+      this.endProfileEdit();
+    } else if (view.kind === "select") {
+      if (data === "N") {
+        this.openProfileCreation();
+        return;
+      }
+      const selected = view.list.getSelectedItem();
+      if (data === "X" && selected?.value && selected.value !== CREATE_PROFILE_VALUE)
+        this.profileView = { kind: "delete", name: selected.value };
+      else view.list.handleInput(data);
+    } else if (view.kind === "save") {
+      if (matchesKey(data, Key.enter)) {
+        const name = this.profileName.getValue().trim();
+        if (name) this.changeProfile({ action: "save", name });
+        else this.profileError = "Enter a profile name.";
+      } else this.profileName.handleInput(data);
+    } else if (data === "y" || data === "Y") {
+      this.changeProfile({ action: "delete", name: view.name });
+    } else if (data === "n" || data === "N") {
+      this.endProfileEdit();
+    }
+  }
+
+  private endProfileEdit(): void {
+    this.profileView = undefined;
+    this.profileName.setValue("");
+    this.focused = this._focused;
+  }
+
+  private changeProfile(action: ProfileAction): void {
+    this.profileBusy = true;
+    this.profileError = undefined;
+    this.requestRender();
+    void this.options
+      .onChangeProfile(action)
+      .then(({ settings, servers }) => {
+        this.options.settings = settings;
+        this.options.servers.splice(0, this.options.servers.length, ...servers);
+        this.search.setValue("");
+        this.resetSelections();
+        this.endProfileEdit();
+      })
+      .catch((error: unknown) => {
+        this.profileError = summarizeError(error);
+      })
+      .finally(() => {
+        this.profileBusy = false;
+        this.requestRender();
+      });
+  }
+
+  private bodyRows(): number {
+    return modalBodyRows(this.terminalRows());
+  }
+
   private footer(): string {
-    const report = ` · ${PROBLEM_REPORT_SHORTCUT}`;
+    const report = `   ${PROBLEM_REPORT_SHORTCUT}`;
+    if (this.profileView?.kind === "select") {
+      const creating = this.profileView.list.getSelectedItem()?.value === CREATE_PROFILE_VALUE;
+      return [
+        this.profileKey("↑↓", "Move"),
+        this.profileKey("enter", creating ? "Create" : "Use profile"),
+        ...(!creating && this.profileView.list.getSelectedItem()?.value
+          ? [this.profileKey("X", "Delete")]
+          : []),
+        this.profileKey("esc", "Back"),
+      ].join("   ");
+    }
+    if (this.profileView?.kind === "save")
+      return `${this.profileKey("enter", "Create profile")}   ${this.profileKey("esc", "Cancel")}`;
+    if (this.profileView?.kind === "delete")
+      return `${this.profileKey("y", "Delete profile")}   ${this.profileKey("esc", "Cancel")}`;
     if (this.activeTab === "settings") {
       return `tab servers · ↑/↓ navigate · ←/→ change · enter select · esc close${report}`;
     }
@@ -877,7 +1139,7 @@ class ServerManagerModal implements Component, Focusable {
     if (this.activeTab === "stats") {
       return `tab settings · bounded local rollups · esc close${report}`;
     }
-    return `tab chains · ←/→ pane · ↑/↓ navigate · space toggle · D discover · esc close${report}`;
+    return `tab chains   ←/→ pane   ↑/↓   space toggle   esc close${report}`;
   }
 
   private moveSelection(direction: -1 | 1): void {
@@ -906,7 +1168,10 @@ class ServerManagerModal implements Component, Focusable {
     delete server.error;
     void this.options
       .onSetServerEnabled(server, enabled)
-      .then((updated) => applyServerUpdate(server, updated))
+      .then((updated) => {
+        applyServerUpdate(server, updated);
+        this.updateProfileServer(updated);
+      })
       .catch((error: unknown) => {
         server.error = summarizeError(error);
       })
@@ -924,7 +1189,10 @@ class ServerManagerModal implements Component, Focusable {
     this.requestRender();
     void this.options
       .onDiscover(server)
-      .then((updated) => applyServerUpdate(server, updated))
+      .then((updated) => {
+        applyServerUpdate(server, updated);
+        this.updateProfileServer(updated);
+      })
       .catch((error: unknown) => {
         server.error = summarizeError(error);
       })
@@ -943,7 +1211,18 @@ class ServerManagerModal implements Component, Focusable {
     tool.busy = true;
     void this.options
       .onSetToolEnabled(server, tool, !tool.enabled)
-      .then((updated) => applyServerUpdate(server, updated))
+      .then((updated) => {
+        const updatedTool = updated.tools.find((candidate) => candidate.name === tool.name);
+        if (updatedTool) {
+          this.options.settings = setToolEnabled(
+            this.options.settings,
+            server.name,
+            tool.name,
+            updatedTool.enabled,
+          );
+        }
+        applyServerUpdate(server, updated);
+      })
       .catch((error: unknown) => {
         server.error = summarizeError(error);
       })
@@ -951,6 +1230,16 @@ class ServerManagerModal implements Component, Focusable {
         tool.busy = false;
         this.requestRender();
       });
+  }
+
+  private updateProfileServer(server: ServerModalState): void {
+    if (this.options.settings.activeProfile !== null) {
+      this.options.settings = setProfileServerEnabled(
+        this.options.settings,
+        server.name,
+        server.enabled,
+      );
+    }
   }
 
   private toggleSelectedChain(): void {
@@ -1329,8 +1618,7 @@ function wrapPlainText(text: string, width: number): string[] {
   return lines;
 }
 
-function modalBodyRows(): number {
-  const reportedRows = process.stdout.rows;
+function modalBodyRows(reportedRows: number): number {
   const terminalRows = typeof reportedRows === "number" && reportedRows > 0 ? reportedRows : 24;
   const overlayRows = Math.floor(terminalRows * 0.85);
   // Frame, Box padding, header, and footer consume six rows; keep one row as

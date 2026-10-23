@@ -1,6 +1,11 @@
 import { existsSync } from "node:fs";
 import { readJsonObject, requireJsonObject, writeJsonObjectAtomically } from "./json-file.js";
 
+export interface CodeMcpProfile {
+  servers: string[];
+  disabledTools: Record<string, string[]>;
+}
+
 export interface CodeMcpSettings {
   jevEnabled: boolean;
   backgroundWarmup: boolean;
@@ -11,9 +16,14 @@ export interface CodeMcpSettings {
   resultLimitKiB: number;
   outputLimitKiB: number;
   disabledTools: Record<string, string[]>;
+  profiles: Record<string, CodeMcpProfile>;
+  activeProfile: string | null;
 }
 
-export type EditableSettingKey = Exclude<keyof CodeMcpSettings, "disabledTools">;
+export type EditableSettingKey = Exclude<
+  keyof CodeMcpSettings,
+  "disabledTools" | "profiles" | "activeProfile"
+>;
 export type EditableSettingValue = boolean | number;
 
 export const DEFAULT_CODEMCP_SETTINGS: Readonly<CodeMcpSettings> = {
@@ -26,6 +36,8 @@ export const DEFAULT_CODEMCP_SETTINGS: Readonly<CodeMcpSettings> = {
   resultLimitKiB: 16,
   outputLimitKiB: 50,
   disabledTools: {},
+  profiles: {},
+  activeProfile: null,
 };
 
 const ALLOWED_KEYS = new Set([
@@ -39,6 +51,8 @@ const ALLOWED_KEYS = new Set([
   "resultLimitKiB",
   "outputLimitKiB",
   "disabledTools",
+  "profiles",
+  "activeProfile",
 ]);
 
 export function loadCodeMcpSettings(path: string): CodeMcpSettings {
@@ -58,7 +72,18 @@ export function loadCodeMcpSettings(path: string): CodeMcpSettings {
     throw new Error(`Unknown CodeMCP settings: ${unknown.join(", ")}`);
   }
 
+  const profiles = profileSetting(migrated.profiles);
+  const activeProfile = migrated.activeProfile ?? null;
+  if (activeProfile !== null) {
+    requireProfileName(activeProfile);
+    if (!Object.hasOwn(profiles, activeProfile)) {
+      throw new Error(`Unknown CodeMCP profile: ${activeProfile}`);
+    }
+  }
+
   return {
+    profiles,
+    activeProfile,
     jevEnabled: booleanSetting(migrated, "jevEnabled"),
     backgroundWarmup: booleanSetting(migrated, "backgroundWarmup"),
     cacheTtlHours: integerSetting(migrated, "cacheTtlHours", 0, 720),
@@ -83,6 +108,8 @@ export function saveCodeMcpSettings(path: string, settings: CodeMcpSettings): vo
     resultLimitKiB: settings.resultLimitKiB,
     outputLimitKiB: settings.outputLimitKiB,
     disabledTools: settings.disabledTools,
+    profiles: settings.profiles,
+    activeProfile: settings.activeProfile,
   });
 }
 
@@ -105,17 +132,128 @@ export function setToolEnabled(
   tool: string,
   enabled: boolean,
 ): CodeMcpSettings {
-  const disabled = new Set(settings.disabledTools[server] ?? []);
+  const policy = activeToolPolicy(settings);
+  const disabled = new Set(policy[server] ?? []);
   if (enabled) disabled.delete(tool);
   else disabled.add(tool);
-  const disabledTools = { ...settings.disabledTools };
+  const disabledTools = { ...policy };
   if (disabled.size === 0) delete disabledTools[server];
   else disabledTools[server] = [...disabled].sort();
+  if (settings.activeProfile !== null) {
+    const profile = settings.profiles[settings.activeProfile];
+    if (!profile) throw new Error(`Unknown CodeMCP profile: ${settings.activeProfile}`);
+    return {
+      ...settings,
+      profiles: { ...settings.profiles, [settings.activeProfile]: { ...profile, disabledTools } },
+    };
+  }
   return { ...settings, disabledTools };
 }
 
+export function activeToolPolicy(settings: CodeMcpSettings): Record<string, string[]> {
+  if (settings.activeProfile === null) return settings.disabledTools;
+  const profile = settings.profiles[settings.activeProfile];
+  if (!profile) throw new Error(`Unknown CodeMCP profile: ${settings.activeProfile}`);
+  return profile.disabledTools;
+}
+
+export function saveProfile(
+  settings: CodeMcpSettings,
+  name: string,
+  servers: Array<{ name: string; enabled: boolean }>,
+): CodeMcpSettings {
+  requireProfileName(name);
+  if (Object.hasOwn(settings.profiles, name)) {
+    throw new Error(`CodeMCP profile already exists: ${name}`);
+  }
+  const profile: CodeMcpProfile = {
+    servers: [
+      ...new Set(servers.filter((server) => server.enabled).map((server) => server.name)),
+    ].sort(),
+    disabledTools: disabledToolSetting(activeToolPolicy(settings)),
+  };
+  return { ...settings, profiles: { ...settings.profiles, [name]: profile }, activeProfile: name };
+}
+
+export function activateProfile(settings: CodeMcpSettings, name: string | null): CodeMcpSettings {
+  if (name !== null && !Object.hasOwn(settings.profiles, name)) {
+    throw new Error(`Unknown CodeMCP profile: ${name}`);
+  }
+  return { ...settings, activeProfile: name };
+}
+
+export function deleteProfile(settings: CodeMcpSettings, name: string): CodeMcpSettings {
+  if (!Object.hasOwn(settings.profiles, name)) throw new Error(`Unknown CodeMCP profile: ${name}`);
+  const profiles = { ...settings.profiles };
+  delete profiles[name];
+  return {
+    ...settings,
+    profiles,
+    activeProfile: settings.activeProfile === name ? null : settings.activeProfile,
+  };
+}
+
+export function setProfileServerEnabled(
+  settings: CodeMcpSettings,
+  server: string,
+  enabled: boolean,
+): CodeMcpSettings {
+  const name = settings.activeProfile;
+  if (name === null) throw new Error("No active CodeMCP profile");
+  const profile = settings.profiles[name];
+  if (!profile) throw new Error(`Unknown CodeMCP profile: ${name}`);
+  const servers = new Set(profile.servers);
+  if (enabled) servers.add(server);
+  else servers.delete(server);
+  return {
+    ...settings,
+    profiles: { ...settings.profiles, [name]: { ...profile, servers: [...servers].sort() } },
+  };
+}
+
 function cloneDefaults(): CodeMcpSettings {
-  return { ...DEFAULT_CODEMCP_SETTINGS, disabledTools: {} };
+  return { ...DEFAULT_CODEMCP_SETTINGS, disabledTools: {}, profiles: {} };
+}
+
+function requireProfileName(value: unknown): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    !value.trim() ||
+    value !== value.trim() ||
+    value.length > 80 ||
+    Array.from(value).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+  ) {
+    throw new TypeError(
+      "Profile names must be 1–80 characters without surrounding whitespace or control characters",
+    );
+  }
+}
+
+function profileSetting(value: unknown): Record<string, CodeMcpProfile> {
+  if (value === undefined) return {};
+  const root = requireJsonObject(value, "profiles");
+  return Object.fromEntries(
+    Object.entries(root).map(([name, value]) => {
+      requireProfileName(name);
+      const profile = requireJsonObject(value, `profiles.${name}`);
+      if (Object.keys(profile).some((key) => key !== "servers" && key !== "disabledTools")) {
+        throw new Error(`Unknown CodeMCP profile settings: ${name}`);
+      }
+      if (
+        !Array.isArray(profile.servers) ||
+        profile.servers.some((server) => typeof server !== "string" || !server)
+      ) {
+        throw new TypeError(`profiles.${name}.servers must be an array of server names`);
+      }
+      return [
+        name,
+        {
+          servers: [...new Set(profile.servers)].sort(),
+          disabledTools: disabledToolSetting(profile.disabledTools),
+        },
+      ];
+    }),
+  );
 }
 
 function migrateDiscoveryMode(root: Record<string, unknown>): Record<string, unknown> {

@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "disabledTools": {"alpha": ["get_number"]},
+  "activeProfile": "research",
+  "profiles": {
+    "research": {
+      "servers": ["alpha"],
+      "disabledTools": {"alpha": ["slow_number"]}
+    },
+    "writing": {
+      "servers": ["beta"],
+      "disabledTools": {"beta": ["save_number"]}
+    },
+    "offline": {"servers": []}
+  }
+}

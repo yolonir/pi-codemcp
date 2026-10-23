@@ -15,15 +15,21 @@ import { CodeMcpLifecycle } from "../src/lifecycle.js";
 import type { SidecarClientOptions } from "../src/mcp-client.js";
 import {
   chainStatesFromViews,
+  type ProfileAction,
+  type ProfileManagerState,
   type ServerModalState,
   serverStatesFromStatus,
   showServerManagerModal,
   statsStateFromSnapshot,
 } from "../src/modal.js";
 import {
+  activateProfile,
   type CodeMcpSettings,
+  deleteProfile,
   saveCodeMcpSettings,
+  saveProfile,
   setEditableSetting,
+  setProfileServerEnabled,
   setToolEnabled,
 } from "../src/settings.js";
 import { registerCodeMcpTools, registerJevRouteTool } from "../src/tools.js";
@@ -43,7 +49,7 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
     registerJevRouteTool(pi, () => jevRouter);
 
     pi.registerCommand("codemcp", {
-      description: "Manage CodeMCP servers, saved chains, tools, and settings",
+      description: "Manage CodeMCP servers, saved chains, tools, settings, and profiles",
       handler: async (_args, ctx) => {
         try {
           bindProjectChainScope(ctx, lifecycle, chains);
@@ -64,6 +70,7 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
             chains: chainStatesFromViews(savedChains),
             settings,
             stats: statsStateFromSnapshot(stats),
+            onChangeProfile: (action) => changeProfileFromManager(lifecycle, action),
             onSetServerEnabled: (server, enabled) =>
               setServerEnabledFromManager(lifecycle, server, enabled),
             onDiscover: (server) => discoverServerFromManager(lifecycle, server),
@@ -146,7 +153,7 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
 }
 
 export async function discoverServerFromManager(
-  lifecycle: Pick<CodeMcpLifecycle, "configPath" | "reload" | "request">,
+  lifecycle: Pick<CodeMcpLifecycle, "configPath" | "settingsPath" | "loadSettings" | "request">,
   server: ServerModalState,
 ): Promise<ServerModalState> {
   if (!server.enabled) return setServerEnabledFromManager(lifecycle, server, true);
@@ -157,16 +164,24 @@ export async function discoverServerFromManager(
 }
 
 export async function setServerEnabledFromManager(
-  lifecycle: Pick<CodeMcpLifecycle, "configPath" | "reload" | "request">,
+  lifecycle: Pick<CodeMcpLifecycle, "configPath" | "settingsPath" | "loadSettings" | "request">,
   previous: ServerModalState,
   enabled: boolean,
 ): Promise<ServerModalState> {
-  setMcpServerEnabled(lifecycle.configPath, previous.name, enabled);
-  await lifecycle.reload();
+  const settings = lifecycle.loadSettings();
+  if (settings.activeProfile === null) {
+    setMcpServerEnabled(lifecycle.configPath, previous.name, enabled);
+  } else {
+    saveCodeMcpSettings(
+      lifecycle.settingsPath,
+      setProfileServerEnabled(settings, previous.name, enabled),
+    );
+  }
+  const reloaded = await lifecycle.request("reload_settings", {});
   try {
     const status = enabled
       ? await lifecycle.request("discover", { server: previous.name })
-      : await lifecycle.request("status", {});
+      : reloaded;
     return requireServerStatus(status, previous.name);
   } catch (error) {
     try {
@@ -176,6 +191,31 @@ export async function setServerEnabledFromManager(
       throw error;
     }
   }
+}
+
+export async function changeProfileFromManager(
+  lifecycle: Pick<CodeMcpLifecycle, "settingsPath" | "loadSettings" | "request">,
+  action: ProfileAction,
+): Promise<ProfileManagerState> {
+  const settings = lifecycle.loadSettings();
+  if (action.action === "activate" && action.name === settings.activeProfile) {
+    return { settings, servers: serverStatesFromStatus(await lifecycle.request("status", {})) };
+  }
+  const updated =
+    action.action === "activate"
+      ? activateProfile(settings, action.name)
+      : action.action === "delete"
+        ? deleteProfile(settings, action.name)
+        : saveProfile(
+            settings,
+            action.name,
+            serverStatesFromStatus(await lifecycle.request("status", {})),
+          );
+  saveCodeMcpSettings(lifecycle.settingsPath, updated);
+  return {
+    settings: updated,
+    servers: serverStatesFromStatus(await lifecycle.request("reload_settings", {})),
+  };
 }
 
 export default createCodeMcpExtension();

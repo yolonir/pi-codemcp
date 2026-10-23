@@ -1,25 +1,39 @@
 import { expect, test } from "bun:test";
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
-import type { Component } from "@earendil-works/pi-tui";
+import { type Component, visibleWidth } from "@earendil-works/pi-tui";
 import {
   type ChainModalState,
+  type ProfileAction,
   type ServerManagerResult,
   type ServerModalState,
   serverStatesFromStatus,
   showServerManagerModal,
   statsStateFromSnapshot,
 } from "../../src/modal.js";
-import { DEFAULT_CODEMCP_SETTINGS } from "../../src/settings.js";
+import {
+  activateProfile,
+  DEFAULT_CODEMCP_SETTINGS,
+  deleteProfile,
+  saveProfile,
+} from "../../src/settings.js";
 
 type ModalFactory = (
-  tui: { requestRender(): void },
+  tui: { requestRender(): void; terminal: { rows: number } },
   theme: Theme,
   keybindings: { matches(data: string, id: string): boolean },
   done: (result?: ServerManagerResult) => void,
 ) => Component;
 
+const colors: Array<{ layer: string; color: string; text: string }> = [];
 const theme = {
-  fg: (_color: string, text: string) => text,
+  fg: (color: string, text: string) => {
+    colors.push({ layer: "fg", color, text });
+    return text;
+  },
+  bg: (color: string, text: string) => {
+    colors.push({ layer: "bg", color, text });
+    return text;
+  },
   bold: (text: string) => text,
 } as unknown as Theme;
 
@@ -33,6 +47,194 @@ function renderWithRows(component: Component | undefined, width: number, rows: n
     else Reflect.deleteProperty(process.stdout, "rows");
   }
 }
+
+test("profiles stay in the server tab and the frame stays fixed across tabs and edits", async () => {
+  let component: Component | undefined;
+  let closed = 0;
+  let factories = 0;
+  const terminal = { rows: 60 };
+  const actions: ProfileAction[] = [];
+  let settings = saveProfile({ ...DEFAULT_CODEMCP_SETTINGS }, "existing", [
+    { name: "alpha", enabled: true },
+  ]);
+  settings = activateProfile(settings, null);
+  const server: ServerModalState = {
+    name: "alpha",
+    transport: "stdio",
+    enabled: true,
+    connected: false,
+    discovered: false,
+    toolCount: 0,
+    totalToolCount: 0,
+    tools: [],
+  };
+  const ctx = {
+    mode: "tui",
+    ui: {
+      async custom(factory: ModalFactory) {
+        factories += 1;
+        component = factory(
+          { requestRender() {}, terminal },
+          theme,
+          { matches: () => false },
+          () => {
+            closed += 1;
+          },
+        );
+      },
+    },
+  } as unknown as ExtensionCommandContext;
+  await showServerManagerModal(ctx, {
+    servers: [server],
+    chains: [],
+    settings,
+    stats: statsStateFromSnapshot({}),
+    async onChangeProfile(action) {
+      actions.push(action);
+      settings =
+        action.action === "activate"
+          ? activateProfile(settings, action.name)
+          : action.action === "delete"
+            ? deleteProfile(settings, action.name)
+            : saveProfile(settings, action.name, [server]);
+      return { settings, servers: [{ ...server, enabled: true }] };
+    },
+    async onSetServerEnabled() {
+      return server;
+    },
+    async onDiscover() {
+      return server;
+    },
+    async onSetToolEnabled() {
+      return server;
+    },
+    async onSetSetting() {
+      throw new Error("setting failed");
+    },
+    async onSetChainEnabled() {
+      return [];
+    },
+    async onRevalidateChain() {
+      return [];
+    },
+    async onDeleteChain() {
+      return [];
+    },
+  });
+  if (!component?.handleInput) throw new Error("Missing manager component");
+  const manager = component;
+  const input = (data: string) => manager.handleInput?.(data);
+  for (const [width, rows] of [
+    [72, 24],
+    [100, 60],
+    [80, 32],
+  ] as const) {
+    terminal.rows = rows;
+    const baseline = manager.render(width);
+    const checkFrame = () => {
+      const lines = manager.render(width);
+      expect(lines).toHaveLength(baseline.length);
+      expect(lines[0]).toBe(baseline[0]);
+      expect(lines.at(-1)).toBe(baseline.at(-1));
+      expect(lines.every((line) => visibleWidth(line) === width)).toBe(true);
+      return lines.join("\n");
+    };
+    expect(baseline.length).toBeLessThanOrEqual(Math.floor(rows * 0.85));
+    // Changing stdout metadata must not change the TUI terminal's dimensions.
+    expect(renderWithRows(manager, width, rows + 20)).toHaveLength(baseline.length);
+    input("P");
+    colors.length = 0;
+    const picker = checkFrame();
+    expect(
+      colors.some(
+        (entry) =>
+          entry.layer === "bg" &&
+          entry.color === "selectedBg" &&
+          entry.text.includes("Base configuration"),
+      ),
+    ).toBe(true);
+    expect(
+      colors.some(
+        (entry) => entry.color === "success" && entry.text.includes("✓ Base configuration"),
+      ),
+    ).toBe(true);
+    expect(picker).toContain("existing");
+    expect(picker).toContain("+ Create profile");
+    expect(picker).toContain("✓ Base configuration");
+    expect(picker).not.toContain("·");
+    expect(picker).not.toContain("CHOOSE A PROFILE");
+    input("\u001b");
+    for (let tab = 0; tab < 3; tab += 1) {
+      input("\t");
+      checkFrame();
+    }
+    input("R");
+    for (let setting = 0; setting < 8; setting += 1) input("\u001b[A");
+    for (let setting = 0; setting < 8; setting += 1) {
+      input("\u001b[C");
+      checkFrame();
+      await Bun.sleep(0);
+      const failed = checkFrame();
+      if (rows > 24) expect(failed).toContain("Error: setting failed");
+      input("\u001b[B");
+      checkFrame();
+    }
+    input("\t");
+    expect(checkFrame()).toContain("[Servers]");
+    input("N");
+    const creation = checkFrame();
+    expect(creation).toContain("profile name");
+    expect(creation).toContain("1 server included");
+    expect(creation).not.toContain("·");
+    input("\r");
+    expect(checkFrame()).toContain("Enter a profile name.");
+    input("\u001b");
+  }
+  terminal.rows = 60;
+  input("P");
+  input("\u001b[B");
+  input("\r");
+  expect(manager.render(100).join("\n")).toContain("Applying profile");
+  await Bun.sleep(0);
+  expect(manager.render(100).join("\n")).toContain("Profile: existing");
+  expect(manager.render(100).join("\n")).toContain("alpha");
+  input("N");
+  input("existing");
+  input("\r");
+  await Bun.sleep(0);
+  expect(manager.render(100).join("\n")).toContain("already exists");
+  input("\u001b");
+  input("P");
+  input("\u001b[B");
+  const creating = manager.render(100).join("\n");
+  expect(creating).toContain("+ Create profile");
+  expect(creating).not.toContain("[X] Delete");
+  input("X");
+  expect(manager.render(100).join("\n")).not.toContain("Delete profile");
+  input("\r");
+  expect(manager.render(100).join("\n")).toContain("New profile name");
+  input("work R");
+  input("\r");
+  await Bun.sleep(0);
+  expect(manager.render(100).join("\n")).toContain("Profile: work R");
+  input("X");
+  expect(manager.render(100).join("\n")).toContain("base configuration will be restored");
+  input("n");
+  expect(actions.at(-1)?.action).toBe("save");
+  input("X");
+  input("y");
+  await Bun.sleep(0);
+  expect(manager.render(100).join("\n")).toContain("Profile: Base configuration");
+  expect(settings.profiles).not.toHaveProperty("work R");
+  expect(actions).toEqual([
+    { action: "activate", name: "existing" },
+    { action: "save", name: "existing" },
+    { action: "save", name: "work R" },
+    { action: "delete", name: "work R" },
+  ]);
+  expect(factories).toBe(1);
+  expect(closed).toBe(0);
+});
 
 test("server status parser preserves server and tool policy state", () => {
   expect(
@@ -227,10 +429,22 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
       notify() {},
       async custom(factory: ModalFactory, options: Record<string, unknown>) {
         overlayOptions = options;
-        component = factory({ requestRender() {} }, theme, { matches: () => false }, (result) => {
-          closed += 1;
-          modalResult = result;
-        });
+        component = factory(
+          {
+            requestRender() {},
+            terminal: {
+              get rows() {
+                return process.stdout.rows ?? 24;
+              },
+            },
+          },
+          theme,
+          { matches: () => false },
+          (result) => {
+            closed += 1;
+            modalResult = result;
+          },
+        );
       },
     },
   } as unknown as ExtensionCommandContext;
@@ -263,6 +477,9 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
       servers: { grafana: { output_bytes: 500 } },
       cache: { hits: 3, misses: 1 },
     }),
+    async onChangeProfile() {
+      return { settings: { ...DEFAULT_CODEMCP_SETTINGS }, servers };
+    },
     async onSetServerEnabled(server, enabled) {
       serverToggles.push({ name: server.name, enabled });
       return { ...server, enabled };
@@ -338,6 +555,11 @@ test("server manager renders split tabs, stats, discovers, and toggles", async (
   expect(problemReportLines).toContain("Well, that sucks.");
   for (let index = 0; index < 7; index += 1) component?.handleInput?.("\u001b[A");
   component?.handleInput?.("\t");
+  const profileLines = renderWithRows(component, 90, 60).join("\n");
+  expect(profileLines).toContain("[Servers]");
+  expect(profileLines).toContain("Profile: Base configuration");
+  expect(profileLines).not.toContain("[Profiles]");
+  expect(closed).toBe(0);
 
   component?.handleInput?.("d");
   await Bun.sleep(0);
