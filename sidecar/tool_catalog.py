@@ -362,16 +362,10 @@ class ToolCatalog(BaseModel):
             )
             fuzzy_score = fuzz.token_set_ratio(normalized_query, spec.search_blob) / 100
             server_match = bool(set(query_tokens) & set(_search_tokens(spec.server)))
-            score = (
-                100.0
-                if exact
-                else min(
-                    99.0,
-                    bm25 * 12 + coverage * 45 + fuzzy_score * 20 + (20 if server_match else 0),
-                )
-            )
-            if score < SEARCH_SCORE_CUTOFF:
+            raw_score = bm25 * 12 + coverage * 45 + fuzzy_score * 20 + (20 if server_match else 0)
+            if not exact and raw_score < SEARCH_SCORE_CUTOFF:
                 continue
+            score = 100.0 if exact else 99.0 * math.tanh(raw_score / 99.0)
             matched_fields = [
                 field
                 for field, value in spec.search_fields.items()
