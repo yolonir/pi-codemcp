@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.0.0](https://github.com/yolonir/pi-codemcp/compare/v1.5.2...v2.0.0) (2026-10-24)
+
+
+### Features
+
+* add MCP configuration profiles ([#65](https://github.com/yolonir/pi-codemcp/issues/65)) ([0fab9ff](https://github.com/yolonir/pi-codemcp/commit/0fab9ff879f4c77bc5c8d8af7a2defe9e544a3c1))
+* add MCP servers from the CodeMCP manager ([59046d8](https://github.com/yolonir/pi-codemcp/commit/59046d8a318039a010b61ec1882ae267551406e8)), closes [#63](https://github.com/yolonir/pi-codemcp/issues/63)
+* modernize dependencies and native Monty execution ([#69](https://github.com/yolonir/pi-codemcp/issues/69)) ([301ac5e](https://github.com/yolonir/pi-codemcp/commit/301ac5ed2b2064f2ca02a1083229c992abc7d9db))
+
+
+### Bug Fixes
+
+* preserve tool relevance in large catalog search ([#68](https://github.com/yolonir/pi-codemcp/issues/68)) ([90c42bc](https://github.com/yolonir/pi-codemcp/commit/90c42bc4ec7e47b7fab3ee68cf14c18028732307))
+* refresh in-extension changelog for 2.0.0 ([7a476cd](https://github.com/yolonir/pi-codemcp/commit/7a476cd90e324f479884608c9822c10c6a29d081))
+
 ## [1.5.2](https://github.com/yolonir/pi-codemcp/compare/v1.5.1...v1.5.2) (2026-09-18)
 
 
