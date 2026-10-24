@@ -56,8 +56,10 @@ describe("Pi extension registration", () => {
       showChangelogOnce(ctx, path);
 
       expect(notifications).toHaveLength(1);
-      expect(notifications[0]).toContain("optional Jev routing");
-      expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ lastSeen: "jev-routing-v1" });
+      expect(notifications[0]).toContain("Howdy coders! Big pi-codemcp updates:");
+      expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+        lastSeen: "profiles-native-python-v1",
+      });
     } finally {
       await rm(temporary, { recursive: true, force: true });
     }
