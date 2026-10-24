@@ -261,9 +261,14 @@ export async function changeProfileFromManager(
 
 export default createCodeMcpExtension();
 
-const CHANGELOG_ID = "jev-routing-v1";
+const CHANGELOG_ID = "profiles-native-python-v1";
 const CHANGELOG_MESSAGE =
-  "pi-codemcp update: optional Jev routing is now available! Enable Jev in /codemcp → Settings to let Jev select and compose MCP calls, it's pretty cool";
+  "pi-codemcp update:\n" +
+  "- Save and switch server/tool profiles without restarting the sidecar.\n" +
+  "- Add MCP servers from a catalog or pasted config in /codemcp (A).\n" +
+  "- Better tool search in large catalogs.\n" +
+  "- Python workflows now support Counter, itertools, base64, dataclasses and native SDK aliases.\n" +
+  "- Reuse sandbox workers while keeping each execution isolated.";
 
 export function showChangelogOnce(
   ctx: Pick<ExtensionCommandContext, "mode" | "ui">,
