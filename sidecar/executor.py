@@ -495,7 +495,10 @@ class MontyExecutor:
         except pydantic_monty.MontyRuntimeError as error:
             context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
             return self._failure(context, "preflight", error.display("type-msg").strip())
-        except (pydantic_monty.MontyCrashedError, RuntimeError) as error:
+        except pydantic_monty.MontyCrashedError as error:
+            context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
+            return self._failure(context, "timeout" if error.timed_out else "preflight", str(error))
+        except RuntimeError as error:
             context.metrics.typecheck_ms += _elapsed_ms(typecheck_started)
             return self._failure(
                 context,

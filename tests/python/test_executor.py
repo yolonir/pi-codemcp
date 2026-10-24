@@ -797,16 +797,36 @@ async def test_narrowing_helpers_reject_wrong_runtime_shape(
 
 
 @pytest.mark.asyncio
+async def test_preflight_worker_deadline_is_reported_as_timeout() -> None:
+    executor = MontyExecutor(
+        catalog(), settings=ExecutionSettings(timeout_seconds=0.000001)
+    )
+
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        raise AssertionError("preflight must not call MCP")
+
+    response = await executor.execute("return 1", call)
+    assert response.ok is False
+    assert response.failure_stage == "timeout", response.error
+    assert response.failure is not None
+    assert response.failure.kind == "sandbox_timeout"
+    assert response.metrics.typecheck_ms > 0
+    assert response.metrics.runtime_ms == 0
+    assert response.calls_made == 0
+
+
+@pytest.mark.asyncio
 async def test_timeout_stops_infinite_sandbox_loop() -> None:
     executor = MontyExecutor(
         catalog(),
-        settings=ExecutionSettings(timeout_seconds=0.01),
+        settings=ExecutionSettings(timeout_seconds=1),
     )
 
     async def call(_: str, __: JsonObject) -> JsonValue:
         raise AssertionError("no tool call expected")
 
     response = await executor.execute("while True:\n    pass", call)
+    assert response.metrics.runtime_ms > 0
     assert response.ok is False
     assert response.failure_stage == "timeout"
     assert response.failure is not None
