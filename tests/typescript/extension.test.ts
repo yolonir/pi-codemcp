@@ -56,7 +56,7 @@ describe("Pi extension registration", () => {
       showChangelogOnce(ctx, path);
 
       expect(notifications).toHaveLength(1);
-      expect(notifications[0]).toContain("Save and switch server/tool profiles");
+      expect(notifications[0]).toContain("Howdy coders! Big pi-codemcp updates:");
       expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
         lastSeen: "profiles-native-python-v1",
       });

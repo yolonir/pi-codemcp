@@ -263,12 +263,13 @@ export default createCodeMcpExtension();
 
 const CHANGELOG_ID = "profiles-native-python-v1";
 const CHANGELOG_MESSAGE =
-  "pi-codemcp update:\n" +
-  "- Save and switch server/tool profiles without restarting the sidecar.\n" +
-  "- Add MCP servers from a catalog or pasted config in /codemcp (A).\n" +
-  "- Better tool search in large catalogs.\n" +
-  "- Python workflows now support Counter, itertools, base64, dataclasses and native SDK aliases.\n" +
-  "- Reuse sandbox workers while keeping each execution isolated.";
+  "Howdy coders! Big pi-codemcp updates:\n\n" +
+  "- I'd say the biggest update is Monty runtime upgrade, they now support lot of cool new useful stuff so now sandbox is less castrated. Expect more efficient code generation by agents, faster runtime, less errors. Can't stop winning\n" +
+  "- My favorite update is MCP profiles. I have like 20 servers, some of them are for work, some for personal stuff, I found myself constantly toggling specific lists on and off. Now you can create an MCP profile! Very useful, test it out.\n" +
+  "- @scytem requested functionality to add MCP servers directly within pi-codemcp from a catalog or pasted config in /codemcp (A). @scytem you can add MCP servers dedup and stars sorting yourself, you are very much welcome!\n" +
+  "- @fu5ha had issues with tool search in large catalogs. It was clanky, I agree. Now it's way simpler for agents to navigate large catalogs\n\n" +
+  "I am pretty happy with pi-codemcp extension. I believe pi went the wrong way by doing native MCP support, I found it pretty shitty. As always, if there is something that you are not happy with, hit me with an issue (/codemcp -> R). Cheers!\n" +
+  "@yolonir";
 
 export function showChangelogOnce(
   ctx: Pick<ExtensionCommandContext, "mode" | "ui">,
