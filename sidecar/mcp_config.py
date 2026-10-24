@@ -9,7 +9,7 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Any, override
 from urllib.parse import urlsplit
 
-import httpx
+import httpx2 as httpx
 from fastmcp.client.auth import OAuth
 from fastmcp.client.auth.oauth import TokenStorageAdapter
 from fastmcp.mcp_config import (
@@ -153,8 +153,6 @@ class PersistentCallbackOAuth(OAuth):
       refresh works in fresh sidecar processes (the SDK otherwise falls back to
       "<origin>/token", which 404s for servers like Outline and turns every
       access-token expiry into a forced interactive re-login);
-    - a refresh response without refresh_token keeps the previous one (RFC 6749
-      section 6 allows omission when the refresh token does not rotate);
     - a failed refresh adopts fresher tokens another sidecar process may have
       stored instead of dropping straight into the browser flow.
     """
@@ -225,9 +223,7 @@ class PersistentCallbackOAuth(OAuth):
     async def _handle_refresh_response(self, response: httpx.Response) -> bool:
         previous_tokens = self.context.current_tokens
         previous_access_token = previous_tokens.access_token if previous_tokens else None
-        previous_refresh_token = previous_tokens.refresh_token if previous_tokens else None
         if await super()._handle_refresh_response(response):
-            await self._restore_unrotated_refresh_token(previous_refresh_token)
             await self._persist_discovered_metadata()
             return True
         return await self._adopt_tokens_refreshed_elsewhere(previous_access_token)
@@ -295,15 +291,6 @@ class PersistentCallbackOAuth(OAuth):
         if resource is not None and resource != self._persisted_protected_resource:
             await storage.set_protected_resource_metadata(resource)
             self._persisted_protected_resource = resource
-
-    async def _restore_unrotated_refresh_token(self, previous_refresh_token: str | None) -> None:
-        tokens = self.context.current_tokens
-        if tokens is None or tokens.refresh_token is not None or previous_refresh_token is None:
-            return
-        # RFC 6749 section 6: the server may omit refresh_token when it does not
-        # rotate; the SDK overwrites the stored token set and would lose it.
-        tokens.refresh_token = previous_refresh_token
-        await self.context.storage.set_tokens(tokens)
 
     async def _adopt_tokens_refreshed_elsewhere(self, previous_access_token: str | None) -> bool:
         storage = self.token_storage_adapter

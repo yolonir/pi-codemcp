@@ -4,7 +4,8 @@ import json
 import time
 from typing import TYPE_CHECKING
 
-import httpx
+import httpx2 as httpx
+import pytest
 from key_value.aio.stores.filetree import FileTreeStore
 from key_value.aio.stores.filetree.store import (
     FileTreeV1CollectionSanitizationStrategy,
@@ -74,28 +75,41 @@ async def test_client_info_ignores_secret_expiry_ttl(tmp_path: Path) -> None:
     assert loaded.client_id == "client-id"
 
 
-async def test_refresh_response_keeps_unrotated_refresh_token(tmp_path: Path) -> None:
+@pytest.mark.parametrize("refresh_token", [None, "rotated-token"])
+async def test_sdk_refresh_preserves_or_rotates_tokens(
+    tmp_path: Path,
+    refresh_token: str | None,
+) -> None:
     oauth = _oauth(tmp_path)
     oauth.context.current_tokens = OAuthToken(
         access_token="old-access",
         refresh_token="keep-me",
+        scope="read write",
         expires_in=1,
     )
     oauth.context.client_info = _client_info()
 
-    response = _token_response(
-        200,
-        {"access_token": "new-access", "token_type": "Bearer", "expires_in": 3600},
-    )
+    payload: dict[str, object] = {
+        "access_token": "new-access",
+        "token_type": "Bearer",
+        "expires_in": 3600,
+    }
+    if refresh_token is not None:
+        payload["refresh_token"] = refresh_token
+    response = _token_response(200, payload)
     assert await oauth._handle_refresh_response(response) is True
 
     tokens: OAuthToken | None = oauth.context.current_tokens
     assert tokens is not None
     assert tokens.access_token == "new-access"
-    assert tokens.refresh_token == "keep-me"
-    stored = await oauth.context.storage.get_tokens()
+    assert tokens.refresh_token == (refresh_token or "keep-me")
+    assert tokens.scope == "read write"
+    restarted = _oauth(tmp_path)
+    await restarted._initialize()
+    stored: OAuthToken | None = restarted.context.current_tokens
     assert stored is not None
-    assert stored.refresh_token == "keep-me"
+    assert stored.refresh_token == tokens.refresh_token
+    assert stored.scope == "read write"
 
 
 async def test_failed_refresh_adopts_tokens_stored_by_another_process(

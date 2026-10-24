@@ -6,23 +6,15 @@ EXPECT_LIST_NAME = "expect_list"
 EXPECT_STRING_NAME = "expect_string"
 EXPECT_INTEGER_NAME = "expect_integer"
 
-SANDBOX_FUNCTION_EXTERNALS = {
-    INSPECT_JSON_NAME: "__codemcp_inspect_json",
-    EXPECT_OBJECT_NAME: "__codemcp_expect_object",
-    EXPECT_LIST_NAME: "__codemcp_expect_list",
-    EXPECT_STRING_NAME: "__codemcp_expect_string",
-    EXPECT_INTEGER_NAME: "__codemcp_expect_integer",
-}
-
 STUB_IMPORTS = "from typing import Literal, Mapping, Never, NotRequired, TypeAlias, TypedDict"
 JSON_TYPE_STUBS = (
     "JsonScalar: TypeAlias = bool | int | float | str | None",
     'JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]',
 )
 SANDBOX_CAPABILITY_STUB = (
-    "# Prebound SDK/helpers. Supported: import asyncio; asyncio.gather.\n"
-    "# Unavailable: collections.Counter, base64, gzip, asyncio.create_task,\n"
-    "# __import__. Use dict counts."
+    "# Supported: asyncio.gather, collections.Counter,\n"
+    "# itertools.batched, base64, dataclasses, and user-defined classes.\n"
+    "# Unavailable: yield, gzip, asyncio.create_task, __import__."
 )
 INSPECT_JSON_STUB = (
     "def inspect_json(value: JsonValue, *, "

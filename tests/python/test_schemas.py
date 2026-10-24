@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import httpx
+import httpx2 as httpx
 import pytest
 from fastmcp.client.auth import OAuth
 from fastmcp.mcp_config import RemoteMCPServer, StdioMCPServer
@@ -15,7 +15,7 @@ from sidecar.chains import ChainStore
 from sidecar.json_types import JsonObject
 from sidecar.mcp_config import normalize_mcp_config
 from sidecar.models import NormalizedServerInfo
-from sidecar.tool_catalog import ToolCatalog
+from sidecar.tool_catalog import ToolCatalog, referenced_calls
 
 
 def test_normalized_server_info_rejects_unknown_transport_and_fields() -> None:
@@ -47,8 +47,8 @@ def make_tool(
     return mcp_types.Tool(
         name=name,
         description=description,
-        inputSchema=input_schema,
-        outputSchema=output_schema,
+        input_schema=input_schema,
+        output_schema=output_schema,
     )
 
 
@@ -700,9 +700,9 @@ def test_catalog_progressively_discloses_and_paginates_inventory(
     assert "def expect_list" in prelude
     assert "def expect_string" in prelude
     assert "def expect_integer" in prelude
-    assert "Supported: import asyncio; asyncio.gather" in prelude
-    assert "collections.Counter, base64, gzip, asyncio.create_task" in prelude
-    assert "__import__. Use dict counts" in prelude
+    assert "Supported: asyncio.gather, collections.Counter" in prelude
+    assert "itertools.batched, base64, dataclasses" in prelude
+    assert "Unavailable: yield, gzip, asyncio.create_task, __import__" in prelude
     inspected_stub = inspected[0].stub
     assert inspected_stub is not None
     assert "JsonValue: TypeAlias" not in inspected_stub
@@ -809,13 +809,13 @@ def test_selective_type_stubs_remain_small_with_260_tools() -> None:
         mcp_types.Tool(
             name=f"tool_{index}",
             description=f"Return record {index}.",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {"id": {"type": "string"}},
                 "required": ["id"],
                 "additionalProperties": False,
             },
-            outputSchema={
+            output_schema={
                 "type": "object",
                 "properties": {"value": {"type": "integer"}},
                 "required": ["value"],
@@ -826,12 +826,44 @@ def test_selective_type_stubs_remain_small_with_260_tools() -> None:
     ]
     large_catalog = ToolCatalog.from_server_tools({"bulk": tools})
 
-    selected = large_catalog.type_stubs_for({"bulk_tool_137"})
+    calls = referenced_calls(
+        'api = bulk\nreturn await api.tool_137({"id": "one"})',
+        large_catalog.facade_calls,
+    )
+    assert calls == {"bulk_tool_137"}
+    selected = large_catalog.type_stubs_for(calls)
 
     assert "async def tool_137" in selected
     assert "async def tool_136" not in selected
     assert "async def tool_138" not in selected
     assert len(selected) < len(large_catalog.type_stubs) * 0.021
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("return await chains.leaf({})", {"leaf"}),
+        ("api = chains\nreturn await api.leaf({})", {"leaf"}),
+        ("api = chains\nother = api\nreturn await other.leaf({})", {"leaf"}),
+        ("api: object = chains\nreturn await api.leaf({})", {"leaf"}),
+        ("api = other = chains\nreturn await other.leaf({})", {"leaf"}),
+        ("api = chains\nreturn await api.parent({})", {"parent"}),
+        ("api = chains\nreturn 1", set()),
+        ("api = chains\nreturn consume(api)", {"leaf", "parent"}),
+        ("api = chains\napi = beta\nreturn await api.leaf({})", {"leaf", "beta_leaf"}),
+        (
+            "api = chains if condition else beta\nreturn consume(api)",
+            {"leaf", "parent", "beta_leaf"},
+        ),
+    ],
+)
+def test_namespace_alias_reference_tracking(code: str, expected: set[str]) -> None:
+    calls = {
+        ("chains", "leaf"): "leaf",
+        ("chains", "parent"): "parent",
+        ("beta", "leaf"): "beta_leaf",
+    }
+    assert referenced_calls(code, calls) == expected
 
 
 def test_catalog_inspect_rejects_unknown_calls_with_suggestions(
@@ -973,8 +1005,8 @@ def test_result_normalization_preserves_json_aliases(kind: str, tmp_path: Path) 
     )
     result = mcp_types.CallToolResult(
         content=[],
-        structuredContent={"result": supplied} if wrapped else supplied,
-        _meta={"fastmcp": {"wrap_result": True}} if kind == "wrapped_meta" else None,
+        structured_content={"result": supplied} if wrapped else supplied,
+        meta={"fastmcp": {"wrap_result": True}} if kind == "wrapped_meta" else None,
     )
     assert catalog.normalize_result("demo_echo", result) == supplied
 

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import ast
 import asyncio
 import os
 import re
-import textwrap
 import time
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
@@ -53,7 +51,7 @@ from .refinement_cache import RefinementCache, ResultReferenceError
 from .runtime_paths import resolve_runtime_paths
 from .settings import CodeMcpSettings, load_settings
 from .stats import OperationFailure, OperationObservation, StatsStore
-from .tool_catalog import ToolCatalog, schema_path_summary
+from .tool_catalog import ToolCatalog, referenced_calls, referenced_namespaces, schema_path_summary
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
@@ -363,6 +361,7 @@ class GatewayRuntime:
         )
 
     async def close(self) -> None:
+        await self.executor.close()
         self.refinement_cache.clear()
         await asyncio.gather(
             *(handle.close() for handle in self.handles.values()),
@@ -940,6 +939,7 @@ class GatewayRuntime:
         try:
             await self.executor.validate_saved_chain(code, candidate_catalog, spec)
         except (
+            pydantic_monty.MontyCrashedError,
             pydantic_monty.MontyTypingError,
             pydantic_monty.MontySyntaxError,
             pydantic_monty.MontyRuntimeError,
@@ -947,7 +947,7 @@ class GatewayRuntime:
             RuntimeError,
         ) as error:
             if isinstance(error, pydantic_monty.MontyTypingError):
-                message = error.display("concise", color=False).strip()
+                message = error.display().strip()
             elif isinstance(
                 error,
                 (pydantic_monty.MontySyntaxError, pydantic_monty.MontyRuntimeError),
@@ -1080,6 +1080,7 @@ class GatewayRuntime:
         try:
             await self.executor.validate_saved_chain(current.code, candidate_catalog, spec)
         except (
+            pydantic_monty.MontyCrashedError,
             pydantic_monty.MontyTypingError,
             pydantic_monty.MontySyntaxError,
             pydantic_monty.MontyRuntimeError,
@@ -1087,7 +1088,7 @@ class GatewayRuntime:
             RuntimeError,
         ) as error:
             if isinstance(error, pydantic_monty.MontyTypingError):
-                message = error.display("concise", color=False).strip()
+                message = error.display().strip()
             elif isinstance(
                 error,
                 (pydantic_monty.MontySyntaxError, pydantic_monty.MontyRuntimeError),
@@ -1371,13 +1372,13 @@ class GatewayRuntime:
             chains,
         )
 
+    @staticmethod
     def _chain_dependencies(
-        self,
         code: str,
         catalog: ToolCatalog,
     ) -> list[ChainDependency]:
         dependencies: dict[str, ChainDependency] = {}
-        for public_name in self._referenced_callables(code, catalog):
+        for public_name in referenced_calls(code, catalog.facade_calls):
             spec = catalog.tools[public_name]
             dependencies[public_name] = ChainDependency(
                 kind=spec.kind,
@@ -1456,7 +1457,7 @@ class GatewayRuntime:
 
     def _required_servers_for_code(self, code: str) -> set[str]:
         required = self._referenced_servers(code)
-        for public_name in self._referenced_callables(code, self.catalog):
+        for public_name in referenced_calls(code, self.catalog.facade_calls):
             spec = self.catalog.tools[public_name]
             if spec.kind == "saved_chain":
                 required.update(
@@ -1484,35 +1485,9 @@ class GatewayRuntime:
                 required.update(self._required_servers_for_chain(target, seen))
         return required
 
-    @staticmethod
-    def _referenced_callables(code: str, catalog: ToolCatalog) -> set[str]:
-        tree = _parse_code(code)
-        if tree is None:
-            return set()
-        referenced: set[str] = set()
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-                continue
-            owner = node.func.value
-            if not isinstance(owner, ast.Name):
-                continue
-            public_name = catalog.facade_calls.get((owner.id, node.func.attr))
-            if public_name is not None:
-                referenced.add(public_name)
-        return referenced
-
     def _referenced_servers(self, code: str) -> set[str]:
-        tree = _parse_code(code)
-        if tree is None:
-            return set()
         aliases = {alias: server for server, alias in self.catalog.server_aliases.items()}
-        return {
-            aliases[node.value.id]
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id in aliases
-        }
+        return {aliases[name] for name in referenced_namespaces(code, set(aliases))}
 
 
 def _saved_chain_preflight_error(message: str, output_schema: JsonObject) -> str:
@@ -1629,15 +1604,6 @@ def _execution_failure_subtype(response: ExecutionResponse) -> str:
 
 def _discovery_error_message(error: Exception) -> str:
     return str(error).strip() or type(error).__name__
-
-
-def _parse_code(code: str) -> ast.AST | None:
-    normalized = textwrap.dedent(code).strip("\n")
-    wrapped = f"async def __codemcp_main():\n{textwrap.indent(normalized, '    ')}\n"
-    try:
-        return ast.parse(wrapped, mode="exec")
-    except SyntaxError:
-        return None
 
 
 def _compact_description(description: str | None, limit: int = 160) -> str | None:

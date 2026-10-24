@@ -595,9 +595,12 @@ async def test_execute_consumes_result_reference_and_rejects_foreign_reference(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prefix, namespace", [("", "alpha"), ("api = alpha\n", "api")])
 async def test_first_execute_discovers_and_connects_only_referenced_server(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+    namespace: str,
 ) -> None:
     root = Path(__file__).parents[2]
     fixture = root / "tests" / "fixtures" / "upstream_server.py"
@@ -614,7 +617,8 @@ async def test_first_execute_discovers_and_connects_only_referenced_server(
                 await client.call_tool(
                     "execute",
                     {
-                        "code": 'value = await alpha.get_number({"seed": 2})\n'
+                        "code": prefix
+                        + f'value = await {namespace}.get_number({{"seed": 2}})\n'
                         'return value["value"]',
                         "trace_id": TRACE_ID,
                     },
@@ -828,12 +832,12 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
         assert "$.value: integer (required)" in validation_message
         assert "Actual type-check result" in validation_message
 
-        with pytest.raises(ValueError, match="class definitions"):
+        with pytest.raises(ValueError, match="yield"):
             await runtime.chains.save(
                 scope="global",
-                name="unsupported_class",
+                name="unsupported_generator",
                 description="Reject code the runtime cannot compile.",
-                code='class Item:\n    pass\nreturn {"value": 1}',
+                code='def items():\n    yield 1\nreturn {"value": 1}',
                 input_schema=integer_input,
                 output_schema=integer_output,
                 trace_id=TRACE_ID,
@@ -846,7 +850,8 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
             code="""
             if input["count"] == 0:
                 return {"value": 0}
-            previous = await chains.countdown({"count": input["count"] - 1})
+            api = chains
+            previous = await api.countdown({"count": input["count"] - 1})
             return {"value": previous["value"] + 1}
             """,
             input_schema=integer_input,
@@ -861,11 +866,13 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
             "chains.countdown"
         ]
 
+        runtime.executor.settings.max_calls = 3
         native = await runtime.chains.execute("countdown", {"count": 3}, TRACE_ID)
         assert native.ok is True
         assert native.result == {"value": 3}
         assert native.calls_made == 0
         assert native.chain_calls == 3
+        runtime.executor.settings.max_calls = 50
 
         composed = await runtime.execute(
             'result = await chains.countdown({"count": 2})\nreturn result["value"]',
@@ -882,19 +889,36 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
         assert too_deep.error and "recursion depth exceeded 4" in too_deep.error
         runtime.executor.settings.max_chain_depth = 16
 
-        await runtime.chains.save(
+        saved_pair = await runtime.chains.save(
             scope="global",
             name="double_countdown",
             description="Compose the countdown chain twice.",
             code="""
-            first = await chains.countdown({"count": input["count"]})
-            second = await chains.countdown({"count": input["count"]})
+            import asyncio
+            api = chains
+            first, second = await asyncio.gather(
+                api.countdown({"count": input["count"]}),
+                api.countdown({"count": input["count"]}),
+            )
             return {"value": first["value"] + second["value"]}
             """,
             input_schema=integer_input,
             output_schema=integer_output,
             trace_id=TRACE_ID,
         )
+        assert [
+            dependency.call for dependency in saved_pair.chain.chain.dependencies
+        ] == ["chains.countdown"]
+        revalidated = await runtime.chains.revalidate(
+            "double_countdown", "global", TRACE_ID
+        )
+        assert [dependency.call for dependency in revalidated.chain.dependencies] == [
+            "chains.countdown"
+        ]
+        recursive = await runtime.chains.revalidate("countdown", "global", TRACE_ID)
+        assert [dependency.call for dependency in recursive.chain.dependencies] == [
+            "chains.countdown"
+        ]
         chained = await runtime.chains.execute(
             "double_countdown", {"count": 2}, TRACE_ID
         )

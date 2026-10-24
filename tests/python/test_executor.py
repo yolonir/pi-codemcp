@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from collections.abc import AsyncIterator, Iterable
 
+import pydantic_monty
 import pytest
 from mcp import types as mcp_types
 from pydantic import ValidationError
@@ -16,8 +19,27 @@ from sidecar.json_types import JsonObject, JsonValue
 from sidecar.refinement_cache import RefinementCache
 from sidecar.tool_catalog import ToolCatalog
 
-
 OBJECT = {"type": "object", "properties": {}, "additionalProperties": False}
+
+
+@pytest.fixture(autouse=True)
+async def close_executors(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
+    executors: list[MontyExecutor] = []
+    original = MontyExecutor.__init__
+
+    def initialize(
+        self: MontyExecutor,
+        catalog: ToolCatalog,
+        *,
+        settings: ExecutionSettings | None = None,
+    ) -> None:
+        original(self, catalog, settings=settings)
+        executors.append(self)
+
+    monkeypatch.setattr(MontyExecutor, "__init__", initialize)
+    yield
+    for executor in executors:
+        await executor.close()
 
 
 def test_execution_models_reject_invalid_states_and_limits() -> None:
@@ -37,13 +59,13 @@ def tool(
 ) -> mcp_types.Tool:
     return mcp_types.Tool(
         name=name,
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": properties,
             "required": required,
             "additionalProperties": False,
         },
-        outputSchema=output,
+        output_schema=output,
     )
 
 
@@ -162,6 +184,112 @@ async def test_preflight_errors_make_zero_calls(code: str) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (
+            'from collections import Counter\nreturn dict(Counter(["a", "b", "a"]))',
+            {"a": 2, "b": 1},
+        ),
+        (
+            (
+                "from itertools import batched\n"
+                "return [list(batch) for batch in batched([1, 2, 3], 2)]"
+            ),
+            [[1, 2], [3]],
+        ),
+        ('import base64\nreturn base64.b64decode("aGk=").decode()', "hi"),
+        (
+            (
+                "from dataclasses import dataclass\n@dataclass\nclass Item:\n"
+                '    name: str\nreturn Item("hello").name'
+            ),
+            "hello",
+        ),
+    ],
+)
+async def test_documented_python_capabilities(code: str, expected: JsonValue) -> None:
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        raise AssertionError("pure data processing must not call MCP")
+
+    response = await MontyExecutor(catalog()).execute(code, call)
+    assert response.ok is True, response.error
+    assert response.result == expected
+    assert response.calls_made == 0
+
+
+@pytest.mark.asyncio
+async def test_worker_reuse_isolates_programs_and_closes_processes() -> None:
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        raise AssertionError("no MCP calls expected")
+
+    executor = MontyExecutor(catalog())
+    code = """
+    if not isinstance(input, dict):
+        return None
+    input["value"] = expect_integer(input["value"]) + 1
+    return input
+    """
+    original: JsonObject = {"value": 1}
+    first = await executor.execute(code, call, input_value=original)
+    assert first.ok is True, first.error
+    assert first.result == {"value": 2}
+    assert original == {"value": 1}
+    pool = executor._pool
+    assert pool is not None
+    async with pool.checkout() as session:
+        pid = session.worker_pid
+        await session.feed_run("previous_session_value = 42")
+    assert pid is not None
+
+    second = await executor.execute(code, call, input_value={"value": 2})
+    assert second.ok is True, second.error
+    assert second.result == {"value": 3}
+    assert executor._pool is pool
+    async with pool.checkout() as session:
+        assert session.worker_pid == pid
+        with pytest.raises(pydantic_monty.MontyRuntimeError, match="NameError"):
+            await session.feed_run("previous_session_value")
+
+    executor.settings.max_calls = 1
+    third = await executor.execute(code, call, input_value=original)
+    assert third.ok is True, third.error
+    assert executor._pool is not pool
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    pool = executor._pool
+    async with pool.checkout() as session:
+        pid = session.worker_pid
+    assert pid is not None
+
+    await executor.close()
+    await executor.close()
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_print_does_not_leak_into_sidecar_protocol(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls = 0
+
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        nonlocal calls
+        calls += 1
+        return {"value": 1}
+
+    response = await MontyExecutor(catalog()).execute(
+        'print("sandbox output")\nreturn await alpha.get({"id": "one"})', call
+    )
+
+    assert response.ok is True
+    assert response.result == {"value": 1}
+    assert calls == response.calls_made == 1
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.asyncio
 async def test_progress_reports_execution_phase_and_each_call() -> None:
     events: list[tuple[int, str]] = []
 
@@ -209,7 +337,11 @@ async def test_dynamically_built_sdk_arguments_are_validated_at_runtime() -> Non
 
 
 @pytest.mark.asyncio
-async def test_invalid_sdk_arguments_are_rejected_before_mcp_call() -> None:
+@pytest.mark.parametrize("prefix, namespace", [("", "alpha"), ("api = alpha\n", "api")])
+async def test_invalid_sdk_arguments_are_rejected_before_mcp_call(
+    prefix: str,
+    namespace: str,
+) -> None:
     calls = 0
 
     async def call(_: str, __: JsonObject) -> JsonValue:
@@ -218,7 +350,7 @@ async def test_invalid_sdk_arguments_are_rejected_before_mcp_call() -> None:
         return {}
 
     response = await MontyExecutor(catalog()).execute(
-        'return await alpha.get({"id": 1})',
+        prefix + f'return await {namespace}.get({{"id": 1}})',
         call,
     )
 
@@ -231,24 +363,65 @@ async def test_invalid_sdk_arguments_are_rejected_before_mcp_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unsupported_class_definition_is_a_preflight_error() -> None:
+async def test_unsupported_generator_is_a_preflight_error() -> None:
     async def call(_: str, __: JsonObject) -> JsonValue:
         raise AssertionError("no MCP tool call expected")
 
     response = await MontyExecutor(catalog()).execute(
-        "class Item:\n    pass\nreturn 1",
+        'await alpha.get({"id": "one"})\ndef items():\n    yield 1\nreturn 1',
         call,
     )
 
     assert response.ok is False
     assert response.failure_stage == "preflight"
     assert response.calls_made == 0
-    assert response.error and "class definitions" in response.error
+    assert response.error and "yield" in response.error
 
 
 @pytest.mark.asyncio
+async def test_native_sdk_namespaces_and_synchronous_helper_references() -> None:
+    calls: list[str] = []
+
+    async def call(name: str, _: JsonObject) -> JsonValue:
+        calls.append(name)
+        return {"value": 7}
+
+    response = await MontyExecutor(catalog()).execute(
+        """
+        api = alpha
+        async def fetch():
+            return await api.get({"id": "one"})
+        result = await fetch()
+        narrow = expect_integer
+        return narrow(result["value"])
+        """,
+        call,
+    )
+    assert response.ok is True, response.error
+    assert response.result == 7
+    assert calls == ["alpha_get"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attribute", ["_methods", "__dict__", "missing"])
+async def test_native_sdk_does_not_expose_host_attributes(attribute: str) -> None:
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        raise AssertionError("no tool should run")
+
+    response = await MontyExecutor(catalog()).execute(
+        f"api = alpha\nreturn api.{attribute}", call
+    )
+    assert response.ok is False
+    assert response.calls_made == 0
+    assert response.error and attribute in response.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix, namespace", [("", "alpha"), ("api = alpha\n", "api")])
 async def test_executor_typechecks_only_referenced_sdk_stubs(
     monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+    namespace: str,
 ) -> None:
     captured: list[tuple[set[str], str | None]] = []
     original = ToolCatalog.type_stubs_for
@@ -258,9 +431,10 @@ async def test_executor_typechecks_only_referenced_sdk_stubs(
         public_names: set[str],
         *,
         include: str | None = None,
+        namespaces: Iterable[str] = (),
     ) -> str:
         captured.append((set(public_names), include))
-        return original(self, public_names, include=include)
+        return original(self, public_names, include=include, namespaces=namespaces)
 
     monkeypatch.setattr(ToolCatalog, "type_stubs_for", capture)
 
@@ -268,12 +442,23 @@ async def test_executor_typechecks_only_referenced_sdk_stubs(
         return {"value": 1}
 
     response = await MontyExecutor(catalog()).execute(
-        'return await alpha.get({"id": "one"})',
+        prefix + f'return await {namespace}.get({{"id": "one"}})',
         call,
     )
 
     assert response.ok is True
     assert captured == [({"alpha_get"}, None)]
+
+
+@pytest.mark.asyncio
+async def test_unused_namespace_alias_needs_no_tool_dependencies() -> None:
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        raise AssertionError("unused aliases must not call tools")
+
+    response = await MontyExecutor(catalog()).execute("api = alpha\nreturn 1", call)
+    assert response.ok is True, response.error
+    assert response.result == 1
+    assert response.calls_made == 0
 
 
 @pytest.mark.asyncio
@@ -612,16 +797,36 @@ async def test_narrowing_helpers_reject_wrong_runtime_shape(
 
 
 @pytest.mark.asyncio
+async def test_preflight_worker_deadline_is_reported_as_timeout() -> None:
+    executor = MontyExecutor(
+        catalog(), settings=ExecutionSettings(timeout_seconds=0.000001)
+    )
+
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        raise AssertionError("preflight must not call MCP")
+
+    response = await executor.execute("return 1", call)
+    assert response.ok is False
+    assert response.failure_stage == "timeout", response.error
+    assert response.failure is not None
+    assert response.failure.kind == "sandbox_timeout"
+    assert response.metrics.typecheck_ms > 0
+    assert response.metrics.runtime_ms == 0
+    assert response.calls_made == 0
+
+
+@pytest.mark.asyncio
 async def test_timeout_stops_infinite_sandbox_loop() -> None:
     executor = MontyExecutor(
         catalog(),
-        settings=ExecutionSettings(timeout_seconds=0.01),
+        settings=ExecutionSettings(timeout_seconds=1),
     )
 
     async def call(_: str, __: JsonObject) -> JsonValue:
         raise AssertionError("no tool call expected")
 
     response = await executor.execute("while True:\n    pass", call)
+    assert response.metrics.runtime_ms > 0
     assert response.ok is False
     assert response.failure_stage == "timeout"
     assert response.failure is not None
@@ -752,7 +957,7 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
                 text='{"columns":["1"],"rows":[[1]]}',
             )
         ],
-        isError=False,
+        is_error=False,
     )
     assert current.normalize_result("alpha_dynamic", object_result) == {
         "columns": ["1"],
@@ -761,7 +966,7 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
 
     array_result = mcp_types.CallToolResult(
         content=[mcp_types.TextContent(type="text", text='[{"id":1}]')],
-        isError=False,
+        is_error=False,
     )
     assert current.normalize_result("alpha_dynamic", array_result) == [{"id": 1}]
 
@@ -776,7 +981,7 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
     ):
         result = mcp_types.CallToolResult(
             content=[mcp_types.TextContent(type="text", text=text)],
-            isError=False,
+            is_error=False,
         )
         assert current.normalize_result("alpha_dynamic", result) == expected
 
@@ -799,8 +1004,8 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
     )
     wrapped = mcp_types.CallToolResult(
         content=[],
-        structuredContent={"result": '{"columns":["1"],"rows":[[1]]}'},
-        isError=False,
+        structured_content={"result": '{"columns":["1"],"rows":[[1]]}'},
+        is_error=False,
     )
     assert clickhouse_catalog.normalize_result("clickhouse_run_query", wrapped) == {
         "columns": ["1"],
@@ -809,8 +1014,8 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
 
     wrapped_null = mcp_types.CallToolResult(
         content=[],
-        structuredContent={"result": "null"},
-        isError=False,
+        structured_content={"result": "null"},
+        is_error=False,
     )
     assert (
         clickhouse_catalog.normalize_result("clickhouse_run_query", wrapped_null)
@@ -819,11 +1024,11 @@ async def test_normalize_result_parses_json_object_and_array_text() -> None:
 
     declared = mcp_types.CallToolResult(
         content=[],
-        structuredContent={
+        structured_content={
             "value": "null",
             "payload": '{"nested": true}',
         },
-        isError=False,
+        is_error=False,
     )
     declared_catalog = ToolCatalog.from_server_tools(
         {
@@ -897,15 +1102,15 @@ async def test_normalize_result_validates_declared_output() -> None:
     current = catalog()
     result = mcp_types.CallToolResult(
         content=[],
-        structuredContent={"value": 4},
-        isError=False,
+        structured_content={"value": 4},
+        is_error=False,
     )
     assert current.normalize_result("alpha_get", result) == {"value": 4}
 
     bad = mcp_types.CallToolResult(
         content=[],
-        structuredContent={"value": "bad"},
-        isError=False,
+        structured_content={"value": "bad"},
+        is_error=False,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         current.normalize_result("alpha_get", bad)

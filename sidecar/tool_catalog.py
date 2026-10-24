@@ -44,7 +44,6 @@ class ToolSpec(BaseModel):
     namespace: str
     method: str
     call: str
-    external_name: str
     short_name: str
     description: str | None
     input_schema: JsonObject
@@ -119,8 +118,8 @@ class ToolCatalog(BaseModel):
                 mcp_types.Tool(
                     name=chain.name,
                     description=chain.description,
-                    inputSchema=chain.input_schema,
-                    outputSchema=chain.output_schema,
+                    input_schema=chain.input_schema,
+                    output_schema=chain.output_schema,
                 ),
                 chain.public_name,
                 "chains",
@@ -181,8 +180,8 @@ class ToolCatalog(BaseModel):
                 "kind": kind,
                 "chainId": chain_id,
                 "description": tool.description,
-                "inputSchema": tool.inputSchema,
-                "outputSchema": tool.outputSchema,
+                "inputSchema": tool.input_schema,
+                "outputSchema": tool.output_schema,
             }
             for tool, public_name, server, namespace, method, kind, chain_id in prepared
         ]
@@ -199,10 +198,10 @@ class ToolCatalog(BaseModel):
         for tool, public_name, server, namespace, method, kind, chain_id in prepared:
             if public_name in specs:
                 raise ValueError(f"Duplicate MCP tool name after namespacing: {public_name}")
-            input_schema = JSON_OBJECT_ADAPTER.validate_python(tool.inputSchema)
+            input_schema = JSON_OBJECT_ADAPTER.validate_python(tool.input_schema)
             output_schema = (
-                JSON_OBJECT_ADAPTER.validate_python(tool.outputSchema)
-                if tool.outputSchema is not None
+                JSON_OBJECT_ADAPTER.validate_python(tool.output_schema)
+                if tool.output_schema is not None
                 else None
             )
             builder = StubBuilder(
@@ -225,7 +224,6 @@ class ToolCatalog(BaseModel):
                     wrapped_schema = raw_wrapped_schema
             if wrap_output and output_schema:
                 adapter_schema = wrapped_schema or True
-            external_name = f"__codemcp_{hashlib.sha256(public_name.encode()).hexdigest()[:16]}"
 
             spec = ToolSpec(
                 name=public_name,
@@ -234,7 +232,6 @@ class ToolCatalog(BaseModel):
                 namespace=namespace,
                 method=method,
                 call=call,
-                external_name=external_name,
                 short_name=tool.name,
                 description=tool.description,
                 input_schema=input_schema,
@@ -410,12 +407,18 @@ class ToolCatalog(BaseModel):
             raise ValueError(f"Unknown MCP calls: {unknown}; suggestions: {suggestions}")
         return [_tool_view(by_identifier[call], detail="full") for call in dict.fromkeys(calls)]
 
-    def type_stubs_for(self, public_names: set[str], *, include: str | None = None) -> str:
+    def type_stubs_for(
+        self,
+        public_names: set[str],
+        *,
+        include: str | None = None,
+        namespaces: Iterable[str] = (),
+    ) -> str:
         names = set(public_names)
         if include is not None:
             names.add(include)
         specs = [self.tools[name] for name in sorted(names) if name in self.tools]
-        facade_methods: dict[str, list[str]] = {}
+        facade_methods: dict[str, list[str]] = {namespace: [] for namespace in namespaces}
         definitions: list[str] = []
         for spec in specs:
             definitions.extend(spec.stub.split("\n\n") if spec.stub else [])
@@ -428,7 +431,7 @@ class ToolCatalog(BaseModel):
         for namespace in sorted(facade_methods):
             class_name = f"_{_pascal_case(namespace)}Sdk"
             facades.extend((
-                "\n".join([f"class {class_name}:", *facade_methods[namespace]]),
+                "\n".join([f"class {class_name}:", *(facade_methods[namespace] or ["    pass"])]),
                 f"{namespace}: {class_name}",
             ))
         return "\n\n".join([STUB_PRELUDE, *_dedupe(definitions), *facades])
@@ -469,19 +472,19 @@ class ToolCatalog(BaseModel):
 
     def normalize_result(self, tool_name: str, result: mcp_types.CallToolResult) -> JsonValue:
         spec = self.tools[tool_name]
-        if result.isError:
+        if result.is_error:
             message = "Upstream MCP tool returned an error"
             if result.content and isinstance(result.content[0], mcp_types.TextContent):
                 message = result.content[0].text
             raise RuntimeError(f"{tool_name}: {message}")
 
         if spec.output_schema:
-            if result.structuredContent is None:
+            if result.structured_content is None:
                 raise RuntimeError(
                     f"{tool_name}: upstream returned no structuredContent "
                     "for its declared output schema"
                 )
-            structured = JSON_VALUE_ADAPTER.validate_python(result.structuredContent)
+            structured = JSON_VALUE_ADAPTER.validate_python(result.structured_content)
             raw_meta: object = (result.meta or {}).get("fastmcp")
             wrap_from_meta = isinstance(raw_meta, dict) and bool(raw_meta.get("wrap_result"))
             if spec.output_wrap_result or wrap_from_meta:
@@ -502,9 +505,9 @@ class ToolCatalog(BaseModel):
                 return _normalize_text_result(normalized)
             return normalized
 
-        if result.structuredContent is not None:
+        if result.structured_content is not None:
             return _normalize_json_value(
-                JSON_VALUE_ADAPTER.validate_python(to_jsonable_python(result.structuredContent))
+                JSON_VALUE_ADAPTER.validate_python(to_jsonable_python(result.structured_content))
             )
         if len(result.content) == 1 and isinstance(result.content[0], mcp_types.TextContent):
             return _normalize_text_result(result.content[0].text)
@@ -782,22 +785,70 @@ def schema_path_summary(schema: JsonObject, *, limit: int = 20) -> list[str]:
     return paths
 
 
-def referenced_calls(code: str, facade_calls: dict[tuple[str, str], str]) -> set[str]:
+def _parse_code(code: str) -> ast.AST | None:
     normalized = textwrap.dedent(code).strip("\n")
     wrapped = f"async def __codemcp_main():\n{textwrap.indent(normalized, '    ')}\n"
     try:
-        tree = ast.parse(wrapped, mode="exec")
+        return ast.parse(wrapped, mode="exec")
     except SyntaxError:
+        return None
+
+
+def referenced_namespaces(code: str, namespaces: set[str]) -> set[str]:
+    tree = _parse_code(code)
+    if tree is None:
         return set()
+    return {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in namespaces
+    }
+
+
+def referenced_calls(code: str, facade_calls: dict[tuple[str, str], str]) -> set[str]:
+    tree = _parse_code(code)
+    if tree is None:
+        return set()
+    aliases = {namespace: {namespace} for namespace, _ in facade_calls}
+    assignments: dict[str, set[str]] = {}
+    owners: set[ast.Name] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not isinstance(
+            node.value, ast.Name
+        ):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        names = {target.id for target in targets if isinstance(target, ast.Name)}
+        if len(names) != len(targets):
+            continue
+        assignments.setdefault(node.value.id, set()).update(names)
+        owners.add(node.value)
+    pending = list(aliases)
+    while pending:
+        source = pending.pop()
+        for target in assignments.get(source, ()):
+            origins = aliases.setdefault(target, set())
+            if additions := aliases[source] - origins:
+                origins.update(additions)
+                pending.append(target)
+
     referenced: set[str] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
             continue
-        if not isinstance(node.func.value, ast.Name):
-            continue
-        public_name = facade_calls.get((node.func.value.id, node.func.attr))
-        if public_name is not None:
-            referenced.add(public_name)
+        owners.add(node.value)
+        for namespace in aliases.get(node.value.id, ()):
+            public_name = facade_calls.get((namespace, node.attr))
+            if public_name is not None:
+                referenced.add(public_name)
+    # Only values escaping static alias/member access require the whole namespace.
+    escaped = {
+        namespace
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node not in owners
+        for namespace in aliases.get(node.id, ())
+    }
+    referenced.update(name for (namespace, _), name in facade_calls.items() if namespace in escaped)
     return referenced
 
 
