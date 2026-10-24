@@ -850,7 +850,8 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
             code="""
             if input["count"] == 0:
                 return {"value": 0}
-            previous = await chains.countdown({"count": input["count"] - 1})
+            api = chains
+            previous = await api.countdown({"count": input["count"] - 1})
             return {"value": previous["value"] + 1}
             """,
             input_schema=integer_input,
@@ -888,7 +889,7 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
         assert too_deep.error and "recursion depth exceeded 4" in too_deep.error
         runtime.executor.settings.max_chain_depth = 16
 
-        await runtime.chains.save(
+        saved_pair = await runtime.chains.save(
             scope="global",
             name="double_countdown",
             description="Compose the countdown chain twice.",
@@ -905,6 +906,19 @@ async def test_saved_chains_are_typed_composable_and_recursion_is_bounded(
             output_schema=integer_output,
             trace_id=TRACE_ID,
         )
+        assert [
+            dependency.call for dependency in saved_pair.chain.chain.dependencies
+        ] == ["chains.countdown"]
+        revalidated = await runtime.chains.revalidate(
+            "double_countdown", "global", TRACE_ID
+        )
+        assert [dependency.call for dependency in revalidated.chain.dependencies] == [
+            "chains.countdown"
+        ]
+        recursive = await runtime.chains.revalidate("countdown", "global", TRACE_ID)
+        assert [dependency.call for dependency in recursive.chain.dependencies] == [
+            "chains.countdown"
+        ]
         chained = await runtime.chains.execute(
             "double_countdown", {"count": 2}, TRACE_ID
         )

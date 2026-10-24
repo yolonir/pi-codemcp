@@ -33,7 +33,7 @@ from .sandbox_api import (
     EXPECT_STRING_NAME,
     INSPECT_JSON_NAME,
 )
-from .tool_catalog import referenced_calls, schema_path_summary
+from .tool_catalog import referenced_calls, referenced_namespaces, schema_path_summary
 
 if TYPE_CHECKING:
     from .chains import SavedChainManifest
@@ -424,7 +424,11 @@ class MontyExecutor:
             typed=True,
         )
         referenced = referenced_calls(code, catalog.facade_calls)
-        type_stubs = catalog.type_stubs_for(referenced, include=spec.name)
+        type_stubs = catalog.type_stubs_for(
+            referenced,
+            include=spec.name,
+            namespaces=referenced_namespaces(code, {name for name, _ in catalog.facade_calls}),
+        )
         async with self._execution_lock:
             await self._type_check(wrapped, catalog, type_stubs)
 
@@ -471,6 +475,9 @@ class MontyExecutor:
         type_stubs = context.catalog.type_stubs_for(
             referenced,
             include=output_spec_name,
+            namespaces=referenced_namespaces(
+                code, {name for name, _ in context.catalog.facade_calls}
+            ),
         )
         typecheck_started = time.perf_counter()
         try:

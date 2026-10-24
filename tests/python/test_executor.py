@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 
 import pydantic_monty
 import pytest
@@ -417,8 +417,11 @@ async def test_native_sdk_does_not_expose_host_attributes(attribute: str) -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prefix, namespace", [("", "alpha"), ("api = alpha\n", "api")])
 async def test_executor_typechecks_only_referenced_sdk_stubs(
     monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+    namespace: str,
 ) -> None:
     captured: list[tuple[set[str], str | None]] = []
     original = ToolCatalog.type_stubs_for
@@ -428,9 +431,10 @@ async def test_executor_typechecks_only_referenced_sdk_stubs(
         public_names: set[str],
         *,
         include: str | None = None,
+        namespaces: Iterable[str] = (),
     ) -> str:
         captured.append((set(public_names), include))
-        return original(self, public_names, include=include)
+        return original(self, public_names, include=include, namespaces=namespaces)
 
     monkeypatch.setattr(ToolCatalog, "type_stubs_for", capture)
 
@@ -438,12 +442,23 @@ async def test_executor_typechecks_only_referenced_sdk_stubs(
         return {"value": 1}
 
     response = await MontyExecutor(catalog()).execute(
-        'return await alpha.get({"id": "one"})',
+        prefix + f'return await {namespace}.get({{"id": "one"}})',
         call,
     )
 
     assert response.ok is True
     assert captured == [({"alpha_get"}, None)]
+
+
+@pytest.mark.asyncio
+async def test_unused_namespace_alias_needs_no_tool_dependencies() -> None:
+    async def call(_: str, __: JsonObject) -> JsonValue:
+        raise AssertionError("unused aliases must not call tools")
+
+    response = await MontyExecutor(catalog()).execute("api = alpha\nreturn 1", call)
+    assert response.ok is True, response.error
+    assert response.result == 1
+    assert response.calls_made == 0
 
 
 @pytest.mark.asyncio

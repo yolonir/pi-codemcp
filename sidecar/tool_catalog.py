@@ -407,12 +407,18 @@ class ToolCatalog(BaseModel):
             raise ValueError(f"Unknown MCP calls: {unknown}; suggestions: {suggestions}")
         return [_tool_view(by_identifier[call], detail="full") for call in dict.fromkeys(calls)]
 
-    def type_stubs_for(self, public_names: set[str], *, include: str | None = None) -> str:
+    def type_stubs_for(
+        self,
+        public_names: set[str],
+        *,
+        include: str | None = None,
+        namespaces: Iterable[str] = (),
+    ) -> str:
         names = set(public_names)
         if include is not None:
             names.add(include)
         specs = [self.tools[name] for name in sorted(names) if name in self.tools]
-        facade_methods: dict[str, list[str]] = {}
+        facade_methods: dict[str, list[str]] = {namespace: [] for namespace in namespaces}
         definitions: list[str] = []
         for spec in specs:
             definitions.extend(spec.stub.split("\n\n") if spec.stub else [])
@@ -425,7 +431,7 @@ class ToolCatalog(BaseModel):
         for namespace in sorted(facade_methods):
             class_name = f"_{_pascal_case(namespace)}Sdk"
             facades.extend((
-                "\n".join([f"class {class_name}:", *facade_methods[namespace]]),
+                "\n".join([f"class {class_name}:", *(facade_methods[namespace] or ["    pass"])]),
                 f"{namespace}: {class_name}",
             ))
         return "\n\n".join([STUB_PRELUDE, *_dedupe(definitions), *facades])
@@ -803,20 +809,44 @@ def referenced_calls(code: str, facade_calls: dict[tuple[str, str], str]) -> set
     tree = _parse_code(code)
     if tree is None:
         return set()
-    referenced: set[str] = set()
+    aliases = {namespace: {namespace} for namespace, _ in facade_calls}
+    assignments: dict[str, set[str]] = {}
     owners: set[ast.Name] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not isinstance(
+            node.value, ast.Name
+        ):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        names = {target.id for target in targets if isinstance(target, ast.Name)}
+        if len(names) != len(targets):
+            continue
+        assignments.setdefault(node.value.id, set()).update(names)
+        owners.add(node.value)
+    pending = list(aliases)
+    while pending:
+        source = pending.pop()
+        for target in assignments.get(source, ()):
+            origins = aliases.setdefault(target, set())
+            if additions := aliases[source] - origins:
+                origins.update(additions)
+                pending.append(target)
+
+    referenced: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
             continue
         owners.add(node.value)
-        public_name = facade_calls.get((node.value.id, node.attr))
-        if public_name is not None:
-            referenced.add(public_name)
-    # Passing a namespace as a value exposes its whole interface, including through aliases.
+        for namespace in aliases.get(node.value.id, ()):
+            public_name = facade_calls.get((namespace, node.attr))
+            if public_name is not None:
+                referenced.add(public_name)
+    # Only values escaping static alias/member access require the whole namespace.
     escaped = {
-        node.id
+        namespace
         for node in ast.walk(tree)
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node not in owners
+        for namespace in aliases.get(node.id, ())
     }
     referenced.update(name for (namespace, _), name in facade_calls.items() if namespace in escaped)
     return referenced
