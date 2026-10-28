@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/yolonir/pi-codemcp/compare/v2.0.0...v2.0.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* allow larger remote SSE events ([#71](https://github.com/yolonir/pi-codemcp/issues/71)) ([5bf846a](https://github.com/yolonir/pi-codemcp/commit/5bf846a8ccb45b9b32c0f3fcdd79b98738ddae40))
+
 ## [2.0.0](https://github.com/yolonir/pi-codemcp/compare/v1.5.2...v2.0.0) (2026-10-24)
 
 
