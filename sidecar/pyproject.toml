@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Python sidecar for pi-codemcp"
 requires-python = ">=3.13"
 dependencies = [
-  "fastmcp==4.0.5",
+  "fastmcp==4.1.4",
   "httpx2==2.16.0",
   "pydantic==2.13.5",
   "pydantic-monty==0.0.23",

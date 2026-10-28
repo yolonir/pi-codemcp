@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
 PI_ONLY_FIELDS = {"directTools", "lifecycle", "idleTimeout", "disabled", "enabled"}
 REMOTE_TRANSPORTS = {"http", "streamable-http", "sse"}
+DEFAULT_MAX_SSE_EVENT_SIZE_BYTES = 8 * 1024 * 1024
 BASE_CHILD_ENV_KEYS = {
     "CI",
     "COLORTERM",
@@ -515,6 +516,9 @@ def normalize_mcp_config(
                 **cleaned,
                 "transport": transport,
                 "auth": auth,
+                "max_sse_event_size": cleaned.get(
+                    "max_sse_event_size", DEFAULT_MAX_SSE_EVENT_SIZE_BYTES
+                ),
             })
             normalized_servers[name] = remote_server
             server_infos.append(
