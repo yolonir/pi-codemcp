@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx2 as httpx
 import pytest
 from fastmcp.client.auth import OAuth
+from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.mcp_config import RemoteMCPServer, StdioMCPServer
 from mcp import types as mcp_types
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
@@ -115,6 +116,10 @@ def test_normalize_config_supports_transports_and_skips_disabled(
     http_server = normalized.config.mcpServers["http"]
     assert isinstance(http_server, RemoteMCPServer)
     assert http_server.headers["authorization"] == "Bearer secret-token"
+    assert http_server.max_sse_event_size == 8 * 1024 * 1024
+    http_transport = http_server.to_transport()
+    assert isinstance(http_transport, StreamableHttpTransport)
+    assert http_transport.max_sse_event_size == 8 * 1024 * 1024
 
 
 @pytest.mark.asyncio
