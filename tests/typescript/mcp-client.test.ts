@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { changeProfileFromManager } from "../../extensions/index.js";
-import { SidecarClient, type SidecarToolName, sidecarToolTimeoutMs } from "../../src/mcp-client.js";
+import { CodeMcpLifecycle } from "../../src/lifecycle.js";
+import { type SidecarToolName, sidecarToolTimeoutMs } from "../../src/mcp-client.js";
 import { loadCodeMcpSettings, saveCodeMcpSettings } from "../../src/settings.js";
 
 const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
@@ -24,6 +25,7 @@ async function waitForExit(pid: number): Promise<void> {
 
 test("OAuth-capable calls outlive the interactive callback window", () => {
   const oauthCapable: SidecarToolName[] = [
+    "warmup",
     "search",
     "inspect",
     "discover",
@@ -72,19 +74,26 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     "utf8",
   );
 
-  const client = new SidecarClient({
+  const lifecycle = new CodeMcpLifecycle({
     packageRoot: root,
     agentDir: temporary,
     projectChainsPath,
     workingDirectory,
   });
+  const client = lifecycle.sidecar;
   let sidecarPid: number | null = null;
   let upstreamPids: number[] = [];
   try {
-    const [search, initialStatus] = await Promise.all([
-      client.call("search", { query: "save number", limit: 5, trace_id: traceId }),
-      client.call("status", {}),
-    ]);
+    const initialStatus = await client.call("status", {});
+    expect(initialStatus).toMatchObject({ connected: true, tool_count: 0 });
+    await lifecycle.warmup();
+    const warmedStatus = await client.call("status", {});
+    expect(warmedStatus).toMatchObject({ connected: true, tool_count: 4 });
+    const search = await client.call("search", {
+      query: "save number",
+      limit: 5,
+      trace_id: traceId,
+    });
     const matches = search.results as Array<{ name: string; signature: string; stub?: string }>;
     expect(matches[0]?.name).toBe("beta_save_number");
     expect(matches[0]?.signature).toContain("BetaSaveNumberArgs");
@@ -96,7 +105,6 @@ test("stdio client runs typed search/chains, forwards cancellation, and cleans u
     });
     expect(inspected.prelude).toContain("JsonValue: TypeAlias");
     expect((inspected.results as Array<{ stub: string }>)[0]?.stub).toContain("BetaSaveNumberArgs");
-    expect(initialStatus).toMatchObject({ connected: true, tool_count: 0 });
     expect(
       await readFile(join(temporary, "pi-codemcp", "runtime", "venv", "pyvenv.cfg"), "utf8"),
     ).toContain("version");

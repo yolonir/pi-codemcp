@@ -18,6 +18,7 @@ import { loadCodeMcpSettings } from "./settings.js";
 type JsonObject = Record<string, unknown>;
 
 export type SidecarToolName =
+  | "warmup"
   | "search"
   | "inspect"
   | "discover"
@@ -41,6 +42,7 @@ const LONG_RUNNING_TOOLS = new Set<SidecarToolName>([
   "revalidate_chain",
 ]);
 const OAUTH_CAPABLE_TOOLS = new Set<SidecarToolName>([
+  "warmup",
   "search",
   "inspect",
   "discover",

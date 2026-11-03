@@ -154,6 +154,50 @@ def test_gateway_reports_an_all_disabled_config(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_warmup_discovers_available_servers_despite_failures(
+    tmp_path: Path,
+) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures" / "upstream_server.py"
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "alpha": {
+                        "command": sys.executable,
+                        "args": [str(fixture), "alpha"],
+                    },
+                    "broken": {"command": str(tmp_path / "missing")},
+                    "disabled": {
+                        "command": str(tmp_path / "missing"),
+                        "disabled": True,
+                    },
+                }
+            }
+        )
+    )
+    runtime = gateway.GatewayRuntime.create(
+        config_path, tmp_path / "oauth", tmp_path / "catalog"
+    )
+    try:
+        failures = await runtime.discover_missing()
+        assert [failure.server for failure in failures] == ["broken"]
+        status = runtime.status()
+        assert status.tool_count == 3
+        assert {
+            upstream.name: upstream.discovered for upstream in status.upstreams
+        } == {
+            "alpha": True,
+            "broken": False,
+            "disabled": False,
+        }
+        response = await runtime.search("number", server="alpha", trace_id=TRACE_ID)
+        assert response.results
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_force_discover_refreshes_only_the_selected_server(
     tmp_path: Path,
 ) -> None:
@@ -301,6 +345,7 @@ async def test_gateway_lazy_connections_cache_facade_and_cleanup(
     async with client:
         exposed = {tool.name for tool in await client.list_tools()}
         assert exposed == {
+            "warmup",
             "search",
             "inspect",
             "discover",

@@ -49,7 +49,7 @@ export class CodeMcpLifecycle {
   }
 
   async warmup(): Promise<void> {
-    await this.request("status", {});
+    await this.request("warmup", {});
   }
 
   reload(): Promise<void> {

@@ -438,7 +438,7 @@ class GatewayRuntime:
         else:
             discovery_servers = (server,)
         if server is None:
-            discovery_failures = await self._discover_servers_for_unscoped_search(discovery_servers)
+            discovery_failures = await self.discover_missing()
         else:
             await self._ensure_servers_discovered(discovery_servers)
             discovery_failures = []
@@ -1310,16 +1310,8 @@ class GatewayRuntime:
     async def _ensure_catalog_complete(self) -> None:
         await self._ensure_servers_discovered(self.handles.keys())
 
-    async def _discover_servers_for_unscoped_search(
-        self,
-        server_names: Iterable[str],
-    ) -> list[ServerDiscoveryFailure]:
-        requested = set(server_names)
-        missing = [
-            (name, handle)
-            for name, handle in self.handles.items()
-            if name in requested and handle.tools is None
-        ]
+    async def discover_missing(self) -> list[ServerDiscoveryFailure]:
+        missing = [(name, handle) for name, handle in self.handles.items() if handle.tools is None]
         if not missing:
             return []
         results = await asyncio.gather(
@@ -1676,6 +1668,12 @@ mcp = FastMCP(
     ),
     lifespan=lifespan,
 )
+
+
+@mcp.tool
+async def warmup() -> dict[str, int]:
+    """Discover enabled upstream catalogs missing from the cache."""
+    return {"failed": len(await _require_runtime().discover_missing())}
 
 
 @mcp.tool
