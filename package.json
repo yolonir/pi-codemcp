@@ -33,6 +33,7 @@
     ".python-version",
     "README.md",
     "CHANGELOG.md",
+    "PI_CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
@@ -50,6 +51,7 @@
     "extensions": [
       "./extensions/index.ts"
     ],
+    "changelogPath": "./PI_CHANGELOG.md",
     "image": "https://raw.githubusercontent.com/yolonir/pi-codemcp/main/media/preview.png"
   },
   "dependencies": {
