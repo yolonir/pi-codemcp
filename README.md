@@ -89,7 +89,7 @@ Press **A** on the Servers tab to add a server without leaving `/codemcp`. Searc
 
 ## Settings
 
-Edit settings in `/codemcp` or `<agent-dir>/pi-codemcp/settings.json`. Defaults: 30-second execution and tool timeouts, 50 upstream calls, 16 KiB returned data, 50 KiB rendered output, and a 24-hour catalog cache.
+Edit settings in `/codemcp` or `<agent-dir>/pi-codemcp/settings.json`. Defaults: 30-second execution and tool timeouts, 50 upstream calls, 16 KiB returned data, 50 KiB rendered output, and a 24-hour catalog cache. Background warmup starts the sidecar and discovers enabled servers whose catalogs are missing or expired; OAuth servers may prompt for sign-in during startup.
 
 <details>
 <summary>Settings JSON</summary>

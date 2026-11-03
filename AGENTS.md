@@ -20,5 +20,6 @@ Commits and releases:
 - Use Conventional Commit titles for PRs and squash commits: `fix:` for a patch, `feat:` for a minor, and `feat!:` or `BREAKING CHANGE:` for a major. Use `chore:`, `docs:`, or `test:` for changes that should not normally release the package.
 - Merge ordinary branches into `main` only through a green PR. This updates or creates the Release Please PR but does not publish a release.
 - Treat the Release Please PR (`chore(main): release X.Y.Z`) as the explicit release boundary. Merge it only when the user explicitly says to release that version now.
+- Keep `PI_CHANGELOG.md` separate from Release Please's `CHANGELOG.md`; add the maintainer's message under the intended release version.
 - Never infer permission to tag, create a GitHub Release, or publish to npm from permission to configure release automation, merge a feature PR, or prepare a version.
 - A release is complete only after the release PR is merged, exact-main Quality succeeds, and the Release workflow creates the tag/GitHub Release and publishes the npm package.

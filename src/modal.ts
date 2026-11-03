@@ -196,7 +196,8 @@ const SETTING_DEFINITIONS: SettingDefinition[] = [
   {
     key: "backgroundWarmup",
     label: "Background warmup",
-    description: "Start the Python sidecar in the background when a Pi session starts.",
+    description:
+      "Start the sidecar and discover uncached servers in the background at session start.",
     choices: [
       { value: true, label: "on" },
       { value: false, label: "off" },

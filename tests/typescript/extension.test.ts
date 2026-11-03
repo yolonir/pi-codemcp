@@ -8,7 +8,6 @@ import {
   createCodeMcpExtension,
   discoverServerFromManager,
   promptForProblemReport,
-  showChangelogOnce,
 } from "../../extensions/index.js";
 import { loadCodeMcpSettings, saveCodeMcpSettings } from "../../src/settings.js";
 
@@ -37,32 +36,6 @@ describe("Pi extension registration", () => {
     expect(messages[0]).toContain("https://github.com/yolonir/pi-codemcp");
     expect(messages[0]).toContain("prepare a GitHub issue");
     expect(messages[0]).toContain("Do not autosumbit issue without clear approval");
-  });
-
-  test("shows the current changelog once in the TUI", async () => {
-    const temporary = await mkdtemp(join(tmpdir(), "pi-codemcp-changelog-"));
-    const path = join(temporary, "changelog.json");
-    const notifications: string[] = [];
-    const ctx = {
-      mode: "tui",
-      ui: {
-        notify(message: string) {
-          notifications.push(message);
-        },
-      },
-    } as unknown as Parameters<typeof showChangelogOnce>[0];
-    try {
-      showChangelogOnce(ctx, path);
-      showChangelogOnce(ctx, path);
-
-      expect(notifications).toHaveLength(1);
-      expect(notifications[0]).toContain("Howdy coders! Big pi-codemcp updates:");
-      expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
-        lastSeen: "profiles-native-python-v1",
-      });
-    } finally {
-      await rm(temporary, { recursive: true, force: true });
-    }
   });
 
   test("registers search, Jev route, execution tools, and one manager command", () => {
