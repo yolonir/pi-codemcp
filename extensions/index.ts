@@ -1,5 +1,5 @@
 import { existsSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import {
   CONFIG_DIR_NAME,
   type ExtensionAPI,
@@ -15,7 +15,6 @@ import {
 } from "../src/config.js";
 import { summarizeError } from "../src/errors.js";
 import { JevRouter } from "../src/jev-router.js";
-import { readJsonObject, writeJsonObjectAtomically } from "../src/json-file.js";
 import { CodeMcpLifecycle } from "../src/lifecycle.js";
 import type { SidecarClientOptions } from "../src/mcp-client.js";
 import {
@@ -129,11 +128,6 @@ export function createCodeMcpExtension(options: CodeMcpExtensionOptions = {}) {
     });
 
     pi.on("session_start", (_event, ctx) => {
-      try {
-        showChangelogOnce(ctx, join(dirname(lifecycle.settingsPath), "changelog.json"));
-      } catch (error) {
-        ctx.ui.notify(`CodeMCP changelog failed: ${summarizeError(error)}`, "warning");
-      }
       bindProjectChainScope(ctx, lifecycle, chains);
       chains.activatePersisted();
       for (const error of chains.startupErrors) ctx.ui.notify(error, "warning");
@@ -260,27 +254,6 @@ export async function changeProfileFromManager(
 }
 
 export default createCodeMcpExtension();
-
-const CHANGELOG_ID = "profiles-native-python-v1";
-const CHANGELOG_MESSAGE =
-  "Howdy coders! Big pi-codemcp updates:\n\n" +
-  "- I'd say the biggest update is Monty runtime upgrade, they now support lot of cool new useful stuff so now sandbox is less castrated. Expect more efficient code generation by agents, faster runtime, less errors. Can't stop winning\n" +
-  "- My favorite update is MCP profiles. I have like 20 servers, some of them are for work, some for personal stuff, I found myself constantly toggling specific lists on and off. Now you can create an MCP profile! Very useful, test it out.\n" +
-  "- @scytem requested functionality to add MCP servers directly within pi-codemcp from a catalog or pasted config in /codemcp (A). @scytem you can add MCP servers dedup and stars sorting yourself, you are very much welcome!\n" +
-  "- @fu5ha had issues with tool search in large catalogs. It was clanky, I agree. Now it's way simpler for agents to navigate large catalogs\n\n" +
-  "I am pretty happy with pi-codemcp extension. I believe pi went the wrong way by doing native MCP support, I found it pretty shitty. As always, if there is something that you are not happy with, hit me with an issue (/codemcp -> R). Cheers!\n" +
-  "@yolonir";
-
-export function showChangelogOnce(
-  ctx: Pick<ExtensionCommandContext, "mode" | "ui">,
-  path: string,
-): void {
-  if (ctx.mode !== "tui") return;
-  const state = existsSync(path) ? readJsonObject(path, "CodeMCP changelog state") : {};
-  if (state.lastSeen === CHANGELOG_ID) return;
-  ctx.ui.notify(CHANGELOG_MESSAGE, "info");
-  writeJsonObjectAtomically(path, { lastSeen: CHANGELOG_ID });
-}
 
 function createJevClient(): TypeSafeClient | undefined {
   return process.env.TYPESAFE_API_KEY?.trim() ? new TypeSafeClient() : undefined;

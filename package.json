@@ -32,6 +32,7 @@
     "sidecar/uv.lock",
     ".python-version",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {

@@ -102,6 +102,7 @@ release-check:
     [[ -f "$package_root/extensions/index.ts" ]]
     [[ -f "$package_root/sidecar/uv.lock" ]]
     [[ -f "$package_root/.python-version" ]]
+    [[ -f "$package_root/CHANGELOG.md" ]]
     [[ ! -e "$package_root/tests" ]]
     [[ ! -e "$package_root/.github" ]]
     if find "$package_root/sidecar" -type d -name __pycache__ -print -quit | grep -q .; then
