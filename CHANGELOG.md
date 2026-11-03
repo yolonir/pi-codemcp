@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.2](https://github.com/yolonir/pi-codemcp/compare/v2.0.1...v2.0.2) (2026-11-03)
+
+
+### Bug Fixes
+
+* warm server catalogs during startup ([#75](https://github.com/yolonir/pi-codemcp/issues/75)) ([9e6beb5](https://github.com/yolonir/pi-codemcp/commit/9e6beb53527f6da03a051f7e3a915df5e68ac65a))
+
 ## [2.0.1](https://github.com/yolonir/pi-codemcp/compare/v2.0.0...v2.0.1) (2026-10-28)
 
 
